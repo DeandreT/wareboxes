@@ -1,6 +1,6 @@
 .shipping-workspace {
   display: grid;
-  min-width: 1050px;
+  min-width: 0;
   min-height: calc(100vh - 108px);
   grid-template-rows: 43px minmax(0, 1fr);
   overflow: hidden;
@@ -563,7 +563,7 @@
 
 .shipping-shipment-cancel {
   width: calc(100% - 18px);
-  min-height: 38px;
+  min-height: var(--control-height);
   justify-content: center;
   margin: 0 9px 9px;
 }
@@ -806,7 +806,7 @@
 
 .shipping-manifest > .primary-action,
 .shipping-departure > .primary-action {
-  min-height: 38px;
+  min-height: var(--control-height);
   margin: 0 9px 9px;
 }
 

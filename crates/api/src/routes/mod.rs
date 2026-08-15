@@ -9,8 +9,13 @@ use validator::Validate;
 use wareboxes_application::{ApplicationError, ValidationIssue};
 
 use crate::error::{AppError, AppResult};
+use crate::health;
+use crate::observability;
+#[cfg(feature = "openapi")]
+use crate::openapi;
 use crate::request_context::{assign_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
+use crate::traffic;
 
 pub mod access;
 pub mod audits;
@@ -251,8 +256,19 @@ pub fn app(state: AppState) -> Router {
         .route("/audits/{audit_id}/counts", get(audits::counts));
 
     let security = state.security.clone();
-    let mut app = Router::new()
-        .route("/health", get(|| async { "ok" }))
+    let metrics = state.metrics.clone();
+    let traffic_gate = state.traffic.clone();
+    let app = Router::new()
+        .route("/health", get(health::ready))
+        .route("/health/live", get(health::live))
+        .route("/health/ready", get(health::ready))
+        .route("/metrics", get(observability::metrics));
+    #[cfg(feature = "openapi")]
+    let app = app.route(
+        "/openapi/integrations/v1.json",
+        get(openapi::serve_integration_api_v1),
+    );
+    let mut app = app
         .nest("/api", api)
         .nest(wareboxes_api_contract::v1::API_PREFIX, v1::router())
         .layer(
@@ -271,6 +287,14 @@ pub fn app(state: AppState) -> Router {
             }),
         )
         .layer(DefaultBodyLimit::max(security.max_request_body_bytes))
+        .layer(middleware::from_fn_with_state(
+            traffic_gate,
+            traffic::enforce,
+        ))
+        .layer(middleware::from_fn_with_state(
+            metrics,
+            observability::observe_request,
+        ))
         .layer(middleware::from_fn(assign_request_id));
 
     if !security.cors_allowed_origins.is_empty() {

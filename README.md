@@ -4,12 +4,16 @@ Wareboxes is a warehouse management system prototype.
 
 The durable workspace and runtime boundaries are documented in
 [`docs/architecture.md`](docs/architecture.md). Product delivery gates are tracked
-in [`ROADMAP.md`](ROADMAP.md).
+in [`ROADMAP.md`](ROADMAP.md), and binding architecture choices are indexed in
+[`docs/decisions`](docs/decisions/README.md).
+The repository evidence for the safety and platform foundation gate is recorded in
+[`docs/milestones/0000-safety-platform-foundation.md`](docs/milestones/0000-safety-platform-foundation.md).
 
 ## Workspace
 
 - `apps/server`: API and SSR process composition root
 - `apps/worker`: background delivery process composition root
+- `apps/edge-agent`: durable local bridge for automation and facility devices
 - `apps/web-ops`: Leptos SSR operations web application
 - `apps/rf-android`: native Android warehouse execution client
 - `crates/api`: Axum routes, authentication, and Leptos SSR integration
@@ -62,8 +66,11 @@ OUTBOX_PUBLISHER=stdout cargo run -p wareboxes-worker-process --bin wareboxes-wo
 
 The stdout publisher acknowledges and consumes delivered events. For HTTP delivery,
 set `OUTBOX_PUBLISHER=http`, `OUTBOX_PUBLISH_URL`, and
-`OUTBOX_PUBLISH_BEARER_TOKEN`. HTTP endpoints must use HTTPS unless
-`OUTBOX_ALLOW_INSECURE_HTTP=true` is explicitly set for local development.
+`OUTBOX_PUBLISH_BEARER_TOKEN`, plus a 32-byte-or-longer
+`OUTBOX_WEBHOOK_SIGNING_SECRET`. HTTP endpoints must use HTTPS unless
+`OUTBOX_ALLOW_INSECURE_HTTP=true` is explicitly set for local development. See the
+[integration delivery runbook](docs/operations/integration-delivery.md) for webhook
+verification and strict SFTP configuration.
 
 ## Android RF
 
@@ -83,6 +90,17 @@ Install and launch it on a connected device:
 ```bash
 scripts/install-rf-android.sh
 ```
+
+## Edge Agent
+
+The optional Rust edge agent supplies typed PLC, conveyor, robotics, sortation,
+printer, and scale adapter boundaries with a durable local command and recovery
+store. It starts devices disabled and requires explicit safety confirmation before
+automation can resume. See the [edge-agent runbook](docs/operations/edge-agent.md)
+for adapter and operator procedures. The executable
+[automation envelope](docs/operations/automation-envelope.md) measures durable
+submission, execution, exact replay, ambiguous recovery, and manual fallback with
+`scripts/test-automation-envelope.sh`.
 
 The local Postgres container uses host port `5433`.
 
@@ -135,6 +153,13 @@ The `core` profile creates catalog, inventory, order, and legacy load volume. Th
 default `full` profile additionally executes real V1 commands to leave useful rows
 in pick waves, packing, shipping, outbound loads, putaway, cycle counts, inventory
 holds, replenishment, and the integration monitor. Both profiles are replay-safe.
+The full profile also leaves draft, released, and completed value-added work and
+draft, reserved, and shipped vendor returns with inventory and billing evidence; see
+the [value-added work runbook](docs/operations/value-added-work.md) and
+[vendor return runbook](docs/operations/vendor-returns.md).
+Integration support procedures are documented in the
+[order-intake runbook](docs/operations/integration-order-intake.md) and
+[delivery runbook](docs/operations/integration-delivery.md).
 Use `--verify-only` in CI or before a visual test to fail when a promised workspace
 has no data. Counts can be adjusted without editing SQL:
 
@@ -176,6 +201,32 @@ sudo deploy/provision.sh '<deploy-public-key>' '<site-address>'
 The next successful CI run can then deploy the application release. This procedure is
 destructive and is not valid after the production-readiness gate.
 
+Provisioned hosts take encrypted PostgreSQL snapshots daily and run an isolated
+restore verification weekly. The provisioned local restic repository must be
+replaced with an off-host backend before accepting production data. Configuration,
+recovery objectives, alerts, drills, and the guarded disaster-restore command are
+documented in [`docs/operations/backup-restore.md`](docs/operations/backup-restore.md).
+Tenant-partitioned durable commands and their non-destructive encrypted archive are
+documented in
+[`docs/operations/command-archives.md`](docs/operations/command-archives.md).
+
+The API exposes liveness at `/health/live`, database-and-schema readiness at
+`/health/ready` (with `/health` retained as a readiness alias), and Prometheus text
+metrics at `/metrics`. Caddy blocks the metrics endpoint from public traffic; scrape
+it over the host-local server address. Production provisioning emits structured JSON
+logs by default.
+Baseline alert rules and response runbooks are documented in
+[`docs/operations/telemetry-alerts.md`](docs/operations/telemetry-alerts.md).
+
+Per-process concurrency, rate, login, and timeout controls are configured through
+the production environment. Defaults and multi-replica boundaries are documented
+in [`docs/operations/http-traffic-controls.md`](docs/operations/http-traffic-controls.md).
+
+The repeatable single-node load gate and its latency, throughput, and error budgets
+are documented in
+[`docs/operations/load-envelope.md`](docs/operations/load-envelope.md). Run it with
+`scripts/test-load-envelope.sh` after producing the release web build.
+
 ## Web Release
 
 The release build produces the SSR server and its hydration assets together:
@@ -186,3 +237,11 @@ scripts/build-web.sh
 
 The server binary is written to `target/release/wareboxes-server` and the browser
 assets to `target/site`.
+
+Build the non-root API and worker container images from those release artifacts
+with `scripts/build-images.sh`. Image contracts and promotion requirements are in
+[`docs/operations/container-images.md`](docs/operations/container-images.md).
+
+## License
+
+Wareboxes is licensed under the [MIT License](LICENSE).

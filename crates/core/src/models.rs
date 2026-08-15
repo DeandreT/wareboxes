@@ -748,16 +748,30 @@ pub enum InventoryTransactionType {
     Ship,
     Transfer,
     StatusChange,
+    Relabel,
+    Refurbishment,
+    Kit,
+    Dekit,
+    Assembly,
+    ValueAddedService,
+    ReturnToVendor,
 }
 
 impl InventoryTransactionType {
-    pub const ALL: [InventoryTransactionType; 6] = [
+    pub const ALL: [InventoryTransactionType; 13] = [
         InventoryTransactionType::Receive,
         InventoryTransactionType::Move,
         InventoryTransactionType::Adjust,
         InventoryTransactionType::Ship,
         InventoryTransactionType::Transfer,
         InventoryTransactionType::StatusChange,
+        InventoryTransactionType::Relabel,
+        InventoryTransactionType::Refurbishment,
+        InventoryTransactionType::Kit,
+        InventoryTransactionType::Dekit,
+        InventoryTransactionType::Assembly,
+        InventoryTransactionType::ValueAddedService,
+        InventoryTransactionType::ReturnToVendor,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -768,6 +782,13 @@ impl InventoryTransactionType {
             InventoryTransactionType::Ship => "ship",
             InventoryTransactionType::Transfer => "transfer",
             InventoryTransactionType::StatusChange => "status_change",
+            InventoryTransactionType::Relabel => "relabel",
+            InventoryTransactionType::Refurbishment => "refurbishment",
+            InventoryTransactionType::Kit => "kit",
+            InventoryTransactionType::Dekit => "dekit",
+            InventoryTransactionType::Assembly => "assembly",
+            InventoryTransactionType::ValueAddedService => "value_added_service",
+            InventoryTransactionType::ReturnToVendor => "return_to_vendor",
         }
     }
 
@@ -779,6 +800,13 @@ impl InventoryTransactionType {
             "ship" => InventoryTransactionType::Ship,
             "transfer" => InventoryTransactionType::Transfer,
             "status_change" => InventoryTransactionType::StatusChange,
+            "relabel" => InventoryTransactionType::Relabel,
+            "refurbishment" => InventoryTransactionType::Refurbishment,
+            "kit" => InventoryTransactionType::Kit,
+            "dekit" => InventoryTransactionType::Dekit,
+            "assembly" => InventoryTransactionType::Assembly,
+            "value_added_service" => InventoryTransactionType::ValueAddedService,
+            "return_to_vendor" => InventoryTransactionType::ReturnToVendor,
             _ => return None,
         })
     }

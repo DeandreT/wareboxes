@@ -157,6 +157,7 @@ pub fn LoadsWorkbench(
 
     view! {
         <div class="fulfillment-workbench loads-workbench split-workspace" class:create-mode=move || create_open.get() style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <h1 class="sr-only">"Inbound loads"</h1>
             <section class="data-section fulfillment-list split-master">
                 <div class="table-toolbar fulfillment-toolbar">
                     <div class="toolbar-summary">

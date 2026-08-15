@@ -694,6 +694,10 @@
 }
 
 @media (max-width: 1050px) {
+  .integration-table {
+    min-width: 760px;
+  }
+
   .integration-filters > label {
     min-width: 110px;
   }

@@ -252,6 +252,14 @@ async fn receive_stock(
     )
     .await
     .unwrap());
+    start_expected_receipt_unloading(
+        &context.fixture.db,
+        &context.access,
+        load_id,
+        context.source_location_id,
+        &format!("{key}-unloading"),
+    )
+    .await;
     let receipt: ReceiveExpectedInventoryResult =
         repo::inbound_receipt::receive_expected_inventory(
             &context.fixture.db,

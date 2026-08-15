@@ -236,6 +236,7 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
              AND NOT tenant_column.attisdropped
             WHERE tenant_namespace.nspname = 'public'
               AND tenant_class.relkind IN ('r', 'p')
+              AND NOT tenant_class.relispartition
         ),
         expected_session_function(
             function_name,
@@ -288,6 +289,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'employee_facilities',
                     'employee_facilities_tenant_isolation'
+                ),
+                (
+                    'employee_identity_changes',
+                    'employee_identity_changes_tenant_isolation'
                 ),
                 (
                     'loads',
@@ -861,6 +866,44 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'cross_dock_cancellations',
                     'cross_dock_cancellations_tenant_isolation'
                 ),
+                (
+                    'configuration_versions',
+                    'configuration_versions_tenant_isolation'
+                ),
+                ('billing_contracts','billing_contracts_tenant_isolation'),
+                ('billing_rate_versions','billing_rate_versions_tenant_isolation'),
+                ('billable_events','billable_events_tenant_isolation'),
+                ('billing_storage_snapshots','billing_storage_snapshots_tenant_isolation'),
+                ('billing_reconciliation_runs','billing_reconciliation_runs_tenant_isolation'),
+                ('billing_charges','billing_charges_tenant_isolation'),
+                ('billing_reviews','billing_reviews_tenant_isolation'),
+                ('billing_financial_exports','billing_financial_exports_tenant_isolation'),
+                ('yard_locations','yard_locations_tenant_isolation'),
+                ('yard_assets','yard_assets_tenant_isolation'),
+                ('yard_appointments','yard_appointments_tenant_isolation'),
+                ('yard_appointment_events','yard_appointment_events_tenant_isolation'),
+                ('yard_visits','yard_visits_tenant_isolation'),
+                ('yard_visit_events','yard_visit_events_tenant_isolation'),
+                ('yard_detention_records','yard_detention_records_tenant_isolation'),
+                ('value_added_work_orders','value_added_work_orders_tenant_isolation'),
+                ('value_added_work_inputs','value_added_work_inputs_tenant_isolation'),
+                ('value_added_work_outputs','value_added_work_outputs_tenant_isolation'),
+                ('value_added_work_events','value_added_work_events_tenant_isolation'),
+                ('vendor_returns','vendor_returns_tenant_isolation'),
+                ('vendor_return_lines','vendor_return_lines_tenant_isolation'),
+                ('vendor_return_events','vendor_return_events_tenant_isolation'),
+                ('labor_skills','labor_skills_tenant_isolation'),
+                ('employee_certifications','employee_certifications_tenant_isolation'),
+                ('equipment_classes','equipment_classes_tenant_isolation'),
+                ('equipment_assets','equipment_assets_tenant_isolation'),
+                ('labor_standards','labor_standards_tenant_isolation'),
+                ('attendance_intervals','attendance_intervals_tenant_isolation'),
+                ('labor_activities','labor_activities_tenant_isolation'),
+                ('attendance_adjustments','attendance_adjustments_tenant_isolation'),
+                ('labor_activity_adjustments','labor_activity_adjustments_tenant_isolation'),
+                ('slotting_profiles','slotting_profiles_tenant_isolation'),
+                ('slotting_runs','slotting_runs_tenant_isolation'),
+                ('slotting_recommendations','slotting_recommendations_tenant_isolation'),
                 (
                     'license_plate_putaway_tasks',
                     'license_plate_putaway_tasks_tenant_isolation'

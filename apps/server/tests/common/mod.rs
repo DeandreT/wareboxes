@@ -118,6 +118,46 @@ pub async fn tenant_tx<'a>(db: &'a db::Db, tenant_id: TenantId) -> sqlx::Transac
     tx
 }
 
+pub async fn start_expected_receipt_unloading(
+    db: &db::Db,
+    access: &wareboxes_core::models::TenantAccess,
+    load_id: i64,
+    receiving_location_id: i64,
+    idempotency_key: &str,
+) {
+    let load = repo::loads::get_load(db, access.tenant_id, load_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let receiving_location_barcode =
+        wareboxes_persistence_postgres::locations::get_locations(db, access.tenant_id, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|location| location.id == receiving_location_id)
+            .and_then(|location| location.barcode)
+            .unwrap();
+    repo::inbound_load::start_inbound_load_unloading(
+        db,
+        access,
+        &wareboxes_application::CommandContext {
+            tenant_id: access.tenant_id,
+            actor_id: access.user_id,
+            request_id: format!("request-{idempotency_key}"),
+            idempotency_key: Some(idempotency_key.to_owned()),
+        },
+        &wareboxes_application::inbound_load::StartInboundLoadUnloadingCommand::new(
+            wareboxes_domain::InboundLoadId::new(load_id).unwrap(),
+            wareboxes_domain::InboundLoadScanValue::new(load.execution_barcode).unwrap(),
+            wareboxes_domain::InboundLoadScanValue::new(receiving_location_barcode).unwrap(),
+            None,
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+}
+
 pub async fn admin_db_for(db: &db::Db) -> db::Db {
     let database_name: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(db)

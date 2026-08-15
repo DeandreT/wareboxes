@@ -2,10 +2,12 @@ use std::fmt;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
+use utoipa::ToSchema;
 
 /// Positive revision used for optimistic concurrency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = i64)]
 pub struct Revision(i64);
 
 impl Revision {

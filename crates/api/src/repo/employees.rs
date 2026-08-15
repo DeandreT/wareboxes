@@ -1,11 +1,28 @@
 //! Tenant- and facility-scoped employee persistence.
 
 use sqlx::{Postgres, Row, Transaction};
-use wareboxes_core::models::{Employee, Timestamp};
-use wareboxes_domain::{FacilityId, SiteScope, TenantId};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_application::outbox::NewOutboxEvent;
+use wareboxes_application::workforce_identity::{
+    EmployeeIdentityChangeResult, LinkEmployeeIdentityCommand, UnlinkEmployeeIdentityCommand,
+    LINK_EMPLOYEE_IDENTITY_OPERATION, UNLINK_EMPLOYEE_IDENTITY_OPERATION,
+};
+use wareboxes_application::CommandContext;
+use wareboxes_core::models::{Employee, TenantAccess, Timestamp};
+use wareboxes_domain::{
+    EmployeeId, EmployeeIdentityChangeId, EmployeeIdentityChangeKind, EmployeeIdentityReason,
+    FacilityId, SiteScope, TenantId, UserId,
+};
+use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso};
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
+use wareboxes_persistence_postgres::outbox;
 
 use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
+use crate::repo::orders;
+
+const IDENTITY_PERMISSION: &str = "admin";
 
 const EMPLOYEE_COLUMNS: &str = r#"
     employee.id, employee.tenant_id, employee.created, employee.deleted,
@@ -387,4 +404,392 @@ pub async fn set_employee_deleted(
     .await?;
     tx.commit().await?;
     Ok(result.rows_affected() == 1)
+}
+
+struct LockedEmployeeIdentity {
+    user_id: Option<i64>,
+    revision: i64,
+    facility_ids: Vec<i64>,
+}
+
+/// Links an employee to an active interactive tenant member, or atomically relinks
+/// it when `expected_user_id` names the currently linked user.
+pub async fn link_employee_identity(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    command: &LinkEmployeeIdentityCommand,
+) -> AppResult<EmployeeIdentityChangeResult> {
+    context.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(context, LINK_EMPLOYEE_IDENTITY_OPERATION, command)?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let actor_scope =
+        lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    require_permission_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id.get(),
+        IDENTITY_PERMISSION,
+    )
+    .await?;
+
+    if let Some(result) = prepared
+        .replayed::<EmployeeIdentityChangeResult>(&mut tx)
+        .await?
+    {
+        require_replayed_identity_change_visible_tx(
+            &mut tx,
+            access.tenant_id,
+            &actor_scope,
+            &result,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let employee = lock_scoped_employee_identity_tx(
+        &mut tx,
+        access.tenant_id,
+        command.employee_id,
+        &actor_scope,
+    )
+    .await?;
+    let expected_user_id = command.expected_user_id.map(UserId::get);
+    if employee.user_id != expected_user_id {
+        return Err(AppError::conflict(
+            "employee identity changed since it was observed",
+        ));
+    }
+    if employee.user_id == Some(command.user_id.get()) {
+        return Err(AppError::conflict(
+            "employee is already linked to that interactive user",
+        ));
+    }
+
+    require_target_user_can_work_employee_facilities_tx(
+        &mut tx,
+        access.tenant_id,
+        command.user_id,
+        &employee.facility_ids,
+    )
+    .await?;
+    let kind = if employee.user_id.is_some() {
+        EmployeeIdentityChangeKind::Relinked
+    } else {
+        EmployeeIdentityChangeKind::Linked
+    };
+    change_employee_identity_tx(
+        tx,
+        access.tenant_id,
+        context.actor_id,
+        command.employee_id,
+        employee,
+        Some(command.user_id),
+        kind,
+        command.reason.clone(),
+        prepared,
+    )
+    .await
+}
+
+/// Removes an employee's interactive identity using compare-and-set semantics.
+pub async fn unlink_employee_identity(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    command: &UnlinkEmployeeIdentityCommand,
+) -> AppResult<EmployeeIdentityChangeResult> {
+    context.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(context, UNLINK_EMPLOYEE_IDENTITY_OPERATION, command)?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let actor_scope =
+        lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    require_permission_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id.get(),
+        IDENTITY_PERMISSION,
+    )
+    .await?;
+
+    if let Some(result) = prepared
+        .replayed::<EmployeeIdentityChangeResult>(&mut tx)
+        .await?
+    {
+        require_replayed_identity_change_visible_tx(
+            &mut tx,
+            access.tenant_id,
+            &actor_scope,
+            &result,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let employee = lock_scoped_employee_identity_tx(
+        &mut tx,
+        access.tenant_id,
+        command.employee_id,
+        &actor_scope,
+    )
+    .await?;
+    if employee.user_id != Some(command.expected_user_id.get()) {
+        return Err(AppError::conflict(
+            "employee identity changed since it was observed",
+        ));
+    }
+    change_employee_identity_tx(
+        tx,
+        access.tenant_id,
+        context.actor_id,
+        command.employee_id,
+        employee,
+        None,
+        EmployeeIdentityChangeKind::Unlinked,
+        command.reason.clone(),
+        prepared,
+    )
+    .await
+}
+
+async fn lock_scoped_employee_identity_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: TenantId,
+    employee_id: EmployeeId,
+    scope: &ScopeBindings,
+) -> AppResult<LockedEmployeeIdentity> {
+    let row = sqlx::query(
+        r#"
+        SELECT user_id, identity_revision
+        FROM employees
+        WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+          AND (terminated IS NULL OR terminated > clock_timestamp())
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(employee_id.get())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("employee"))?;
+    let facility_ids = employee_facility_ids(tx, tenant_id, employee_id.get()).await?;
+    if !scope_assignments_are_mutable(scope, &facility_ids) {
+        return Err(AppError::not_found("employee"));
+    }
+    Ok(LockedEmployeeIdentity {
+        user_id: row.try_get("user_id")?,
+        revision: row.try_get("identity_revision")?,
+        facility_ids,
+    })
+}
+
+fn scope_assignments_are_mutable(scope: &ScopeBindings, facility_ids: &[i64]) -> bool {
+    scope.all_facilities
+        || (!facility_ids.is_empty()
+            && facility_ids
+                .iter()
+                .all(|facility_id| scope.includes_facility(*facility_id)))
+}
+
+async fn require_target_user_can_work_employee_facilities_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: TenantId,
+    user_id: UserId,
+    employee_facility_ids: &[i64],
+) -> AppResult<()> {
+    let target_scope = lock_current_scope_tx(tx, tenant_id, user_id.get()).await?;
+    let active: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM tenant_memberships membership
+            INNER JOIN users user_account ON user_account.id = membership.user_id
+            WHERE membership.tenant_id = $1 AND membership.user_id = $2
+              AND membership.deleted IS NULL AND user_account.deleted IS NULL
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(user_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if !active {
+        return Err(AppError::bad_request(
+            "interactive user is not an active tenant member",
+        ));
+    }
+    if employee_facility_ids.is_empty()
+        || !employee_facility_ids
+            .iter()
+            .all(|facility_id| target_scope.includes_facility(*facility_id))
+    {
+        return Err(AppError::conflict(
+            "interactive user's facility scope does not cover every employee assignment",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn change_employee_identity_tx(
+    mut tx: Transaction<'_, Postgres>,
+    tenant_id: TenantId,
+    actor_id: UserId,
+    employee_id: EmployeeId,
+    employee: LockedEmployeeIdentity,
+    user_id: Option<UserId>,
+    kind: EmployeeIdentityChangeKind,
+    reason: EmployeeIdentityReason,
+    prepared: PreparedCommand,
+) -> AppResult<EmployeeIdentityChangeResult> {
+    let changed_at = now_iso();
+    let resulting_revision = employee
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| AppError::internal("employee identity revision overflow"))?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE employees
+        SET user_id = $1, identity_revision = $2,
+            identity_changed_by_user_id = $3, identity_changed_at = $4
+        WHERE tenant_id = $5 AND id = $6 AND identity_revision = $7
+        "#,
+    )
+    .bind(user_id.map(UserId::get))
+    .bind(resulting_revision)
+    .bind(actor_id.get())
+    .bind(changed_at)
+    .bind(tenant_id.get())
+    .bind(employee_id.get())
+    .bind(employee.revision)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict(
+            "employee identity changed during the command",
+        ));
+    }
+    let change_id = EmployeeIdentityChangeId::new(
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO employee_identity_changes (
+                tenant_id, employee_id, previous_user_id, user_id, change_kind,
+                reason, resulting_revision, changed_by_user_id, changed_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            RETURNING id
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(employee_id.get())
+        .bind(employee.user_id)
+        .bind(user_id.map(UserId::get))
+        .bind(kind.as_str())
+        .bind(reason.as_str())
+        .bind(resulting_revision)
+        .bind(actor_id.get())
+        .bind(changed_at)
+        .fetch_one(&mut *tx)
+        .await?,
+    )
+    .map_err(|error| AppError::internal(error.to_string()))?;
+    let result = EmployeeIdentityChangeResult {
+        change_id,
+        employee_id,
+        previous_user_id: employee
+            .user_id
+            .map(UserId::new)
+            .transpose()
+            .map_err(|error| {
+                AppError::internal(format!("stored employee user ID is invalid: {error}"))
+            })?,
+        user_id,
+        kind,
+        reason,
+        changed_by: actor_id,
+        changed_at,
+        resulting_revision,
+    };
+    enqueue_identity_changed_event_tx(&mut tx, tenant_id, &result).await?;
+    Ok(prepared.commit(tx, result).await?)
+}
+
+async fn enqueue_identity_changed_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: TenantId,
+    result: &EmployeeIdentityChangeResult,
+) -> AppResult<()> {
+    let ordering_key = format!("employee:{}", result.employee_id.get());
+    let aggregate_sequence = orders::next_outbox_sequence_tx(tx, tenant_id, &ordering_key).await?;
+    let event_key = format!(
+        "employee:{}:identity:{}",
+        result.employee_id.get(),
+        result.resulting_revision
+    );
+    let aggregate_id = result.employee_id.get().to_string();
+    let event_type = match result.kind {
+        EmployeeIdentityChangeKind::Linked => "workforce.employee_identity.linked",
+        EmployeeIdentityChangeKind::Relinked => "workforce.employee_identity.relinked",
+        EmployeeIdentityChangeKind::Unlinked => "workforce.employee_identity.unlinked",
+    };
+    let payload = serde_json::to_value(result).map_err(|error| {
+        AppError::internal(format!("identity event serialization failed: {error}"))
+    })?;
+    outbox::enqueue(
+        tx,
+        &NewOutboxEvent {
+            tenant_id,
+            inventory_owner_id: None,
+            facility_id: None,
+            actor_user_id: Some(result.changed_by.get()),
+            event_key: &event_key,
+            aggregate_type: "employee",
+            aggregate_id: &aggregate_id,
+            ordering_key: &ordering_key,
+            aggregate_sequence,
+            event_type,
+            schema_version: 1,
+            payload: &payload,
+            occurred_at: result.changed_at,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn require_replayed_identity_change_visible_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    result: &EmployeeIdentityChangeResult,
+) -> AppResult<()> {
+    let visible: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM employee_identity_changes change
+            INNER JOIN employees employee
+              ON employee.tenant_id = change.tenant_id AND employee.id = change.employee_id
+            WHERE change.tenant_id = $1 AND change.id = $2 AND change.employee_id = $3
+              AND employee.deleted IS NULL
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(result.change_id.get())
+    .bind(result.employee_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if !visible {
+        return Err(AppError::not_found("employee identity change"));
+    }
+    let facility_ids = employee_facility_ids(tx, tenant_id, result.employee_id.get()).await?;
+    if !scope_assignments_are_mutable(scope, &facility_ids) {
+        return Err(AppError::not_found("employee identity change"));
+    }
+    Ok(())
 }

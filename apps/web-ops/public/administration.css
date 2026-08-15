@@ -330,6 +330,187 @@
   font-size: 14px;
 }
 
+.configuration-workbench {
+  gap: 10px;
+}
+
+.billing-workbench {
+  display: grid;
+  gap: 1rem;
+}
+
+.billing-toolbar {
+  align-items: end;
+}
+
+.billing-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.billing-metrics article {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.55rem;
+  background: var(--surface-raised);
+}
+
+.billing-metrics span {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.billing-metrics strong {
+  font-size: 1.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.billing-split {
+  grid-template-columns: minmax(34rem, 1.15fr) minmax(28rem, 0.85fr);
+}
+
+.billing-runs {
+  align-items: start;
+}
+
+.billing-rate-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.65rem 0 1rem;
+}
+
+.billing-command-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.billing-command-grid form,
+.billing-command-grid section,
+.billing-review {
+  display: grid;
+  align-content: start;
+  gap: 0.65rem;
+}
+
+.billing-run-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.billing-run-summary strong {
+  font-size: 1.5rem;
+}
+
+.warning-text {
+  color: var(--warning-ink);
+  font-weight: 700;
+}
+
+.billing-export-receipt {
+  border-color: var(--green);
+}
+
+.billing-csv {
+  min-height: 9rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+  white-space: pre;
+}
+
+.mono-value {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 1200px) {
+  .billing-split,
+  .billing-command-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.configuration-split {
+  min-height: 420px;
+}
+
+.configuration-workbench .admin-table {
+  min-width: 860px;
+}
+
+.configuration-workbench .admin-table td:nth-child(5) {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.configuration-detail,
+.configuration-simulator,
+.configuration-rollback,
+.configuration-rule-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.configuration-detail > section,
+.configuration-rollback,
+.configuration-simulator {
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.configuration-detail h3,
+.configuration-simulator h2,
+.configuration-rollback h3,
+.configuration-rule-editor h3 {
+  margin: 0;
+}
+
+.configuration-detail p,
+.configuration-rollback p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.configuration-dialog {
+  width: min(900px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.configuration-rule-editor {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.configuration-simulator .admin-state {
+  min-height: 70px;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 10px;
+}
+
 @media (max-width: 1180px) {
   .admin-split {
     grid-template-columns: minmax(0, 1fr) 310px;

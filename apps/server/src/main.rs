@@ -10,13 +10,7 @@ use config::Config;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("info,wareboxes_api=debug,wareboxes_server=debug")
-            }),
-        )
-        .init();
+    init_tracing()?;
 
     let cfg = Config::from_env()?;
     tracing::info!(bind_address = %cfg.bind_addr, "starting wareboxes-server");
@@ -51,6 +45,32 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    Ok(())
+}
+
+fn init_tracing() -> anyhow::Result<()> {
+    let format = std::env::var("LOG_FORMAT").unwrap_or_else(|_| "compact".into());
+    let filter = || {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("info,wareboxes_api=debug,wareboxes_server=debug,sqlx::query=error")
+        })
+    };
+    match format.trim().to_ascii_lowercase().as_str() {
+        "json" => tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_env_filter(filter())
+            .try_init()
+            .map_err(|error| anyhow::anyhow!("initializing tracing: {error}"))?,
+        "compact" => tracing_subscriber::fmt()
+            .compact()
+            .with_env_filter(filter())
+            .try_init()
+            .map_err(|error| anyhow::anyhow!("initializing tracing: {error}"))?,
+        _ => anyhow::bail!("LOG_FORMAT must be json or compact"),
+    }
     Ok(())
 }
 
@@ -111,6 +131,23 @@ async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        match terminate {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not install SIGTERM handler");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
 }

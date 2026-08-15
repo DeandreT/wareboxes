@@ -23,6 +23,7 @@
   --amber-soft: #fff2cf;
   --red: #b73d42;
   --red-soft: #fae9ea;
+  --danger-button-ink: #ffffff;
   --shadow: 0 12px 36px rgb(23 27 29 / 10%);
   --control-height: 32px;
   --icon-size: 16px;
@@ -52,12 +53,14 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
   letter-spacing: 0;
 }
 
 select {
+  min-width: 0;
   text-overflow: ellipsis;
 }
 
@@ -299,7 +302,11 @@ a {
   line-height: 1.4;
 }
 
-.button {
+.button,
+.primary-action,
+.secondary-action,
+.quiet-action,
+.danger-action {
   display: inline-flex;
   height: var(--control-height);
   min-height: var(--control-height);
@@ -313,6 +320,41 @@ a {
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.icon-button {
+  display: inline-grid;
+  width: var(--control-height);
+  min-width: var(--control-height);
+  height: var(--control-height);
+  min-height: var(--control-height);
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--control-ink, var(--ink));
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled),
+.icon-button[aria-pressed="true"] {
+  border-color: #808b87;
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.icon-button.compact {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+}
+
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .primary-action {
@@ -340,7 +382,9 @@ a {
 
 .primary-action.compact {
   width: fit-content;
-  min-width: 100px;
+  min-width: 0;
+  padding-right: 10px;
+  padding-left: 10px;
 }
 
 .secondary-action {
@@ -365,7 +409,18 @@ a {
 
 .quiet-action:hover {
   border-color: var(--line-strong);
+  background: var(--surface-raised);
   color: var(--ink);
+}
+
+.danger-action {
+  border: 1px solid var(--red);
+  background: var(--red);
+  color: var(--danger-button-ink);
+}
+
+.danger-action:hover:not(:disabled) {
+  filter: brightness(0.9);
 }
 
 .button:disabled {

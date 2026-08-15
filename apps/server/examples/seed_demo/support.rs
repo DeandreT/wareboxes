@@ -163,6 +163,91 @@ impl SeedContext {
             .with_context(|| format!("decoding {key} response from {path}"))
     }
 
+    pub async fn command_as<T: DeserializeOwned>(
+        &self,
+        token: &str,
+        method: Method,
+        path: &str,
+        key: &str,
+        body: Value,
+    ) -> anyhow::Result<T> {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(TENANT_ID_HEADER, self.tenant_id.to_string())
+            .header(IDEMPOTENCY_KEY_HEADER, key)
+            .header(REQUEST_ID_HEADER, format!("seed-{key}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))?;
+        let response = self
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .map_err(|error| anyhow!("seed request failed: {error}"))?;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024).await?;
+        if status != StatusCode::OK {
+            let body = String::from_utf8_lossy(&bytes);
+            bail!("{key}: expected 200 from {path}, got {status}: {body}");
+        }
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("decoding {key} response from {path}"))
+    }
+
+    pub async fn configuration_approver_token(&self) -> anyhow::Result<String> {
+        const EMAIL: &str = "configuration-approver@wareboxes.local";
+        let user_id =
+            match wareboxes_persistence_postgres::users::find_user_by_email(&self.db, EMAIL, false)
+                .await?
+            {
+                Some(user) => user.id.get(),
+                None => {
+                    sqlx::query_scalar::<_, i64>(
+                        r#"
+                    INSERT INTO users(email,first_name,last_name,created)
+                    VALUES ($1,'Configuration','Approver',$2)
+                    RETURNING id
+                    "#,
+                    )
+                    .bind(EMAIL)
+                    .bind(db::now_iso())
+                    .fetch_one(&self.db)
+                    .await?
+                }
+            };
+        let mut tx = self.tenant_tx().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO tenant_memberships(tenant_id,user_id,is_default)
+            VALUES ($1,$2,false)
+            ON CONFLICT (tenant_id,user_id) DO UPDATE SET deleted=NULL
+            "#,
+        )
+        .bind(self.tenant_id.get())
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        ensure_permissions(&self.db, self.tenant_id, user_id).await?;
+        repo::tenants::update_user_access_scope(
+            &self.db,
+            self.tenant_id,
+            &UpdateUserAccessScope {
+                user_id,
+                all_facilities: true,
+                facility_ids: vec![],
+                all_inventory_owners: true,
+                inventory_owner_ids: vec![],
+            },
+        )
+        .await?;
+        auth::create_session(&self.db, user_id)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn scenario_exists(&self, order_key: &str) -> anyhow::Result<bool> {
         let mut tx = self.tenant_tx().await?;
         let found = sqlx::query_scalar::<_, bool>(
@@ -458,6 +543,7 @@ impl SeedContext {
             ("transfer orders", "transfer_orders"),
             ("packing", "packing_sessions"),
             ("shipping", "shipments"),
+            ("shipment documents", "shipment_documents"),
             ("outbound loads", "outbound_loads"),
             ("pick waves", "pick_waves"),
             ("replenishment", "replenishment_policies"),
@@ -466,6 +552,12 @@ impl SeedContext {
             ("putaway", "putaway_tasks"),
             ("inventory holds", "inventory_holds"),
             ("integration monitor", "integration_inbox_receipts"),
+            ("configuration", "configuration_versions"),
+            ("billing exports", "billing_financial_exports"),
+            ("yard appointments", "yard_appointments"),
+            ("yard visits", "yard_visits"),
+            ("value-added work", "value_added_work_orders"),
+            ("vendor returns", "vendor_returns"),
         ];
         let mut missing = Vec::new();
         for (label, table) in required {
@@ -556,7 +648,13 @@ async fn ensure_permissions(db: &db::Db, tenant_id: TenantId, user_id: i64) -> a
         )
         .await?
     };
-    for name in ["admin", "orders", "wms", "wms_supervisor"] {
+    for name in [
+        "admin",
+        "customer_portal",
+        "orders",
+        "wms",
+        "wms_supervisor",
+    ] {
         let permission =
             match wareboxes_persistence_postgres::permissions::find_by_name(db, tenant_id, name)
                 .await?

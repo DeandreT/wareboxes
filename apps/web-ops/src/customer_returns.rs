@@ -146,6 +146,7 @@ pub(crate) fn CustomerReturnsWorkspace(
 
     view! {
         <div class="inbound-asn-workspace customer-return-workspace split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <h1 class="sr-only">"Customer returns"</h1>
             <section class="data-section inbound-asn-list split-master">
                 <form class="inbound-asn-toolbar" on:submit=move |event| { event.prevent_default(); request_page(signals, None, Vec::new()); }>
                     <div class="toolbar-summary"><strong>{move || page.get().map_or(0, |value| value.items.len())}</strong><span>"returns"</span><PaneControls layout master_label="Return table" detail_label="Return detail"/></div>

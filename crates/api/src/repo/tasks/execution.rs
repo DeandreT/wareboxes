@@ -136,7 +136,7 @@ async fn start_next_task_with_scope(
               AND ($2 OR LOWER(required_permission) = ANY($3))
               AND ($4::TEXT IS NULL OR task_type = $4)
               AND ($7 OR facility_id = ANY($8))
-              AND ($9 OR inventory_owner_id = ANY($10))
+              AND ($9 OR inventory_owner_id IS NULL OR inventory_owner_id = ANY($10))
             ORDER BY priority DESC, due_at ASC NULLS LAST, COALESCE(scheduled_for, created), created, id
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -359,7 +359,7 @@ async fn start_task_with_scope(
           AND status IN ('open', 'assigned')
           AND (assigned_user_id IS NULL OR assigned_user_id = $1)
           AND ($5 OR facility_id = ANY($6))
-          AND ($7 OR inventory_owner_id = ANY($8))
+          AND ($7 OR inventory_owner_id IS NULL OR inventory_owner_id = ANY($8))
         "#,
     )
     .bind(user_id)
@@ -870,7 +870,7 @@ pub(super) async fn task_is_accessible(
               AND id = $2
               AND deleted IS NULL
               AND ($3 OR facility_id = ANY($4))
-              AND ($5 OR inventory_owner_id = ANY($6))
+              AND ($5 OR inventory_owner_id IS NULL OR inventory_owner_id = ANY($6))
         )
         "#,
     )
@@ -946,7 +946,7 @@ pub(super) async fn user_can_execute_task_tx(
                   )
               )
               AND (
-                  ($4::BIGINT IS NULL AND membership.all_inventory_owners)
+                  $4::BIGINT IS NULL
                   OR (
                       $4::BIGINT IS NOT NULL
                       AND (

@@ -39,7 +39,9 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
     let can_view_orders = has_permission(&session, "orders");
     let can_view_inventory = has_permission(&session, "wms");
     let can_supervise_wms = has_permission(&session, "wms_supervisor");
+    let can_view_labor = has_permission(&session, "labor_view");
     let can_administer = has_permission(&session, "admin");
+    let can_view_customer_portal = has_permission(&session, "customer_portal");
     let available_tenants = session.available_tenants.clone();
     let tenant_count = available_tenants.len();
     let tenant_options = available_tenants
@@ -113,6 +115,14 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                         icon=UiIcon::Overview
                         active=section == Section::Overview
                     />
+                    {can_view_customer_portal.then(|| view! {
+                        <NavItem
+                            href="/portal"
+                            label="Client portal"
+                            icon=UiIcon::Clients
+                            active=section == Section::CustomerPortal
+                        />
+                    })}
                     {can_view_orders.then(|| {
                         view! {
                             <NavItem
@@ -130,6 +140,14 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 />
                             })}
                         }
+                    })}
+                    {can_view_labor.then(|| view! {
+                        <NavItem
+                            href="/labor"
+                            label="Labor"
+                            icon=UiIcon::Employees
+                            active=section == Section::Labor
+                        />
                     })}
                     {can_view_inventory.then(|| {
                         view! {
@@ -150,6 +168,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 label="Outbound loads"
                                 icon=UiIcon::Shipping
                                 active=section == Section::OutboundLoads
+                            />
+                            <NavItem
+                                href="/yard"
+                                label="Yard"
+                                icon=UiIcon::Shipping
+                                active=section == Section::Yard
                             />
                             <NavItem
                                 href="/loads"
@@ -180,6 +204,18 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 label="Customer returns"
                                 icon=UiIcon::Disposition
                                 active=section == Section::CustomerReturns
+                            />
+                            <NavItem
+                                href="/vendor-returns"
+                                label="Vendor returns"
+                                icon=UiIcon::Disposition
+                                active=section == Section::VendorReturns
+                            />
+                            <NavItem
+                                href="/value-added-work"
+                                label="Value-added work"
+                                icon=UiIcon::Inventory
+                                active=section == Section::ValueAddedWork
                             />
                             <NavItem
                                 href="/putaway"
@@ -271,6 +307,20 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 icon=UiIcon::Counts
                                 active=section
                                     == Section::Administration(AdministrationArea::CountPlans)
+                            />
+                            <NavItem
+                                href="/administration/configuration"
+                                label="Configuration"
+                                icon=UiIcon::Counts
+                                active=section
+                                    == Section::Administration(AdministrationArea::Configuration)
+                            />
+                            <NavItem
+                                href="/administration/billing"
+                                label="3PL billing"
+                                icon=UiIcon::Counts
+                                active=section
+                                    == Section::Administration(AdministrationArea::Billing)
                             />
                             <NavItem
                                 href="/administration/integrations"

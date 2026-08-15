@@ -3,7 +3,8 @@ use axum::http::Method;
 use serde_json::json;
 use wareboxes_api::repo;
 use wareboxes_api_contract::v1::{
-    CloseCartonResponse, CreateCartonResponse, CreateShipmentResponse, OpenPackSessionResponse,
+    CloseCartonResponse, CreateCartonResponse, CreateShipmentResponse,
+    GenerateCartonLabelSetResponse, GeneratePackingSlipResponse, OpenPackSessionResponse,
     PackPickedAllocationResponse, PickClaimResponse, PickContentConfirmationResponse,
     PlanOutboundLoadResponse, RecordManualManifestResponse, ReleaseOutboundLoadResponse,
 };
@@ -82,10 +83,12 @@ async fn seed_shipment_awaiting_manifest(
 ) -> anyhow::Result<()> {
     let key = "WB-DEMO-FLOW-SHIP-READY";
     if context.scenario_exists(key).await? {
+        ensure_shipment_documents(context, key, false).await?;
         return Ok(());
     }
     let ready = prepare_ready_shipment(context, packing_location, key).await?;
     let _: CreateShipmentResponse = create_shipment(context, &ready, key).await?;
+    ensure_shipment_documents(context, key, false).await?;
     println!("seeded shipment awaiting manifest: {key}");
     Ok(())
 }
@@ -96,13 +99,71 @@ async fn seed_manifested_shipment(
 ) -> anyhow::Result<()> {
     let key = "WB-DEMO-FLOW-SHIP-MANIFESTED";
     if context.scenario_exists(key).await? {
+        ensure_shipment_documents(context, key, true).await?;
         return Ok(());
     }
     let ready = prepare_ready_shipment(context, packing_location, key).await?;
     let shipment = create_shipment(context, &ready, key).await?;
     let _: RecordManualManifestResponse =
         manifest_shipment(context, &ready, &shipment, key).await?;
+    ensure_shipment_documents(context, key, true).await?;
     println!("seeded manifested shipment: {key}");
+    Ok(())
+}
+
+async fn ensure_shipment_documents(
+    context: &SeedContext,
+    order_key: &str,
+    include_labels: bool,
+) -> anyhow::Result<()> {
+    let (shipment_id, revision): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT shipment.id,shipment.revision
+        FROM shipments shipment
+        INNER JOIN orders order_header
+          ON order_header.tenant_id=shipment.tenant_id AND order_header.id=shipment.order_id
+        WHERE shipment.tenant_id=$1 AND order_header.order_key=$2
+        ORDER BY shipment.id DESC LIMIT 1
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(order_key)
+    .fetch_one(&context.admin)
+    .await?;
+    let has_packing_slip: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shipment_documents WHERE tenant_id=$1 AND shipment_id=$2 AND document_type='packing_slip')",
+    )
+    .bind(context.tenant_id.get())
+    .bind(shipment_id)
+    .fetch_one(&context.admin)
+    .await?;
+    if !has_packing_slip {
+        let _: GeneratePackingSlipResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/shipments/{shipment_id}/documents/packing-slips"),
+                &format!("{order_key}-packing-slip"),
+                json!({"expected_shipment_revision":revision}),
+            )
+            .await?;
+    }
+    let has_labels: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM shipment_documents WHERE tenant_id=$1 AND shipment_id=$2 AND document_type='carton_label_set')",
+    )
+    .bind(context.tenant_id.get())
+    .bind(shipment_id)
+    .fetch_one(&context.admin)
+    .await?;
+    if include_labels && !has_labels {
+        let _: GenerateCartonLabelSetResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/shipments/{shipment_id}/documents/carton-label-sets"),
+                &format!("{order_key}-carton-label-set"),
+                json!({"expected_shipment_revision":revision}),
+            )
+            .await?;
+    }
     Ok(())
 }
 

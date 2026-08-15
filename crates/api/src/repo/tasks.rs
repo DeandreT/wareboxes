@@ -90,7 +90,8 @@ impl TaskDimensions {
             || self
                 .facility_id
                 .is_some_and(|id| scope.facility_ids.contains(&id)))
-            && (scope.all_inventory_owners
+            && (self.inventory_owner_id.is_none()
+                || scope.all_inventory_owners
                 || self
                     .inventory_owner_id
                     .is_some_and(|id| scope.inventory_owner_ids.contains(&id)))

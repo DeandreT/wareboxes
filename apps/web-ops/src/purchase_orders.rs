@@ -150,6 +150,7 @@ pub(crate) fn PurchaseOrdersWorkspace(
 
     view! {
         <div class="purchase-order-workspace split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <h1 class="sr-only">"Purchase orders"</h1>
             <section class="data-section purchase-order-list split-master">
                 <form class="purchase-order-toolbar" on:submit=move |event| { event.prevent_default(); request_page(page_signals, None, Vec::new()); }>
                     <div class="toolbar-summary"><strong>{move || page.get().map_or(0, |value| value.items.len())}</strong><span>"purchase orders"</span><PaneControls layout master_label="Purchase order table" detail_label="Purchase order detail"/></div>

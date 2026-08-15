@@ -7,6 +7,7 @@ mod app_frame;
 mod catalog;
 mod components;
 mod cross_dock;
+mod customer_portal;
 mod customer_returns;
 mod cycle_count;
 pub mod facility_shipping_origin;
@@ -24,6 +25,7 @@ mod inventory_disposition;
 mod inventory_holds;
 mod inventory_integrity;
 mod inventory_rollups;
+mod labor;
 mod orders;
 mod outbound_loads;
 mod packing;
@@ -36,8 +38,11 @@ mod shipping;
 mod sorting;
 mod toast;
 mod transfer_orders;
+mod value_added_work;
+mod vendor_returns;
 mod view_model;
 mod workspace_layout;
+mod yard;
 
 #[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
 #[wasm_bindgen::prelude::wasm_bindgen]

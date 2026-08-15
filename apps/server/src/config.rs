@@ -1,4 +1,5 @@
 use std::env;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use axum::http::HeaderValue;
@@ -54,6 +55,12 @@ impl Config {
             bail!("WEB_SESSION_IDLE_TTL_SECONDS must not exceed the absolute session TTL");
         }
         let secure_web_session_cookie = parse_bool_env("SECURE_WEB_SESSION_COOKIE", false)?;
+        let max_in_flight_requests = parse_usize_env("MAX_IN_FLIGHT_REQUESTS", 256, 1, 10_000)?;
+        let request_rate_limit_per_second =
+            parse_usize_env("REQUEST_RATE_LIMIT_PER_SECOND", 1_000, 1, 100_000)?;
+        let login_rate_limit_per_minute =
+            parse_usize_env("LOGIN_RATE_LIMIT_PER_MINUTE", 60, 1, 10_000)?;
+        let request_timeout_seconds = parse_i32_env("REQUEST_TIMEOUT_SECONDS", 30, 1, 300)?;
 
         Ok(Self {
             database_url,
@@ -68,6 +75,13 @@ impl Config {
                 web_session_absolute_ttl_seconds,
                 web_session_idle_ttl_seconds,
                 secure_web_session_cookie,
+                max_in_flight_requests,
+                request_rate_limit_per_second,
+                login_rate_limit_per_minute,
+                request_timeout: Duration::from_secs(
+                    u64::try_from(request_timeout_seconds)
+                        .context("REQUEST_TIMEOUT_SECONDS cannot be negative")?,
+                ),
             },
         })
     }
@@ -135,7 +149,25 @@ fn parse_i32_env(name: &str, default: i32, min: i32, max: i32) -> anyhow::Result
     validate_i32(name, value, min, max)
 }
 
+fn parse_usize_env(name: &str, default: usize, min: usize, max: usize) -> anyhow::Result<usize> {
+    let value = match env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .with_context(|| format!("{name} must be an integer"))?,
+        Err(env::VarError::NotPresent) => default,
+        Err(env::VarError::NotUnicode(_)) => bail!("{name} must contain valid UTF-8"),
+    };
+    validate_usize(name, value, min, max)
+}
+
 fn validate_i32(name: &str, value: i32, min: i32, max: i32) -> anyhow::Result<i32> {
+    if !(min..=max).contains(&value) {
+        bail!("{name} must be between {min} and {max}");
+    }
+    Ok(value)
+}
+
+fn validate_usize(name: &str, value: usize, min: usize, max: usize) -> anyhow::Result<usize> {
     if !(min..=max).contains(&value) {
         bail!("{name} must be between {min} and {max}");
     }
@@ -144,7 +176,7 @@ fn validate_i32(name: &str, value: i32, min: i32, max: i32) -> anyhow::Result<i3
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_database_urls, validate_i32};
+    use super::{resolve_database_urls, validate_i32, validate_usize};
 
     const RUNTIME_URL: &str = "postgres://app@database/wareboxes";
     const MIGRATION_URL: &str = "postgres://admin@database/wareboxes";
@@ -218,5 +250,12 @@ mod tests {
         let error = validate_i32("SECURITY_SECONDS", 299, 300, 86_400)
             .expect_err("values below the security floor must fail");
         assert!(error.to_string().contains("between 300 and 86400"));
+    }
+
+    #[test]
+    fn unsigned_http_limit_bounds_are_enforced() {
+        let error = validate_usize("HTTP_LIMIT", 0, 1, 100)
+            .expect_err("zero must not disable a safety limit");
+        assert!(error.to_string().contains("between 1 and 100"));
     }
 }

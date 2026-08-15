@@ -7,8 +7,10 @@ rust-version.workspace = true
 description = "Wareboxes HTTP API, authentication, and transport composition"
 
 [features]
-default = []
+default = ["openapi"]
+openapi = ["dep:utoipa"]
 ssr = [
+    "openapi",
     "dep:leptos",
     "dep:leptos_axum",
     "dep:wareboxes-web-ops",
@@ -29,8 +31,9 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+utoipa = { workspace = true, optional = true }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
@@ -49,3 +52,7 @@ validator = { version = "0.18", features = ["derive"] }
 cookie = "0.18"
 leptos = { workspace = true, features = ["ssr"], optional = true }
 leptos_axum = { workspace = true, optional = true }
+
+[[example]]
+name = "export_integration_openapi"
+required-features = ["openapi"]

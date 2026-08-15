@@ -21,7 +21,7 @@ cargo leptos build \
 web_pkg_dir="$ROOT_DIR/target/site/pkg"
 web_js="$web_pkg_dir/wareboxes-web.js"
 referenced_wasm="$(
-  sed -n "s/.*new URL('\([^']*\.wasm\)'.*/\1/p" "$web_js" | head -n 1
+  sed -nE "s/.*new URL\([\"']([^\"']+\.wasm)[\"'].*/\1/p" "$web_js" | head -n 1
 )"
 if [ -z "$referenced_wasm" ]; then
   echo "Unable to determine the WASM asset referenced by $web_js" >&2

@@ -377,6 +377,15 @@ async fn whole_license_plate_putaway_is_atomic_replay_safe_and_rejects_content_d
     .await
     .unwrap());
 
+    start_expected_receipt_unloading(
+        &fixture.db,
+        &access,
+        load_id,
+        receiving_location_id,
+        "license-plate-putaway-unloading",
+    )
+    .await;
+
     let plate_barcode = "LP-PUTAWAY-MAIN";
     let first_receipt = receive_line(
         &fixture,

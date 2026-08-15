@@ -197,6 +197,14 @@ async fn receive_stock(
     )
     .await
     .unwrap());
+    start_expected_receipt_unloading(
+        &fixture.db,
+        access,
+        load_id,
+        receiving_location_id,
+        &format!("{key}-unloading"),
+    )
+    .await;
     let receipt = repo::inbound_receipt::receive_expected_inventory(
         &fixture.db,
         access,
@@ -298,6 +306,14 @@ async fn receive_additional_plate_stock(
     )
     .await
     .unwrap());
+    start_expected_receipt_unloading(
+        &fixture.db,
+        access,
+        load_id,
+        receiving_location_id,
+        &format!("{key}-unloading"),
+    )
+    .await;
     repo::inbound_receipt::receive_expected_inventory(
         &fixture.db,
         access,

@@ -1,20 +1,31 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::Revision;
 
 /// Shipping destination captured with a fulfillment order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FulfillmentOrderDestination {
+    #[schema(min_length = 1, max_length = 200, example = "Receiving Team")]
     pub recipient_name: String,
+    #[schema(max_length = 200, example = "Northstar Retail")]
     pub company: Option<String>,
+    #[schema(max_length = 64, example = "+1 775 555 0100")]
     pub phone: Option<String>,
+    #[schema(max_length = 254, example = "receiving@example.com")]
     pub email: Option<String>,
+    #[schema(min_length = 1, max_length = 200, example = "125 Shipping Lane")]
     pub line1: String,
+    #[schema(max_length = 200, example = "Dock 4")]
     pub line2: Option<String>,
+    #[schema(min_length = 1, max_length = 100, example = "Reno")]
     pub city: String,
+    #[schema(min_length = 1, max_length = 100, example = "NV")]
     pub region: String,
+    #[schema(min_length = 1, max_length = 32, example = "89502")]
     pub postal_code: String,
+    #[schema(min_length = 1, max_length = 100, example = "US")]
     pub country: String,
 }
 

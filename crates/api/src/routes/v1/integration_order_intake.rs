@@ -4,6 +4,8 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "openapi")]
+use wareboxes_api_contract::v1::ErrorResponse;
 use wareboxes_api_contract::v1::{
     CorrectIntegrationOrderRequest, CorrectIntegrationOrderResponse, CreateFulfillmentOrderRequest,
     IntegrationOrderEnvelopeRequest, IntegrationOrderIntakeResponse,
@@ -36,6 +38,159 @@ const INVALID_PAYLOAD_CODE: &str = "invalid_payload";
 const MAPPING_VALIDATION_CODE: &str = "mapping_validation_failed";
 const BUSINESS_REJECTION_CODE: &str = "business_rejected";
 
+/// Submit a partner fulfillment order.
+///
+/// Wareboxes durably retains the original payload before mapping partner owner, item, and UOM
+/// identities. A `202` response therefore reports either `processed` or `quarantined`; callers
+/// must inspect `status` instead of treating every accepted receipt as a created order.
+#[cfg_attr(feature = "openapi", utoipa::path(
+    post,
+    path = "/api/v1/integrations/order-intake/{source_key}/inventory-owners/{external_inventory_owner_key}/orders",
+    operation_id = "submitIntegrationOrder",
+    tag = "Orders",
+    request_body(
+        content = IntegrationOrderEnvelopeRequest,
+        description = "Partner order envelope. The path supplies the source and inventory-owner identities; internal Wareboxes IDs are not accepted in this payload.",
+        content_type = "application/json",
+        example = json!({
+            "order_key": "SO-1001",
+            "rush": false,
+            "ship_by": "2027-08-12T17:00:00Z",
+            "destination": {
+                "recipient_name": "Receiving Team",
+                "company": "Northstar Retail",
+                "phone": "+1 775 555 0100",
+                "email": "receiving@example.com",
+                "line1": "125 Shipping Lane",
+                "line2": "Dock 4",
+                "city": "Reno",
+                "region": "NV",
+                "postal_code": "89502",
+                "country": "US"
+            },
+            "lines": [{
+                "line_key": "1",
+                "external_item_key": "CLIENT-CASE",
+                "external_uom": "CS",
+                "quantity": 4
+            }]
+        })
+    ),
+    params(
+        (
+            "source_key" = String,
+            Path,
+            description = "Provisioned integration source identity. Item and UOM mappings are source-specific.",
+            min_length = 1,
+            max_length = 200,
+            example = "partner-api"
+        ),
+        (
+            "external_inventory_owner_key" = String,
+            Path,
+            description = "Partner inventory-owner identity configured for this source. It is resolved within the authenticated tenant and owner scope.",
+            min_length = 1,
+            max_length = 200,
+            example = "NORTHSTAR"
+        ),
+        (
+            "x-wareboxes-tenant-id" = i64,
+            Header,
+            description = "Positive tenant context for the bearer credential. The request fails closed when the identity is not a member of this tenant.",
+            minimum = 1,
+            example = 12
+        ),
+        (
+            "idempotency-key" = String,
+            Header,
+            description = "Caller-generated identity for this submission. An exact retry returns the original outcome; reuse with a different payload or scope returns 409.",
+            min_length = 1,
+            max_length = 200,
+            pattern = "^[!-~]{1,200}$",
+            example = "partner-order-SO-1001-v1"
+        ),
+        (
+            "x-request-id" = Option<String>,
+            Header,
+            description = "Optional caller correlation ID. Wareboxes echoes a valid value or assigns one.",
+            min_length = 1,
+            max_length = 128,
+            pattern = "^[A-Za-z0-9._:-]{1,128}$",
+            example = "partner-order-SO-1001-attempt-1"
+        )
+    ),
+    responses(
+        (
+            status = 202,
+            description = "The payload is durably retained. Inspect `status`: `processed` includes `order_id`; `quarantined` includes `error_code` and `error_message` for operator remediation.",
+            body = IntegrationOrderIntakeResponse,
+            headers(("x-request-id" = String, description = "Request correlation ID.")),
+            examples(
+                (
+                    "processed" = (
+                        summary = "Fulfillment demand created",
+                        value = json!({
+                            "receipt_id": 501,
+                            "processing_id": 601,
+                            "processing_attempt_id": 701,
+                            "correction_id": null,
+                            "input_payload_sha256": "4cacc15b0023683e11cc4c371c585f8aefe1a12221edeb64290fbe35be4e4ccd",
+                            "inventory_owner_id": 42,
+                            "adapter_key": "wareboxes.fulfillment_order",
+                            "mapping_version": 2,
+                            "status": "processed",
+                            "revision": 1,
+                            "attempt_count": 1,
+                            "applied_mapping_count": 1,
+                            "order_id": 9001,
+                            "order_revision": 1,
+                            "error_code": null,
+                            "error_message": null,
+                            "attempted_by": 7,
+                            "attempted_at": "2026-08-11T19:30:00Z",
+                            "processed_at": "2026-08-11T19:30:00Z"
+                        })
+                    )
+                ),
+                (
+                    "quarantined" = (
+                        summary = "Document retained for mapping remediation",
+                        value = json!({
+                            "receipt_id": 502,
+                            "processing_id": 602,
+                            "processing_attempt_id": 702,
+                            "correction_id": null,
+                            "input_payload_sha256": "4cacc15b0023683e11cc4c371c585f8aefe1a12221edeb64290fbe35be4e4ccd",
+                            "inventory_owner_id": 42,
+                            "adapter_key": "wareboxes.fulfillment_order",
+                            "mapping_version": 2,
+                            "status": "quarantined",
+                            "revision": 1,
+                            "attempt_count": 1,
+                            "applied_mapping_count": 0,
+                            "order_id": null,
+                            "order_revision": null,
+                            "error_code": "item_mapping_not_found",
+                            "error_message": "no active item mapping for line 1 (CLIENT-CASE / CS)",
+                            "attempted_by": 7,
+                            "attempted_at": "2026-08-11T19:30:00Z",
+                            "processed_at": null
+                        })
+                    )
+                )
+            )
+        ),
+        (status = 400, description = "A required header or path value is missing or invalid.", body = ErrorResponse),
+        (status = 401, description = "The bearer credential is missing or invalid.", body = ErrorResponse),
+        (status = 403, description = "The identity lacks tenant membership or the orders permission.", body = ErrorResponse),
+        (status = 404, description = "No active inventory-owner mapping is visible for the source, external owner key, and caller owner scope.", body = ErrorResponse),
+        (status = 409, description = "The idempotency key was reused with a different payload, content type, or scope.", body = ErrorResponse),
+        (status = 413, description = "The request exceeds the deployment request-body limit.", body = ErrorResponse),
+        (status = 415, description = "Content-Type is not application/json or a +json media type.", body = ErrorResponse),
+        (status = 500, description = "Wareboxes could not safely retain or process the submission.", body = ErrorResponse)
+    ),
+    security(("bearerAuth" = []))
+))]
 pub async fn receive_order(
     State(state): State<AppState>,
     user: CurrentTenant,
@@ -45,11 +200,89 @@ pub async fn receive_order(
     body: Bytes,
 ) -> V1Result<(StatusCode, Json<IntegrationOrderIntakeResponse>)> {
     user.require_permission(&state.db, PERMISSION).await?;
+    let content_type = json_content_type(&headers)?;
+    receive_external_order(
+        &state,
+        &user,
+        &idempotency_key,
+        source_key,
+        external_inventory_owner_key,
+        content_type,
+        &body,
+        repo::integration_order_intake::JSON_ORDER_ADAPTER,
+    )
+    .await
+}
+
+/// Submit an X12 940 Warehouse Shipping Order using the Wareboxes v1 profile.
+#[cfg_attr(feature = "openapi", utoipa::path(
+    post,
+    path = "/api/v1/integrations/x12-940/{source_key}/inventory-owners/{external_inventory_owner_key}/orders",
+    operation_id = "submitX12940Order",
+    tag = "Orders",
+    request_body(
+        content = String,
+        content_type = "application/edi-x12",
+        description = "One X12 004010 940 transaction in an ISA/IEA interchange. The Wareboxes v1 profile accepts W0501=N, an N1/N3/N4 ship-to loop, optional N9*RU and G62*10, and LX/W01 lines with SK or VP item keys."
+    ),
+    params(
+        ("source_key" = String, Path, min_length = 1, max_length = 200, example = "partner-edi"),
+        ("external_inventory_owner_key" = String, Path, min_length = 1, max_length = 200, example = "NORTHSTAR"),
+        ("x-wareboxes-tenant-id" = i64, Header, minimum = 1, example = 12),
+        ("idempotency-key" = String, Header, min_length = 1, max_length = 200, example = "x12-isa-000000001-st-0001"),
+        ("x-request-id" = Option<String>, Header, min_length = 1, max_length = 128)
+    ),
+    responses(
+        (status = 202, description = "The raw interchange is retained and either processed or quarantined.", body = IntegrationOrderIntakeResponse),
+        (status = 400, description = "A header or path value is invalid.", body = ErrorResponse),
+        (status = 401, description = "The bearer credential is missing or invalid.", body = ErrorResponse),
+        (status = 403, description = "The identity lacks tenant membership or order permission.", body = ErrorResponse),
+        (status = 404, description = "No visible active owner mapping exists.", body = ErrorResponse),
+        (status = 409, description = "The idempotency identity conflicts with a prior payload.", body = ErrorResponse),
+        (status = 413, description = "The interchange exceeds the deployment body limit.", body = ErrorResponse),
+        (status = 415, description = "Content-Type is not application/edi-x12.", body = ErrorResponse),
+        (status = 500, description = "The submission could not be retained safely.", body = ErrorResponse)
+    ),
+    security(("bearerAuth" = []))
+))]
+pub async fn receive_x12_940_order(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path((source_key, external_inventory_owner_key)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> V1Result<(StatusCode, Json<IntegrationOrderIntakeResponse>)> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let content_type = x12_content_type(&headers)?;
+    receive_external_order(
+        &state,
+        &user,
+        &idempotency_key,
+        source_key,
+        external_inventory_owner_key,
+        content_type,
+        &body,
+        repo::integration_order_intake::X12_940_ORDER_ADAPTER,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn receive_external_order(
+    state: &AppState,
+    user: &CurrentTenant,
+    idempotency_key: &IdempotencyKey,
+    source_key: String,
+    external_inventory_owner_key: String,
+    content_type: &str,
+    body: &[u8],
+    adapter: repo::integration_order_intake::AdapterDescriptor,
+) -> V1Result<(StatusCode, Json<IntegrationOrderIntakeResponse>)> {
     let source_key = IntegrationSourceKey::new(source_key)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let external_inventory_owner_key = ExternalInventoryOwnerKey::new(external_inventory_owner_key)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let content_type = json_content_type(&headers)?;
     let request_id = current_request_id_or_new();
     let received = repo::integration_order_intake::receive_external_order(
         &state.db,
@@ -60,7 +293,7 @@ pub async fn receive_order(
             external_inventory_owner_key: &external_inventory_owner_key,
             deduplication_key: idempotency_key.as_str(),
             content_type,
-            raw_payload: &body,
+            raw_payload: body,
             request_id: &request_id,
         },
     )
@@ -69,11 +302,11 @@ pub async fn receive_order(
         .receipt
         .inventory_owner_id
         .ok_or_else(|| AppError::internal("mapped order receipt has no inventory owner"))?;
-    let context = user.command_context(&idempotency_key);
+    let context = user.command_context(idempotency_key);
     let input = repo::integration_order_intake::ProcessingInput::retained(&received.receipt)?;
     let result = process_payload(
-        &state,
-        &user,
+        state,
+        user,
         &context,
         &received.receipt,
         &received.receipt.raw_payload,
@@ -81,6 +314,7 @@ pub async fn receive_order(
         inventory_owner_id,
         None,
         None,
+        adapter,
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(response(result)?)))
@@ -123,6 +357,7 @@ pub async fn reprocess_order(
         inventory_owner_id,
         Some(revision),
         Some(&command),
+        envelope.adapter,
     )
     .await?;
     Ok(Json(response(result)?))
@@ -215,6 +450,7 @@ async fn process_payload(
     expected_owner_id: InventoryOwnerId,
     expected_revision: Option<IntegrationInboxProcessingRevision>,
     reprocess: Option<&ReprocessIntegrationOrderCommand>,
+    adapter: repo::integration_order_intake::AdapterDescriptor,
 ) -> Result<IntegrationOrderProcessingResult, AppError> {
     if reprocess.is_none() {
         if let Some(existing) =
@@ -229,6 +465,7 @@ async fn process_payload(
         expected_revision,
         input,
         reprocess,
+        adapter,
     );
 
     if input.correction_id.is_some() {
@@ -296,9 +533,18 @@ async fn process_payload(
         };
     }
 
-    let request = match serde_json::from_slice::<IntegrationOrderEnvelopeRequest>(input_payload) {
+    let request = match adapter {
+        repo::integration_order_intake::JSON_ORDER_ADAPTER => {
+            serde_json::from_slice::<IntegrationOrderEnvelopeRequest>(input_payload).map_err(|_| ())
+        }
+        repo::integration_order_intake::X12_940_ORDER_ADAPTER => {
+            super::x12_940::parse(input_payload).map_err(|_| ())
+        }
+        _ => Err(()),
+    };
+    let request = match request {
         Ok(request) => request,
-        Err(_) => {
+        Err(()) => {
             return repo::integration_order_intake::quarantine(
                 &state.db,
                 &user.tenant,
@@ -306,7 +552,7 @@ async fn process_payload(
                 processing_request,
                 repo::integration_order_intake::QuarantineReason {
                     code: INVALID_PAYLOAD_CODE,
-                    message: "payload is not a valid integration order envelope v1 JSON document",
+                    message: "payload does not satisfy the selected order adapter contract",
                 },
             )
             .await;
@@ -446,6 +692,27 @@ fn json_content_type(headers: &HeaderMap) -> V1Result<&str> {
     if media_type != "application/json" && !media_type.ends_with("+json") {
         return Err(V1Error::unsupported_media_type(
             "Content-Type must be application/json",
+        ));
+    }
+    Ok(content_type)
+}
+
+fn x12_content_type(headers: &HeaderMap) -> V1Result<&str> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            V1Error::unsupported_media_type("Content-Type must be application/edi-x12")
+        })?;
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    if media_type != "application/edi-x12" {
+        return Err(V1Error::unsupported_media_type(
+            "Content-Type must be application/edi-x12",
         ));
     }
     Ok(content_type)

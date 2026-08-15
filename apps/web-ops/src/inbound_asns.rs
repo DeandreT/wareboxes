@@ -159,6 +159,7 @@ pub(crate) fn InboundAsnWorkspace(
 
     view! {
         <div class="inbound-asn-workspace split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <h1 class="sr-only">"Inbound ASNs"</h1>
             <section class="data-section inbound-asn-list split-master">
                 <form class="inbound-asn-toolbar" on:submit=apply_filters>
                     <div class="toolbar-summary">

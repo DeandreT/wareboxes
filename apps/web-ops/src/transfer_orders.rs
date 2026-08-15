@@ -142,6 +142,7 @@ pub(crate) fn TransferOrdersWorkspace(
 
     view! {
         <div class="purchase-order-workspace transfer-order-workspace split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <h1 class="sr-only">"Transfer orders"</h1>
             <section class="data-section purchase-order-list split-master">
                 <form class="purchase-order-toolbar" on:submit=move |event| { event.prevent_default(); request_page(signals,None,Vec::new()); }>
                     <div class="toolbar-summary"><strong>{move || page.get().map_or(0,|value|value.items.len())}</strong><span>"transfers"</span><PaneControls layout master_label="Transfer table" detail_label="Transfer detail"/></div>

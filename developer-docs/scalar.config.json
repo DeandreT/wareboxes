@@ -1,0 +1,129 @@
+{
+  "$schema": "https://registry.scalar.com/@scalar/schemas/config",
+  "scalar": "2.0.0",
+  "navigation": {
+    "tabs": [
+      {
+        "title": "Guides",
+        "path": "/"
+      },
+      {
+        "title": "API Reference",
+        "path": "/api/v1"
+      }
+    ],
+    "routes": {
+      "/": {
+        "type": "page",
+        "title": "Wareboxes Integration API",
+        "description": "Build replay-safe warehouse integrations with Wareboxes.",
+        "filepath": "content/index.md"
+      },
+      "/getting-started": {
+        "type": "group",
+        "title": "Getting started",
+        "mode": "flat",
+        "children": {
+          "/getting-started/quickstart": {
+            "type": "page",
+            "title": "Quickstart",
+            "filepath": "content/getting-started/quickstart.md"
+          },
+          "/getting-started/authentication": {
+            "type": "page",
+            "title": "Authentication",
+            "filepath": "content/getting-started/authentication.md"
+          },
+          "/getting-started/environments": {
+            "type": "page",
+            "title": "Environments",
+            "filepath": "content/getting-started/environments.md"
+          }
+        }
+      },
+      "/concepts": {
+        "type": "group",
+        "title": "Integration concepts",
+        "mode": "flat",
+        "children": {
+          "/concepts/warehouse-identities": {
+            "type": "page",
+            "title": "Warehouse identities and scope",
+            "filepath": "content/concepts/warehouse-identities.md"
+          },
+          "/concepts/idempotency": {
+            "type": "page",
+            "title": "Idempotency and retries",
+            "filepath": "content/concepts/idempotency.md"
+          },
+          "/concepts/errors": {
+            "type": "page",
+            "title": "Errors and request IDs",
+            "filepath": "content/concepts/errors.md"
+          }
+        }
+      },
+      "/workflows": {
+        "type": "group",
+        "title": "Warehouse workflows",
+        "mode": "flat",
+        "children": {
+          "/workflows/order-intake": {
+            "type": "page",
+            "title": "Submit fulfillment orders",
+            "filepath": "content/workflows/order-intake.md"
+          },
+          "/workflows/x12-940-order-intake": {
+            "type": "page",
+            "title": "Submit X12 940 orders",
+            "filepath": "content/workflows/x12-940-order-intake.md"
+          },
+          "/workflows/customer-visibility": {
+            "type": "page",
+            "title": "Customer visibility",
+            "filepath": "content/workflows/customer-visibility.md"
+          },
+          "/workflows/event-delivery": {
+            "type": "page",
+            "title": "Event delivery",
+            "filepath": "content/workflows/event-delivery.md"
+          },
+          "/workflows/quarantine": {
+            "type": "page",
+            "title": "Quarantine and recovery",
+            "filepath": "content/workflows/quarantine.md"
+          }
+        }
+      },
+      "/api/v1": {
+        "type": "openapi",
+        "title": "Integration API v1",
+        "filepath": "api-reference/integrations-v1.openapi.json",
+        "mode": "nested",
+        "singlePage": false,
+        "config": {
+          "theme": "default",
+          "layout": "modern",
+          "showOperationId": true,
+          "modelsSectionLabel": "Schemas",
+          "agent": {
+            "disabled": true
+          },
+          "authentication": {
+            "preferredSecurityScheme": "bearerAuth"
+          }
+        }
+      },
+      "/versioning": {
+        "type": "page",
+        "title": "Versioning",
+        "filepath": "content/versioning.md"
+      },
+      "/changelog": {
+        "type": "page",
+        "title": "Changelog",
+        "filepath": "content/changelog.md"
+      }
+    }
+  }
+}

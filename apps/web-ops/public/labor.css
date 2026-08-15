@@ -1,0 +1,690 @@
+.labor-workspace {
+    --text-primary: var(--ink);
+    --text-secondary: var(--ink-soft);
+    --text-tertiary: var(--muted-badge-ink);
+    --border-subtle: var(--row-border);
+    --border-default: var(--line);
+    --danger: var(--red);
+    --success: var(--green);
+    min-width: 0;
+    min-height: 100%;
+    color: var(--text-primary);
+    background:
+        radial-gradient(circle at 94% -8%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 32rem),
+        var(--surface-subtle);
+}
+
+.labor-toolbar {
+    position: sticky;
+    z-index: 12;
+    top: 0;
+    display: grid;
+    grid-template-columns: minmax(260px, 1.4fr) repeat(3, minmax(132px, .72fr)) repeat(2, minmax(142px, .72fr)) auto auto auto;
+    gap: 8px;
+    align-items: end;
+    padding: 12px 16px 9px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+    box-shadow: 0 7px 22px rgb(0 0 0 / 7%);
+    backdrop-filter: blur(15px);
+}
+
+.labor-heading {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    min-width: 0;
+}
+
+.labor-heading > svg {
+    width: 25px;
+    height: 25px;
+    color: var(--accent);
+}
+
+.labor-heading h1,
+.labor-panel h2,
+.labor-panel h3,
+.labor-state h2,
+.labor-drawer h2 {
+    margin: 0;
+}
+
+.labor-heading h1 {
+    font-size: 1.18rem;
+    letter-spacing: -.025em;
+}
+
+.labor-heading span,
+.labor-panel > header span,
+.labor-heading + span {
+    color: var(--text-secondary);
+    font-size: .72rem;
+}
+
+.labor-toolbar label,
+.labor-drawer label {
+    display: grid;
+    gap: 4px;
+    color: var(--text-secondary);
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .025em;
+}
+
+.labor-toolbar select,
+.labor-toolbar input[type="date"],
+.labor-drawer select,
+.labor-drawer input,
+.labor-drawer textarea {
+    min-width: 0;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--border-default);
+    border-radius: 5px;
+    color: var(--text-primary);
+    background: var(--surface-raised);
+    font: inherit;
+    font-size: .76rem;
+}
+
+.labor-drawer textarea {
+    height: auto;
+    min-height: 88px;
+    padding: 8px;
+    resize: vertical;
+}
+
+.labor-history-toggle {
+    display: flex !important;
+    align-items: center;
+    align-self: center;
+    gap: 6px !important;
+    white-space: nowrap;
+}
+
+.labor-history-toggle input {
+    margin: 0;
+}
+
+.labor-window-help {
+    grid-column: 2 / -1;
+    color: var(--text-tertiary);
+    font-size: .66rem;
+    text-align: right;
+}
+
+.labor-body {
+    display: grid;
+    gap: 10px;
+    padding: 10px 14px 18px;
+}
+
+.labor-command-center > header {
+    border-bottom-color: color-mix(in srgb, var(--accent) 22%, var(--border-subtle));
+}
+
+.labor-command-permissions {
+    color: var(--accent) !important;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: .62rem !important;
+}
+
+.labor-command-center > form {
+    display: grid;
+    gap: 9px;
+    padding: 10px 11px;
+}
+
+.labor-command-scope,
+.labor-form-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(150px, 1fr));
+    gap: 8px;
+    align-items: end;
+}
+
+.labor-form-grid-wide {
+    grid-template-columns: repeat(5, minmax(140px, 1fr));
+}
+
+.labor-command-center label {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: .65rem;
+    font-weight: 720;
+    letter-spacing: .025em;
+}
+
+.labor-command-center select,
+.labor-command-center input {
+    min-width: 0;
+    height: 31px;
+    padding: 0 8px;
+    border: 1px solid var(--border-default);
+    border-radius: 5px;
+    color: var(--text-primary);
+    background: var(--surface-raised);
+    font: inherit;
+    font-size: .72rem;
+}
+
+.labor-command-center .labor-check {
+    display: flex;
+    align-items: center;
+    align-self: center;
+    gap: 7px;
+}
+
+.labor-command-center .labor-check input {
+    width: 15px;
+    height: 15px;
+}
+
+.labor-roster-state {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    min-height: 31px;
+    color: var(--text-tertiary);
+    font-size: .67rem;
+}
+
+.labor-reference-search {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    padding: 7px 9px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--border-default));
+    border-radius: 5px;
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--accent) 3%, transparent);
+    font-size: .67rem;
+}
+
+.labor-eligibility {
+    display: grid;
+    grid-template-columns: auto repeat(3, minmax(180px, 1fr));
+    gap: 8px 14px;
+    align-items: start;
+    padding: 8px 10px;
+    border-left: 3px solid var(--accent);
+    background: var(--surface-subtle);
+    font-size: .66rem;
+}
+
+.labor-eligibility > strong {
+    color: var(--accent);
+    letter-spacing: .045em;
+    text-transform: uppercase;
+}
+
+.labor-eligibility > div,
+.labor-eligibility span {
+    display: block;
+}
+
+.labor-eligibility span {
+    margin-top: 2px;
+    color: var(--text-tertiary);
+}
+
+.labor-form-error {
+    padding: 7px 9px;
+    border: 1px solid color-mix(in srgb, var(--danger) 34%, transparent);
+    border-radius: 5px;
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 6%, transparent);
+    font-size: .7rem;
+}
+
+.labor-command-center footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    align-items: center;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.labor-retry-evidence {
+    margin-right: auto;
+    color: var(--danger);
+    font-size: .67rem;
+    font-weight: 700;
+}
+
+.labor-metrics {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(120px, 1fr));
+    gap: 1px;
+    overflow: hidden;
+    margin: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    background: var(--border-subtle);
+}
+
+.labor-metrics > div {
+    min-width: 0;
+    padding: 9px 12px 8px;
+    background: var(--surface-raised);
+}
+
+.labor-metrics > div.attention {
+    box-shadow: inset 3px 0 var(--danger);
+}
+
+.labor-metrics dt {
+    color: var(--text-secondary);
+    font-size: .66rem;
+    font-weight: 750;
+    letter-spacing: .055em;
+    text-transform: uppercase;
+}
+
+.labor-metrics dd {
+    margin: 2px 0 0;
+    font-size: 1.35rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 760;
+    line-height: 1.1;
+}
+
+.labor-metrics small {
+    color: var(--text-tertiary);
+    font-size: .64rem;
+}
+
+.labor-live-grid {
+    display: grid;
+    grid-template-columns: minmax(420px, .9fr) minmax(590px, 1.35fr);
+    gap: 10px;
+    min-height: 262px;
+}
+
+.labor-reference-grid {
+    display: grid;
+    grid-template-columns: minmax(480px, 1.1fr) minmax(400px, .9fr);
+    gap: 10px;
+}
+
+.labor-standards-panel {
+    grid-column: 1 / -1;
+}
+
+.labor-panel {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    background: var(--surface-raised);
+    box-shadow: 0 2px 7px rgb(0 0 0 / 3%);
+}
+
+.labor-panel > header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 42px;
+    padding: 7px 11px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--surface-subtle) 64%, var(--surface-raised));
+}
+
+.labor-panel > header h2 {
+    font-size: .83rem;
+    letter-spacing: .01em;
+}
+
+.labor-panel > header span {
+    display: block;
+    margin-top: 2px;
+}
+
+.labor-live-panel .labor-table-scroll {
+    max-height: 286px;
+}
+
+.labor-summary-panel .labor-table-scroll {
+    max-height: 240px;
+}
+
+.labor-table-scroll,
+.labor-subtable {
+    overflow: auto;
+    scrollbar-width: thin;
+}
+
+.labor-panel table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+    font-size: .72rem;
+}
+
+.labor-panel th {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-default);
+    color: var(--text-secondary);
+    background: var(--surface-raised);
+    font-size: .61rem;
+    font-weight: 760;
+    letter-spacing: .05em;
+    text-align: left;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.labor-panel td {
+    height: 36px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-variant-numeric: tabular-nums;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.labor-panel tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.labor-panel tbody tr:hover td {
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.labor-panel td strong,
+.labor-panel td small {
+    display: block;
+}
+
+.labor-panel td strong {
+    font-size: .74rem;
+}
+
+.labor-panel td small {
+    overflow: hidden;
+    max-width: 250px;
+    color: var(--text-tertiary);
+    font-size: .61rem;
+    text-overflow: ellipsis;
+}
+
+.labor-panel code {
+    color: var(--text-primary);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: .68rem;
+    font-weight: 700;
+}
+
+.labor-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: .61rem;
+    font-weight: 760;
+    letter-spacing: .02em;
+    white-space: nowrap;
+}
+
+.labor-status.active {
+    color: var(--accent-strong, var(--accent));
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.labor-status.success {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 13%, transparent);
+}
+
+.labor-status.danger {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.labor-status.neutral {
+    color: var(--text-secondary);
+    background: var(--surface-subtle);
+}
+
+.labor-row-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.labor-row-actions .text-button,
+.labor-panel td > .text-button {
+    min-height: 24px;
+    padding: 2px 5px;
+    font-size: .66rem;
+}
+
+.labor-subtable {
+    max-height: 220px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.labor-subtable:last-child {
+    border-bottom: 0;
+}
+
+.labor-subtable h3 {
+    position: sticky;
+    z-index: 2;
+    top: 0;
+    padding: 6px 9px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    background: var(--surface-subtle);
+    font-size: .66rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+}
+
+.labor-class-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    padding: 8px 10px;
+    color: var(--text-secondary);
+    font-size: .67rem;
+}
+
+.labor-class-key span {
+    display: inline-flex;
+    gap: 5px;
+}
+
+.labor-inline-empty,
+.empty-row td {
+    padding: 18px 10px !important;
+    color: var(--text-tertiary);
+    text-align: center;
+}
+
+.labor-state {
+    display: grid;
+    justify-items: center;
+    gap: 7px;
+    min-height: 340px;
+    padding: 90px 20px;
+    text-align: center;
+}
+
+.labor-state h2 {
+    font-size: 1rem;
+}
+
+.labor-state p {
+    max-width: 540px;
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: .8rem;
+}
+
+.labor-state.error h2,
+.labor-drawer-error,
+.labor-command-error {
+    color: var(--danger);
+}
+
+.labor-drawer-backdrop {
+    position: fixed;
+    z-index: 90;
+    inset: 0;
+    display: flex;
+    justify-content: flex-end;
+    background: rgb(8 12 14 / 42%);
+    backdrop-filter: blur(2px);
+}
+
+.labor-drawer {
+    width: min(430px, 38vw);
+    height: 100%;
+    overflow: auto;
+    border-left: 1px solid var(--border-default);
+    background: var(--surface-raised);
+    box-shadow: -18px 0 55px rgb(0 0 0 / 18%);
+}
+
+.labor-drawer > header {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 20px 20px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.labor-drawer > header span {
+    color: var(--accent);
+    font-size: .64rem;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+.labor-drawer > header h2 {
+    margin-top: 3px;
+    font-size: 1.08rem;
+}
+
+.labor-drawer > header p {
+    margin: 5px 0 0;
+    color: var(--text-secondary);
+    font-size: .74rem;
+}
+
+.labor-drawer form {
+    display: grid;
+    gap: 14px;
+    padding: 18px 20px;
+}
+
+.labor-action-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.labor-drawer-error {
+    padding: 9px 10px;
+    border: 1px solid color-mix(in srgb, var(--danger) 34%, transparent);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--danger) 7%, transparent);
+    font-size: .72rem;
+}
+
+.labor-drawer footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.labor-command-error {
+    position: fixed;
+    z-index: 80;
+    right: 18px;
+    bottom: 18px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    max-width: 620px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+    border-radius: 6px;
+    background: var(--surface-raised);
+    box-shadow: 0 10px 34px rgb(0 0 0 / 20%);
+    font-size: .72rem;
+}
+
+@media (max-width: 1450px) {
+    .labor-toolbar {
+        grid-template-columns: minmax(230px, 1.1fr) repeat(3, minmax(120px, .7fr)) repeat(2, minmax(130px, .65fr)) auto auto;
+    }
+
+    .labor-history-toggle {
+        grid-column: 2;
+    }
+
+    .labor-window-help {
+        grid-column: 3 / -1;
+    }
+
+    .labor-live-grid {
+        grid-template-columns: minmax(390px, .85fr) minmax(530px, 1.15fr);
+    }
+
+    .labor-form-grid-wide {
+        grid-template-columns: repeat(4, minmax(140px, 1fr));
+    }
+}
+
+@media (max-width: 1180px) {
+    .labor-toolbar {
+        grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(120px, .68fr)) auto auto;
+    }
+
+    .labor-toolbar label:nth-of-type(4),
+    .labor-toolbar label:nth-of-type(5) {
+        grid-row: 2;
+    }
+
+    .labor-history-toggle {
+        grid-row: 2;
+        grid-column: auto;
+    }
+
+    .labor-window-help {
+        grid-row: 2;
+        grid-column: auto / span 2;
+    }
+
+    .labor-metrics {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    .labor-live-grid,
+    .labor-reference-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .labor-standards-panel {
+        grid-column: auto;
+    }
+
+    .labor-command-scope,
+    .labor-form-grid,
+    .labor-form-grid-wide {
+        grid-template-columns: repeat(3, minmax(140px, 1fr));
+    }
+}

@@ -1,8 +1,11 @@
 //! Version 1 public API primitives.
 
 mod backorder;
+mod billing;
+mod configuration;
 mod cross_dock;
 mod cursor;
+mod customer_portal;
 mod customer_return;
 mod cycle_count;
 mod error;
@@ -25,6 +28,7 @@ mod inventory_status_transition;
 mod item_storage_policy;
 mod item_substitution;
 mod item_traceability_policy;
+mod labor;
 mod license_plate_putaway;
 mod order;
 mod order_allocation;
@@ -46,13 +50,36 @@ mod revision;
 mod rf_session;
 mod shipping;
 mod shipping_queue;
+mod slotting;
 mod storage_zone;
 mod transfer_order;
+mod value_added_work;
+mod vendor_return;
+mod workforce_identity;
+mod yard;
 
 pub use backorder::{
     BackorderPolicyMode, BackorderPolicyRequest, BackorderPolicyResponse, BackorderReason,
     BackorderSplitLineResponse, ConfigureBackorderPolicyRequest, SplitOrderBackorderRequest,
     SplitOrderBackorderResponse,
+};
+pub use billing::{
+    BillableEventResponse, BillingChargeResponse, BillingContractResponse, BillingContractStatus,
+    BillingFinancialExportResponse, BillingLifecycleRequest, BillingPageRequest,
+    BillingRateResponse, BillingReviewDecision, BillingRunResponse, BillingRunStatus,
+    BillingStorageSnapshotResponse, BillingWorkspaceResponse, CaptureBillableEventRequest,
+    CaptureBillingStorageSnapshotRequest, ConfigureBillingRateRequest,
+    CreateBillingContractRequest, ExportBillingRunRequest, GenerateBillingRunRequest,
+    ReviewBillingRunRequest, MAX_BILLING_BATCH_KEY_LENGTH, MAX_BILLING_NOTE_LENGTH,
+    MAX_BILLING_REFERENCE_LENGTH,
+};
+pub use configuration::{
+    BillableEventType, BillingUnit, ConfigurationLifecycleRequest, ConfigurationPage,
+    ConfigurationPageRequest, ConfigurationResponse, ConfigurationScope,
+    ConfigurationSimulationResponse, ConfigurationStatus, CreateConfigurationRequest, DecisionRule,
+    DecisionRuleKind, InventoryRotation, RollbackConfigurationRequest,
+    SimulateConfigurationRequest, MAX_CONFIGURATION_PERCENTAGE_BASIS_POINTS,
+    MAX_CONFIGURATION_RATE_MINOR, MAX_CONFIGURATION_WAVE_ORDERS,
 };
 pub use cross_dock::{
     CancelCrossDockWorkRequest, CancelCrossDockWorkResponse, ClaimCrossDockWorkByIdRequest,
@@ -68,6 +95,11 @@ pub use cross_dock::{
 pub use cursor::{
     CursorPage, CursorPageRequest, OpaqueCursor, OpaqueCursorError, PageLimit, PageLimitError,
     DEFAULT_PAGE_LIMIT, MAX_CURSOR_LENGTH, MAX_PAGE_LIMIT,
+};
+pub use customer_portal::{
+    CustomerPortalDocumentResponse, CustomerPortalDocumentType, CustomerPortalInventoryResponse,
+    CustomerPortalOrderResponse, CustomerPortalOrderStatus, CustomerPortalShipmentResponse,
+    CustomerPortalShipmentStatus, CustomerPortalWorkspaceRequest, CustomerPortalWorkspaceResponse,
 };
 pub use customer_return::{
     CancelCustomerReturnRequest, CancelCustomerReturnResponse, CreateCustomerReturnLineRequest,
@@ -219,6 +251,21 @@ pub use item_traceability_policy::{
     ItemTraceabilityPolicyPageRequest, ItemTraceabilityPolicyResponse,
     ItemTraceabilityPolicyStatus, RetireItemTraceabilityPolicyRequest, TraceabilityRequirement,
 };
+pub use labor::{
+    AttendanceAdjustmentResponse, AttendanceIntervalResponse, AttendanceStatus,
+    CancelLaborActivityRequest, CertifyEmployeeRequest, ChangeEquipmentStatusRequest,
+    ClockInRequest, ClockOutRequest, CompleteLaborActivityRequest, ConfigureEquipmentClassRequest,
+    ConfigureLaborSkillRequest, ConfigureLaborStandardRequest, CorrectAttendanceRequest,
+    CorrectLaborActivityRequest, CreateEquipmentAssetRequest, EmployeeCertificationResponse,
+    EmployeeLaborSummaryResponse, EquipmentAssetResponse, EquipmentClassResponse, EquipmentStatus,
+    LaborActivityAdjustmentResponse, LaborActivityKind, LaborActivityResponse, LaborActivityStatus,
+    LaborCorrectionReason, LaborExceptionReason, LaborQuantityBasis,
+    LaborReferenceCandidatePageRequest, LaborReferenceCandidatePageResponse,
+    LaborReferenceCandidateResponse, LaborReferenceType, LaborRosterCandidateResponse,
+    LaborRosterPageRequest, LaborRosterPageResponse, LaborSkillResponse, LaborStandardResponse,
+    LaborWorkspaceRequest, LaborWorkspaceResponse, RevokeEmployeeCertificationRequest,
+    StartLaborActivityRequest,
+};
 pub use license_plate_putaway::{
     ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,
     CreateLicensePlatePutawayTaskResponse, LicensePlatePutawayConfirmationResponse,
@@ -367,6 +414,14 @@ pub use shipping_queue::{
     ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,
     ShippingQueuePage, ShippingQueuePageRequest, ShippingQueueShipmentResponse,
 };
+pub use slotting::{
+    AcceptSlottingRecommendationRequest, ConfigureSlottingProfileRequest,
+    DismissSlottingRecommendationRequest, RunSlottingRequest, SlottingAdvisoryMode,
+    SlottingDismissalReason, SlottingProfilePage, SlottingProfilePageRequest,
+    SlottingProfileResponse, SlottingRecommendationPage, SlottingRecommendationPageRequest,
+    SlottingRecommendationReason, SlottingRecommendationResponse, SlottingRecommendationStatus,
+    SlottingRunResponse, SlottingScoreEvidenceResponse, SlottingScoreResponse,
+};
 pub use storage_zone::{
     ConfigureStorageZoneRequest, RetireStorageZoneRequest, StorageZoneLocationResponse,
     StorageZonePage, StorageZonePageRequest, StorageZonePurpose, StorageZoneResponse,
@@ -382,6 +437,31 @@ pub use transfer_order::{
     TransferOrderCancellationReason, TransferOrderDetailResponse, TransferOrderLineResponse,
     TransferOrderPage, TransferOrderPageRequest, TransferOrderStatus, TransferOrderSummaryResponse,
     TransferReceiptLineResponse, MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH,
+};
+pub use value_added_work::{
+    CreateValueAddedWorkInputRequest, CreateValueAddedWorkOutputRequest,
+    CreateValueAddedWorkRequest, ValueAddedInventoryStatus, ValueAddedWorkEventResponse,
+    ValueAddedWorkInputResponse, ValueAddedWorkKind, ValueAddedWorkLifecycleRequest,
+    ValueAddedWorkOutputResponse, ValueAddedWorkPageRequest, ValueAddedWorkPageResponse,
+    ValueAddedWorkResponse, ValueAddedWorkStatus,
+};
+pub use vendor_return::{
+    CreateVendorReturnLineRequest, CreateVendorReturnRequest, VendorReturnEventResponse,
+    VendorReturnLifecycleRequest, VendorReturnLineResponse, VendorReturnPageRequest,
+    VendorReturnPageResponse, VendorReturnReason, VendorReturnResponse, VendorReturnStatus,
+};
+pub use workforce_identity::{
+    EmployeeIdentityChangeKind, EmployeeIdentityChangeResponse, LinkEmployeeIdentityRequest,
+    UnlinkEmployeeIdentityRequest,
+};
+pub use yard::{
+    AssignYardVisitDoorRequest, ConfigureYardLocationRequest, CreateYardAppointmentRequest,
+    GateInYardVisitRequest, MoveYardVisitRequest, RegisterYardAssetRequest,
+    YardAppointmentResponse, YardAppointmentStatus, YardAssetKind, YardAssetResponse,
+    YardDetentionResponse, YardDirection, YardDockOperationRequest, YardLifecycleRequest,
+    YardLocationKind, YardLocationResponse, YardOperation, YardVisitEventKind,
+    YardVisitEventResponse, YardVisitResponse, YardVisitStatus, YardWorkspaceRequest,
+    YardWorkspaceResponse,
 };
 
 /// URL prefix for the version 1 public API.

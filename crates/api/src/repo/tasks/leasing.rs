@@ -239,7 +239,7 @@ pub(in crate::repo) async fn release_expired_tasks_tx(
           AND lease_expires_at <= $1
           AND completed_at IS NULL
           AND ($3 OR facility_id = ANY($4))
-          AND ($5 OR inventory_owner_id = ANY($6))
+          AND ($5 OR inventory_owner_id IS NULL OR inventory_owner_id = ANY($6))
           AND ($7::BIGINT IS NULL OR assigned_user_id = $7)
         RETURNING id
         "#,
@@ -287,7 +287,7 @@ pub(in crate::repo) async fn release_inaccessible_active_tasks_tx(
           AND completed_at IS NULL
           AND NOT COALESCE(
               ($4 OR facility_id = ANY($5))
-              AND ($6 OR inventory_owner_id = ANY($7)),
+              AND ($6 OR inventory_owner_id IS NULL OR inventory_owner_id = ANY($7)),
               FALSE
           )
         RETURNING id

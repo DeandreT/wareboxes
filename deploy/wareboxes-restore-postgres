@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: wareboxes-restore-postgres [--snapshot <id>] --confirm-destroy-database <database>
+       wareboxes-restore-postgres --check [--snapshot <id>]
+
+Restores an encrypted restic snapshot into the configured Wareboxes PostgreSQL
+database. The API and worker services must be stopped. The confirmation value
+must exactly match WAREBOXES_POSTGRES_DATABASE.
+EOF
+}
+
+snapshot=latest
+confirmation=
+check_only=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --snapshot)
+      if [ "$#" -lt 2 ]; then
+        usage >&2
+        exit 2
+      fi
+      snapshot="$2"
+      shift 2
+      ;;
+    --confirm-destroy-database)
+      if [ "$#" -lt 2 ]; then
+        usage >&2
+        exit 2
+      fi
+      confirmation="$2"
+      shift 2
+      ;;
+    --check)
+      check_only=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ "$snapshot" != latest && ! "$snapshot" =~ ^[0-9a-f]{8,64}$ ]]; then
+  echo "snapshot must be 'latest' or a hexadecimal restic snapshot ID" >&2
+  exit 2
+fi
+
+: "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required}"
+if [ -z "${RESTIC_PASSWORD_FILE:-}" ] \
+  && [ -z "${RESTIC_PASSWORD_COMMAND:-}" ] \
+  && [ -z "${RESTIC_PASSWORD:-}" ]; then
+  echo "RESTIC_PASSWORD_FILE, RESTIC_PASSWORD_COMMAND, or RESTIC_PASSWORD is required" >&2
+  exit 2
+fi
+
+compose_file="${WAREBOXES_POSTGRES_COMPOSE_FILE:-/opt/wareboxes/runtime/postgres.compose.yml}"
+postgres_service="${WAREBOXES_POSTGRES_SERVICE:-postgres}"
+postgres_database="${WAREBOXES_POSTGRES_DATABASE:-wareboxes}"
+postgres_user="${WAREBOXES_POSTGRES_USER:-wareboxes_admin}"
+runtime_role="${WAREBOXES_POSTGRES_RUNTIME_ROLE:-wareboxes_app}"
+source_host="${WAREBOXES_BACKUP_SOURCE_HOST:-${WAREBOXES_BACKUP_HOST:-$(hostname -f)}}"
+backup_tag="${WAREBOXES_BACKUP_TAG:-wareboxes-postgres}"
+dump_path="${WAREBOXES_BACKUP_DUMP_PATH:-/wareboxes/postgres.dump}"
+lock_file="${WAREBOXES_BACKUP_LOCK_FILE:-/run/lock/wareboxes-backup.lock}"
+
+for identifier in "$postgres_service" "$postgres_database" "$postgres_user" "$runtime_role"; do
+  if [[ ! "$identifier" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+    echo "PostgreSQL service, database, user, and runtime role must be lowercase identifiers" >&2
+    exit 2
+  fi
+done
+if [ ! -f "$compose_file" ]; then
+  echo "PostgreSQL compose file does not exist: $compose_file" >&2
+  exit 2
+fi
+if [ -z "$source_host" ] || [ -z "$backup_tag" ] || [[ "$dump_path" != /* ]]; then
+  echo "backup source host, tag, and absolute dump path are required" >&2
+  exit 2
+fi
+for command_name in docker flock restic systemctl; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required" >&2
+    exit 127
+  fi
+done
+
+exec 9>"$lock_file"
+flock -n 9 || {
+  echo "another Wareboxes backup or restore operation is active" >&2
+  exit 1
+}
+
+compose=(docker compose -f "$compose_file")
+if ! "${compose[@]}" exec -T "$postgres_service" \
+  pg_isready --username "$postgres_user" --dbname "$postgres_database" >/dev/null; then
+  echo "Wareboxes PostgreSQL is not ready" >&2
+  exit 1
+fi
+
+# Fully stream the selected snapshot through pg_restore before permitting a
+# destructive restore. This catches missing, truncated, or wrongly scoped data.
+restic dump --host "$source_host" --tag "$backup_tag" "$snapshot" "$dump_path" \
+  | "${compose[@]}" exec -T "$postgres_service" pg_restore --list >/dev/null
+
+if [ "$check_only" = true ]; then
+  echo "event=restore_configuration_valid source_host=$source_host snapshot=$snapshot database=$postgres_database"
+  exit 0
+fi
+if [ "$confirmation" != "$postgres_database" ]; then
+  echo "--confirm-destroy-database must exactly match '$postgres_database'" >&2
+  exit 2
+fi
+for service_name in wareboxes.service wareboxes-worker.service; do
+  if systemctl is-active --quiet "$service_name"; then
+    echo "$service_name must be stopped before restoring PostgreSQL" >&2
+    exit 1
+  fi
+done
+
+started_at="$(date +%s)"
+echo "event=database_restore_started source_host=$source_host snapshot=$snapshot database=$postgres_database"
+"${compose[@]}" exec -T "$postgres_service" \
+  dropdb --username "$postgres_user" --force --if-exists "$postgres_database"
+"${compose[@]}" exec -T "$postgres_service" \
+  createdb --username "$postgres_user" --owner "$postgres_user" "$postgres_database"
+
+restic dump --host "$source_host" --tag "$backup_tag" "$snapshot" "$dump_path" \
+  | "${compose[@]}" exec -T "$postgres_service" \
+      pg_restore \
+        --username "$postgres_user" \
+        --dbname "$postgres_database" \
+        --no-owner \
+        --exit-on-error
+
+"${compose[@]}" exec -T "$postgres_service" \
+  psql \
+    --username "$postgres_user" \
+    --dbname "$postgres_database" \
+    --set ON_ERROR_STOP=1 \
+    --set runtime_role="$runtime_role" \
+    --set database_name="$postgres_database" <<'SQL'
+REVOKE TEMPORARY ON DATABASE :"database_name" FROM PUBLIC;
+GRANT CONNECT ON DATABASE :"database_name" TO :"runtime_role";
+SQL
+
+validation="$({
+  "${compose[@]}" exec -T "$postgres_service" \
+    psql \
+      --username "$postgres_user" \
+      --dbname "$postgres_database" \
+      --tuples-only \
+      --no-align \
+      --set ON_ERROR_STOP=1 \
+      --command "SELECT
+        to_regclass('public.tenants') IS NOT NULL,
+        to_regclass('public.inventory_transactions') IS NOT NULL,
+        (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'public.inventory_transactions'::regclass),
+        has_table_privilege('$runtime_role', 'public.inventory_transactions', 'SELECT');"
+} | tr -d '[:space:]')"
+if [ "$validation" != "t|t|t|t" ]; then
+  echo "restored database failed invariant validation: $validation" >&2
+  exit 1
+fi
+
+finished_at="$(date +%s)"
+echo "event=database_restore_completed source_host=$source_host snapshot=$snapshot database=$postgres_database duration_seconds=$((finished_at - started_at))"

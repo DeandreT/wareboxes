@@ -680,6 +680,14 @@ async fn license_plate_cycle_count_locks_plate_before_balance() {
     .await
     .unwrap();
     let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    start_expected_receipt_unloading(
+        &fixture.db,
+        &access,
+        load_id,
+        location_id,
+        "cycle-count-lp-lock-unloading",
+    )
+    .await;
     repo::inbound_receipt::receive_expected_inventory(
         &fixture.db,
         &access,

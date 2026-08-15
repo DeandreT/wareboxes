@@ -128,6 +128,14 @@ async fn received_plate(
     )
     .await
     .unwrap());
+    start_expected_receipt_unloading(
+        &fixture.db,
+        access,
+        load_id,
+        source_location_id,
+        &format!("{key}-unloading"),
+    )
+    .await;
     let receipt = repo::inbound_receipt::receive_expected_inventory(
         &fixture.db,
         access,

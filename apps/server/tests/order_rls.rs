@@ -190,18 +190,16 @@ async fn guessed_mutation_counts(connection: &mut sqlx::PgConnection, refs: Orde
         .await
         .unwrap()
         .rows_affected();
-    let line_updates = sqlx::query("UPDATE order_items SET qty = qty WHERE id = $1")
-        .bind(refs.order_item_id)
-        .execute(&mut *connection)
-        .await
-        .unwrap()
-        .rows_affected();
-    let line_deletes = sqlx::query("DELETE FROM order_items WHERE id = $1")
-        .bind(refs.order_item_id)
-        .execute(&mut *connection)
-        .await
-        .unwrap()
-        .rows_affected();
+    let line_privileges: (bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_column_privilege(current_user, 'order_items', 'qty', 'UPDATE'),
+               has_table_privilege(current_user, 'order_items', 'DELETE')
+        "#,
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(line_privileges, (false, false));
     let order_deletes = sqlx::query("DELETE FROM orders WHERE id = $1")
         .bind(refs.order_id)
         .execute(&mut *connection)
@@ -214,11 +212,23 @@ async fn guessed_mutation_counts(connection: &mut sqlx::PgConnection, refs: Orde
         .await
         .unwrap()
         .rows_affected();
+    let line_update_error = sqlx::query("UPDATE order_items SET qty = qty WHERE id = $1")
+        .bind(refs.order_item_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        line_update_error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("42501")
+    );
     [
         address_updates,
         order_updates,
-        line_updates,
-        line_deletes,
+        0,
+        0,
         order_deletes,
         address_deletes,
     ]

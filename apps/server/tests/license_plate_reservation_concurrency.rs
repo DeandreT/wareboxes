@@ -176,6 +176,14 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     .await
     .unwrap();
     let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    start_expected_receipt_unloading(
+        &fixture.db,
+        &access,
+        load_id,
+        source_location_id,
+        "license-plate-reservation-race-unloading",
+    )
+    .await;
     let receipt = repo::inbound_receipt::receive_expected_inventory(
         &fixture.db,
         &access,

@@ -233,12 +233,14 @@ async fn ensure_scenario(
     let receipt_transaction_id = ensure_receipt(
         context,
         access,
-        load_id,
-        load_line_id,
-        source_location_id,
-        &source_barcode,
-        &lot,
-        sequence,
+        ReceiptSeed {
+            load_id,
+            load_line_id,
+            source_location_id,
+            source_barcode: &source_barcode,
+            lot: &lot,
+            sequence,
+        },
     )
     .await?;
     let order_id = match sqlx::query_scalar::<_, i64>(
@@ -372,16 +374,28 @@ async fn ensure_receiving_load(
     Ok((load_id, line_id))
 }
 
-async fn ensure_receipt(
-    context: &SeedContext,
-    access: &TenantAccess,
+struct ReceiptSeed<'a> {
     load_id: i64,
     load_line_id: i64,
     source_location_id: i64,
-    source_barcode: &str,
-    lot: &str,
+    source_barcode: &'a str,
+    lot: &'a str,
     sequence: i64,
+}
+
+async fn ensure_receipt(
+    context: &SeedContext,
+    access: &TenantAccess,
+    seed: ReceiptSeed<'_>,
 ) -> anyhow::Result<i64> {
+    let ReceiptSeed {
+        load_id,
+        load_line_id,
+        source_location_id,
+        source_barcode,
+        lot,
+        sequence,
+    } = seed;
     if let Some(id) = sqlx::query_scalar::<_, i64>(
         "SELECT id FROM inventory_transactions WHERE tenant_id=$1 AND operation='inbound.receive_expected_inventory.v1' AND reference_type='load_line' AND reference_id=$2 ORDER BY id LIMIT 1",
     )

@@ -1,0 +1,25 @@
+{
+  "order_key": "SO-1001",
+  "rush": false,
+  "ship_by": "2027-08-12T17:00:00Z",
+  "destination": {
+    "recipient_name": "Receiving Team",
+    "company": "Northstar Retail",
+    "phone": "+1 775 555 0100",
+    "email": "receiving@example.com",
+    "line1": "125 Shipping Lane",
+    "line2": "Dock 4",
+    "city": "Reno",
+    "region": "NV",
+    "postal_code": "89502",
+    "country": "US"
+  },
+  "lines": [
+    {
+      "line_key": "1",
+      "external_item_key": "CLIENT-CASE",
+      "external_uom": "CS",
+      "quantity": 4
+    }
+  ]
+}

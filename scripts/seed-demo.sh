@@ -58,7 +58,7 @@ done
 run_psql() {
   if [ -n "${MIGRATION_DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
     psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 "$@"
-    return
+    return $?
   fi
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     echo "MIGRATION_DATABASE_URL+psql or an available Docker daemon is required." >&2
@@ -266,6 +266,7 @@ DECLARE
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM packing_sessions) THEN missing := array_append(missing, 'packing'); END IF;
   IF NOT EXISTS (SELECT 1 FROM shipments) THEN missing := array_append(missing, 'shipping'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM shipment_documents) THEN missing := array_append(missing, 'shipment documents'); END IF;
   IF NOT EXISTS (SELECT 1 FROM outbound_loads) THEN missing := array_append(missing, 'outbound loads'); END IF;
   IF NOT EXISTS (SELECT 1 FROM pick_waves) THEN missing := array_append(missing, 'pick waves'); END IF;
   IF NOT EXISTS (SELECT 1 FROM replenishment_policies) THEN missing := array_append(missing, 'replenishment policies'); END IF;
@@ -287,6 +288,35 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM putaway_tasks) THEN missing := array_append(missing, 'putaway'); END IF;
   IF NOT EXISTS (SELECT 1 FROM inventory_holds) THEN missing := array_append(missing, 'inventory holds'); END IF;
   IF NOT EXISTS (SELECT 1 FROM integration_inbox_receipts) THEN missing := array_append(missing, 'integration monitor'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM permissions permission
+    INNER JOIN role_permissions grant_row
+      ON grant_row.tenant_id=permission.tenant_id AND grant_row.permission_id=permission.id
+    INNER JOIN user_roles assignment
+      ON assignment.tenant_id=grant_row.tenant_id AND assignment.role_id=grant_row.role_id
+    WHERE permission.name='customer_portal' AND permission.deleted IS NULL
+      AND grant_row.deleted IS NULL AND assignment.deleted IS NULL
+  ) THEN missing := array_append(missing, 'customer portal permission'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM billing_financial_exports export
+    JOIN billing_reconciliation_runs run
+      ON run.tenant_id=export.tenant_id AND run.id=export.reconciliation_run_id
+    WHERE run.status='exported' AND export.line_count=run.charge_count
+      AND export.total_minor=run.total_minor
+  ) THEN missing := array_append(missing, 'reconciled billing export'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM yard_visits visit
+    JOIN yard_visit_events event ON event.tenant_id=visit.tenant_id AND event.visit_id=visit.id
+    WHERE visit.status IN ('at_door','loading','unloading')
+  ) THEN missing := array_append(missing, 'active yard execution'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM yard_visits visit
+    JOIN yard_detention_records detention
+      ON detention.tenant_id=visit.tenant_id AND detention.visit_id=visit.id
+    WHERE visit.status='gated_out'
+  ) THEN missing := array_append(missing, 'completed yard detention evidence'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM yard_appointments WHERE status='scheduled')
+  THEN missing := array_append(missing, 'scheduled yard appointment'); END IF;
   IF EXISTS (
     SELECT 1
     FROM loads load
@@ -342,6 +372,7 @@ report_coverage() {
       ('Pick waves', (SELECT COUNT(*) FROM pick_waves)),
       ('Packing sessions', (SELECT COUNT(*) FROM packing_sessions)),
       ('Shipments', (SELECT COUNT(*) FROM shipments)),
+      ('Shipment documents', (SELECT COUNT(*) FROM shipment_documents)),
       ('Outbound loads', (SELECT COUNT(*) FROM outbound_loads)),
       ('Putaway work', (SELECT COUNT(*) FROM putaway_tasks)),
       ('Cycle-count work', (SELECT COUNT(*) FROM cycle_count_location_tasks)
@@ -351,6 +382,13 @@ report_coverage() {
       ('Replenishment work', (SELECT COUNT(*) FROM replenishment_tasks)),
       ('Cross-dock work', (SELECT COUNT(*) FROM cross_dock_tasks)),
       ('Integration receipts', (SELECT COUNT(*) FROM integration_inbox_receipts))
+      ,('Configuration versions', (SELECT COUNT(*) FROM configuration_versions))
+      ,('Billing contracts', (SELECT COUNT(*) FROM billing_contracts))
+      ,('Billable events', (SELECT COUNT(*) FROM billable_events))
+      ,('Billing charges', (SELECT COUNT(*) FROM billing_charges))
+      ,('Financial exports', (SELECT COUNT(*) FROM billing_financial_exports))
+      ,('Yard appointments', (SELECT COUNT(*) FROM yard_appointments))
+      ,('Yard visits', (SELECT COUNT(*) FROM yard_visits))
     ) AS coverage(workspace, records)
     ORDER BY workspace;"
 }
@@ -371,7 +409,7 @@ fi
 
 verify_core
 if [ "$profile" = full ]; then
-  verify_full
+  verify_full || exit $?
 fi
 report_coverage
 

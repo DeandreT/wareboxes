@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${RESTIC_DOCKER_MOUNT_ROOT:?RESTIC_DOCKER_MOUNT_ROOT is required}"
+if [[ "$RESTIC_DOCKER_MOUNT_ROOT" != /* ]] || [ ! -d "$RESTIC_DOCKER_MOUNT_ROOT" ]; then
+  echo "RESTIC_DOCKER_MOUNT_ROOT must be an existing absolute directory" >&2
+  exit 2
+fi
+
+exec docker run \
+  --rm \
+  --interactive \
+  --user "$(id -u):$(id -g)" \
+  --volume "$RESTIC_DOCKER_MOUNT_ROOT:$RESTIC_DOCKER_MOUNT_ROOT" \
+  --env RESTIC_REPOSITORY \
+  --env RESTIC_PASSWORD_FILE \
+  --env RESTIC_CACHE_DIR \
+  restic/restic@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a \
+  "$@"

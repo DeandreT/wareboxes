@@ -138,6 +138,14 @@ async fn receive_searchable_plate_balance(
     let access = default_tenant_for_user(&fixture.db, actor_id)
         .await
         .unwrap();
+    start_expected_receipt_unloading(
+        &fixture.db,
+        &access,
+        load_id,
+        location_id,
+        "v1-search-unloading",
+    )
+    .await;
     let context = CommandContext {
         tenant_id,
         actor_id: access.user_id,
@@ -177,7 +185,7 @@ async fn receive_searchable_plate_balance(
 #[tokio::test]
 async fn inventory_balance_v1_contract_is_scoped_sorted_paginated_and_stable() {
     let fixture = Fixture::new().await;
-    let administrator = fixture.user("v1-balances-admin@test.com").await;
+    let administrator = fixture.wms_user("v1-balances-admin@test.com").await;
     let operator = fixture.user("v1-balances-operator@test.com").await;
     let tenant_id = tenant_for_user(&fixture.db, administrator.id).await;
 

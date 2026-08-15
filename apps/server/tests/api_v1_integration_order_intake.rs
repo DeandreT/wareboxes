@@ -48,6 +48,45 @@ fn request<T: Serialize>(
         .unwrap()
 }
 
+fn raw_request(
+    token: &str,
+    tenant_id: TenantId,
+    uri: &str,
+    key: &str,
+    content_type: &str,
+    body: impl Into<Body>,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, key)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(body.into())
+        .unwrap()
+}
+
+fn x12_940(order_key: &str, segment_count: usize) -> String {
+    format!(
+        concat!(
+            "ISA*00*          *00*          *ZZ*SENDER         *ZZ*WAREBOXES      *260812*1200*U*00401*000000001*0*P*>~",
+            "GS*OW*SENDER*WAREBOXES*20260812*1200*1*X*004010~",
+            "ST*940*0001~",
+            "W05*N*{}~",
+            "N1*ST*Receiving Team~",
+            "N3*125 Shipping Lane*Dock 4~",
+            "N4*Reno*NV*89502*US~",
+            "LX*1~",
+            "W01*4*CS**SK*CLIENT-CASE~",
+            "SE*{}*0001~",
+            "GE*1*1~",
+            "IEA*1*000000001~"
+        ),
+        order_key, segment_count
+    )
+}
+
 async fn response<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 512 * 1024).await.unwrap();
@@ -522,6 +561,142 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
         evidence,
         ("CLIENT-CASE".into(), "CS".into(), 1, item_id, "case".into())
     );
+}
+
+#[tokio::test]
+async fn x12_940_is_retained_mapped_and_replayed_through_the_standard_inbox() {
+    init_tracing();
+    let fixture = Fixture::new().await;
+    let user = fixture.user("integration-x12-940@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, user.id).await;
+    grant(&fixture, tenant_id, user.id, "orders").await;
+    let owner_id = fixture.inventory_owner(tenant_id, "X12 Client").await;
+    let item_id = fixture.item(tenant_id, "X12 Case", "case").await;
+    link_item(&fixture, tenant_id, owner_id, item_id).await;
+    configure_owner_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        "partner-edi",
+        EXTERNAL_OWNER_KEY,
+    )
+    .await;
+    configure_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        item_id,
+        "partner-edi",
+    )
+    .await;
+    let token = auth::create_session(&fixture.db, user.id).await.unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let uri = format!(
+        "/api/v1/integrations/x12-940/partner-edi/inventory-owners/{EXTERNAL_OWNER_KEY}/orders"
+    );
+    let document = x12_940("X12-ORDER-100", 8);
+
+    let unsupported = app
+        .clone()
+        .oneshot(raw_request(
+            &token,
+            tenant_id,
+            &uri,
+            "x12-wrong-media",
+            "text/plain",
+            document.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let processed: IntegrationOrderIntakeResponse = success(
+        app.clone()
+            .oneshot(raw_request(
+                &token,
+                tenant_id,
+                &uri,
+                "x12-isa-1-st-1",
+                "application/edi-x12",
+                document.clone(),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    assert_eq!(
+        processed.status,
+        IntegrationOrderProcessingStatus::Processed
+    );
+    assert_eq!(processed.adapter_key, "x12.940.warehouse_shipping_order");
+    assert_eq!(processed.mapping_version, 1);
+    assert_eq!(processed.applied_mapping_count, 1);
+
+    let replay: IntegrationOrderIntakeResponse = success(
+        app.clone()
+            .oneshot(raw_request(
+                &token,
+                tenant_id,
+                &uri,
+                "x12-isa-1-st-1",
+                "application/edi-x12",
+                document.clone(),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    assert_eq!(replay, processed);
+
+    let malformed: IntegrationOrderIntakeResponse = success(
+        app.clone()
+            .oneshot(raw_request(
+                &token,
+                tenant_id,
+                &uri,
+                "x12-isa-2-st-1",
+                "application/edi-x12; version=004010",
+                x12_940("X12-ORDER-BAD", 7),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    assert_eq!(
+        malformed.status,
+        IntegrationOrderProcessingStatus::Quarantined
+    );
+    assert_eq!(malformed.error_code.as_deref(), Some("invalid_payload"));
+    assert_eq!(malformed.adapter_key, "x12.940.warehouse_shipping_order");
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let evidence: (Vec<u8>, String, String, i32, i64) = sqlx::query_as(
+        r#"
+        SELECT receipt.raw_payload,receipt.content_type,processing.adapter_key,
+               processing.mapping_version,
+               (SELECT COUNT(*) FROM orders WHERE tenant_id=$1 AND order_key='X12-ORDER-100')
+        FROM integration_inbox_receipts receipt
+        JOIN integration_inbox_processings processing
+          ON processing.tenant_id=receipt.tenant_id AND processing.receipt_id=receipt.id
+        WHERE receipt.tenant_id=$1 AND receipt.id=$2
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(processed.receipt_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(evidence.0, document.as_bytes());
+    assert_eq!(evidence.1, "application/edi-x12");
+    assert_eq!(evidence.2, "x12.940.warehouse_shipping_order");
+    assert_eq!(evidence.3, 1);
+    assert_eq!(evidence.4, 1);
 }
 
 #[tokio::test]

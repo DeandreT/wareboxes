@@ -3217,6 +3217,19 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
+    IF EXISTS (
+        SELECT 1
+        FROM public.labor_activities activity
+        WHERE activity.tenant_id = referenced_tenant_id
+          AND activity.inventory_owner_id = referenced_inventory_owner_id
+          AND activity.facility_id = referenced_facility_id
+          AND activity.status = 'active'
+    ) THEN
+        RAISE EXCEPTION
+            'inventory owner facility assignment has active labor'
+            USING ERRCODE = '55000';
+    END IF;
+
     IF TG_OP = 'DELETE' THEN
         RETURN OLD;
     END IF;
@@ -10553,7 +10566,7 @@ CREATE TABLE public.command_idempotency_records (
     request_hash text NOT NULL,
     result_json jsonb NOT NULL,
     inventory_transaction_id bigint,
-    actor_user_id bigint,
+    actor_user_id bigint NOT NULL,
     request_id text,
     result_schema_version integer DEFAULT 1 NOT NULL,
     CONSTRAINT command_idempotency_records_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
@@ -10562,7 +10575,7 @@ CREATE TABLE public.command_idempotency_records (
     CONSTRAINT command_idempotency_records_request_hash_check CHECK ((btrim(request_hash) <> ''::text)),
     CONSTRAINT command_idempotency_records_request_id_check CHECK (((request_id IS NULL) OR ((btrim(request_id) <> ''::text) AND (char_length(request_id) <= 128)))),
     CONSTRAINT command_idempotency_records_result_schema_version_check CHECK ((result_schema_version > 0))
-);
+) PARTITION BY HASH (tenant_id);
 
 ALTER TABLE ONLY public.command_idempotency_records FORCE ROW LEVEL SECURITY;
 
@@ -10579,6 +10592,46 @@ ALTER TABLE public.command_idempotency_records ALTER COLUMN id ADD GENERATED ALW
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Command replay records are distributed by the tenant isolation key. The
+-- tenant identifier remains part of every unique key, so partitioning cannot
+-- admit a duplicate idempotency identity.
+--
+
+CREATE TABLE public.command_idempotency_records_p00
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+CREATE TABLE public.command_idempotency_records_p01
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 1);
+CREATE TABLE public.command_idempotency_records_p02
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 2);
+CREATE TABLE public.command_idempotency_records_p03
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 3);
+CREATE TABLE public.command_idempotency_records_p04
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 4);
+CREATE TABLE public.command_idempotency_records_p05
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 5);
+CREATE TABLE public.command_idempotency_records_p06
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 6);
+CREATE TABLE public.command_idempotency_records_p07
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 7);
+CREATE TABLE public.command_idempotency_records_p08
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 8);
+CREATE TABLE public.command_idempotency_records_p09
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 9);
+CREATE TABLE public.command_idempotency_records_p10
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 10);
+CREATE TABLE public.command_idempotency_records_p11
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 11);
+CREATE TABLE public.command_idempotency_records_p12
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 12);
+CREATE TABLE public.command_idempotency_records_p13
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 13);
+CREATE TABLE public.command_idempotency_records_p14
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 14);
+CREATE TABLE public.command_idempotency_records_p15
+    PARTITION OF public.command_idempotency_records FOR VALUES WITH (MODULUS 16, REMAINDER 15);
 
 
 --
@@ -14613,16 +14666,23 @@ ALTER TABLE ONLY public.break_master_pack_tasks
 -- Name: command_idempotency_records command_idempotency_records_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.command_idempotency_records
-    ADD CONSTRAINT command_idempotency_records_pkey PRIMARY KEY (id);
+ALTER TABLE public.command_idempotency_records
+    ADD CONSTRAINT command_idempotency_records_pkey PRIMARY KEY (tenant_id, id);
 
 
 --
 -- Name: command_idempotency_records command_idempotency_records_tenant_id_operation_idempotency_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.command_idempotency_records
+ALTER TABLE public.command_idempotency_records
     ADD CONSTRAINT command_idempotency_records_tenant_id_operation_idempotency_key UNIQUE (tenant_id, operation, idempotency_key);
+
+
+--
+-- Name: command_idempotency_records_archive_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX command_idempotency_records_archive_idx ON public.command_idempotency_records USING btree (created, tenant_id, id);
 
 
 --
@@ -16557,7 +16617,7 @@ CREATE INDEX idx_employee_facilities_facility ON public.employee_facilities USIN
 -- Name: idx_employees_user; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_employees_user ON public.employees USING btree (tenant_id, user_id) WHERE (user_id IS NOT NULL);
+CREATE UNIQUE INDEX idx_employees_user ON public.employees USING btree (tenant_id, user_id) WHERE (user_id IS NOT NULL);
 
 
 --
@@ -18734,7 +18794,7 @@ ALTER TABLE ONLY public.break_master_pack_tasks
 -- Name: command_idempotency_records command_idempotency_records_actor_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.command_idempotency_records
+ALTER TABLE public.command_idempotency_records
     ADD CONSTRAINT command_idempotency_records_actor_fkey FOREIGN KEY (tenant_id, actor_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 
@@ -18742,7 +18802,7 @@ ALTER TABLE ONLY public.command_idempotency_records
 -- Name: command_idempotency_records command_idempotency_records_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.command_idempotency_records
+ALTER TABLE public.command_idempotency_records
     ADD CONSTRAINT command_idempotency_records_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
 
 
@@ -18750,7 +18810,7 @@ ALTER TABLE ONLY public.command_idempotency_records
 -- Name: command_idempotency_records command_idempotency_records_tenant_id_inventory_transactio_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.command_idempotency_records
+ALTER TABLE public.command_idempotency_records
     ADD CONSTRAINT command_idempotency_records_tenant_id_inventory_transactio_fkey FOREIGN KEY (tenant_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, id);
 
 
@@ -35298,14 +35358,23 @@ SET search_path TO 'pg_catalog', 'public'
 AS $$
 DECLARE
     attempt public.integration_inbox_processing_attempts%ROWTYPE;
+    processing public.integration_inbox_processings%ROWTYPE;
     mapping public.integration_order_item_mappings%ROWTYPE;
     receipt public.integration_inbox_receipts%ROWTYPE;
     payload jsonb;
+    payload_text text;
+    segments text[];
+    element_separator text;
+    segment_terminator text;
 BEGIN
     SELECT * INTO attempt FROM public.integration_inbox_processing_attempts
     WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
       AND id=NEW.processing_attempt_id AND processing_id=NEW.processing_id
       AND receipt_id=NEW.receipt_id AND attempt_number=NEW.attempt_number
+    FOR SHARE;
+    SELECT * INTO processing FROM public.integration_inbox_processings
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.processing_id AND receipt_id=NEW.receipt_id
     FOR SHARE;
     SELECT * INTO mapping FROM public.integration_order_item_mappings
     WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
@@ -35315,7 +35384,7 @@ BEGIN
     WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
       AND id=NEW.receipt_id
     FOR SHARE;
-    IF attempt.id IS NULL OR mapping.id IS NULL OR receipt.id IS NULL
+    IF attempt.id IS NULL OR processing.id IS NULL OR mapping.id IS NULL OR receipt.id IS NULL
        OR attempt.correction_id IS NOT NULL
        OR receipt.source_key<>NEW.source_key
        OR mapping.revision<>NEW.mapping_revision
@@ -35330,16 +35399,51 @@ BEGIN
         RAISE EXCEPTION 'integration processing attempt mapping snapshot is invalid'
             USING ERRCODE='23514';
     END IF;
-    payload:=convert_from(receipt.raw_payload,'UTF8')::jsonb;
-    IF jsonb_typeof(payload->'lines')<>'array'
-       OR attempt.applied_mapping_count<>jsonb_array_length(payload->'lines')
-       OR NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements(payload->'lines') line
-        WHERE line->>'line_key'=NEW.line_key
-          AND line->>'external_item_key'=NEW.external_item_key
-          AND line->>'external_uom'=NEW.external_uom)
+    IF processing.adapter_key='wareboxes.fulfillment_order'
+       AND processing.mapping_version=2
     THEN
-        RAISE EXCEPTION 'integration processing attempt mapping lacks matching source line'
+        payload:=convert_from(receipt.raw_payload,'UTF8')::jsonb;
+        IF jsonb_typeof(payload->'lines')<>'array'
+           OR attempt.applied_mapping_count<>jsonb_array_length(payload->'lines')
+           OR NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements(payload->'lines') line
+            WHERE line->>'line_key'=NEW.line_key
+              AND line->>'external_item_key'=NEW.external_item_key
+              AND line->>'external_uom'=NEW.external_uom)
+        THEN
+            RAISE EXCEPTION 'integration processing attempt mapping lacks matching source line'
+                USING ERRCODE='23514';
+        END IF;
+    ELSIF processing.adapter_key='x12.940.warehouse_shipping_order'
+          AND processing.mapping_version=1
+          AND lower(btrim(split_part(receipt.content_type,';',1)))='application/edi-x12'
+    THEN
+        payload_text:=convert_from(receipt.raw_payload,'UTF8');
+        IF octet_length(receipt.raw_payload)<106 THEN
+            RAISE EXCEPTION 'X12 integration source is shorter than its ISA envelope'
+                USING ERRCODE='23514';
+        END IF;
+        element_separator:=substr(payload_text,4,1);
+        segment_terminator:=substr(payload_text,106,1);
+        segments:=string_to_array(payload_text,segment_terminator);
+        IF attempt.applied_mapping_count<>(
+              SELECT count(*) FROM unnest(segments) segment
+              WHERE split_part(btrim(segment),element_separator,1)='W01')
+           OR NOT EXISTS (
+              SELECT 1 FROM generate_subscripts(segments,1) position
+              WHERE position<array_length(segments,1)
+                AND split_part(btrim(segments[position]),element_separator,1)='LX'
+                AND split_part(btrim(segments[position]),element_separator,2)=NEW.line_key
+                AND split_part(btrim(segments[position+1]),element_separator,1)='W01'
+                AND split_part(btrim(segments[position+1]),element_separator,3)=NEW.external_uom
+                AND split_part(btrim(segments[position+1]),element_separator,5) IN ('SK','VP')
+                AND split_part(btrim(segments[position+1]),element_separator,6)=NEW.external_item_key)
+        THEN
+            RAISE EXCEPTION 'X12 integration mapping lacks matching LX/W01 source evidence'
+                USING ERRCODE='23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'integration mapping uses an unsupported source adapter'
             USING ERRCODE='23514';
     END IF;
     RETURN NEW;
@@ -40303,3 +40407,5221 @@ REVOKE ALL ON FUNCTION public.validate_cross_dock_plan() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_cross_dock_plan_task() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_cross_dock_confirmation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_cross_dock_cancellation() FROM PUBLIC;
+
+-- Typed, effective-dated configuration versions with explicit approval and promotion.
+CREATE TABLE public.configuration_versions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    kind text NOT NULL CHECK (kind IN (
+        'receipt','putaway','allocation','replenishment','wave','pick','pack','count',
+        'document','billing')),
+    scope_level text NOT NULL CHECK (
+        scope_level IN ('tenant','inventory_owner','facility','owner_facility')),
+    inventory_owner_id bigint,
+    facility_id bigint,
+    revision bigint NOT NULL CHECK (revision>0),
+    status text NOT NULL CHECK (
+        status IN ('draft','pending_approval','approved','active','retired')),
+    effective_from timestamp with time zone NOT NULL,
+    effective_until timestamp with time zone,
+    definition jsonb NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT statement_timestamp(),
+    submitted_by_user_id bigint,
+    submitted_at timestamp with time zone,
+    approved_by_user_id bigint,
+    approved_at timestamp with time zone,
+    activated_by_user_id bigint,
+    activated_at timestamp with time zone,
+    retired_by_user_id bigint,
+    retired_at timestamp with time zone,
+    rollback_of_configuration_id bigint,
+    CONSTRAINT configuration_versions_tenant_key UNIQUE (tenant_id,id),
+    CONSTRAINT configuration_versions_window_check CHECK (
+        effective_until IS NULL OR effective_until>effective_from),
+    CONSTRAINT configuration_versions_scope_check CHECK (
+        (scope_level='tenant' AND inventory_owner_id IS NULL AND facility_id IS NULL)
+        OR (scope_level='inventory_owner' AND inventory_owner_id IS NOT NULL AND facility_id IS NULL)
+        OR (scope_level='facility' AND inventory_owner_id IS NULL AND facility_id IS NOT NULL)
+        OR (scope_level='owner_facility' AND inventory_owner_id IS NOT NULL AND facility_id IS NOT NULL)),
+    CONSTRAINT configuration_versions_definition_check CHECK (
+        jsonb_typeof(definition)='object' AND definition->>'kind'=kind),
+    CONSTRAINT configuration_versions_approval_separation_check CHECK (
+        approved_by_user_id IS NULL OR approved_by_user_id<>created_by_user_id),
+    CONSTRAINT configuration_versions_lifecycle_check CHECK (
+        (status='draft'
+            AND submitted_by_user_id IS NULL AND submitted_at IS NULL
+            AND approved_by_user_id IS NULL AND approved_at IS NULL
+            AND activated_by_user_id IS NULL AND activated_at IS NULL
+            AND retired_by_user_id IS NULL AND retired_at IS NULL)
+        OR (status='pending_approval'
+            AND submitted_by_user_id IS NOT NULL AND submitted_at IS NOT NULL
+            AND approved_by_user_id IS NULL AND approved_at IS NULL
+            AND activated_by_user_id IS NULL AND activated_at IS NULL
+            AND retired_by_user_id IS NULL AND retired_at IS NULL)
+        OR (status='approved'
+            AND submitted_by_user_id IS NOT NULL AND submitted_at IS NOT NULL
+            AND approved_by_user_id IS NOT NULL AND approved_at IS NOT NULL
+            AND activated_by_user_id IS NULL AND activated_at IS NULL
+            AND retired_by_user_id IS NULL AND retired_at IS NULL)
+        OR (status='active'
+            AND submitted_by_user_id IS NOT NULL AND submitted_at IS NOT NULL
+            AND approved_by_user_id IS NOT NULL AND approved_at IS NOT NULL
+            AND activated_by_user_id IS NOT NULL AND activated_at IS NOT NULL
+            AND retired_by_user_id IS NULL AND retired_at IS NULL)
+        OR (status='retired'
+            AND submitted_by_user_id IS NOT NULL AND submitted_at IS NOT NULL
+            AND approved_by_user_id IS NOT NULL AND approved_at IS NOT NULL
+            AND retired_by_user_id IS NOT NULL AND retired_at IS NOT NULL)),
+    CONSTRAINT configuration_versions_timestamp_order_check CHECK (
+        (submitted_at IS NULL OR submitted_at>=created_at)
+        AND (approved_at IS NULL OR approved_at>=submitted_at)
+        AND (activated_at IS NULL OR activated_at>=approved_at)
+        AND (retired_at IS NULL OR retired_at>=approved_at)),
+    CONSTRAINT configuration_versions_tenant_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id),
+    CONSTRAINT configuration_versions_owner_fkey FOREIGN KEY (tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT configuration_versions_facility_fkey FOREIGN KEY (tenant_id,facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT configuration_versions_owner_facility_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+    CONSTRAINT configuration_versions_creator_fkey FOREIGN KEY (tenant_id,created_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT configuration_versions_submitter_fkey FOREIGN KEY (tenant_id,submitted_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT configuration_versions_approver_fkey FOREIGN KEY (tenant_id,approved_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT configuration_versions_activator_fkey FOREIGN KEY (tenant_id,activated_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT configuration_versions_retirer_fkey FOREIGN KEY (tenant_id,retired_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT configuration_versions_rollback_fkey FOREIGN KEY
+        (tenant_id,rollback_of_configuration_id)
+        REFERENCES public.configuration_versions(tenant_id,id)
+);
+
+CREATE UNIQUE INDEX configuration_versions_natural_revision_key
+ON public.configuration_versions(
+    tenant_id,kind,scope_level,
+    COALESCE(inventory_owner_id,0),COALESCE(facility_id,0),revision);
+CREATE INDEX configuration_versions_page_idx
+ON public.configuration_versions(tenant_id,id DESC);
+CREATE INDEX configuration_versions_resolution_idx
+ON public.configuration_versions(
+    tenant_id,kind,status,inventory_owner_id,facility_id,effective_from DESC,id DESC);
+
+CREATE FUNCTION public.validate_configuration_definition() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE rate_minor numeric; minimum_minor numeric;
+BEGIN
+    IF NEW.definition->>'kind'<>NEW.kind THEN
+        RAISE EXCEPTION 'configuration kind does not match its typed definition'
+            USING ERRCODE='23514';
+    END IF;
+    CASE NEW.kind
+      WHEN 'receipt' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','allow_unexpected','quarantine_unmapped_items',
+              'over_receipt_tolerance_basis_points'])
+           OR NEW.definition-ARRAY[
+              'kind','allow_unexpected','quarantine_unmapped_items',
+              'over_receipt_tolerance_basis_points']<>'{}'::jsonb
+           OR jsonb_typeof(NEW.definition->'allow_unexpected')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'quarantine_unmapped_items')<>'boolean'
+           OR (NEW.definition->>'over_receipt_tolerance_basis_points')::integer NOT BETWEEN 0 AND 10000
+        THEN RAISE EXCEPTION 'invalid receipt configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'putaway' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','require_zone_compatibility','enforce_location_capacity','allow_mixed_lots'])
+           OR NEW.definition-ARRAY[
+              'kind','require_zone_compatibility','enforce_location_capacity','allow_mixed_lots']
+              <>'{}'::jsonb
+           OR jsonb_typeof(NEW.definition->'require_zone_compatibility')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'enforce_location_capacity')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'allow_mixed_lots')<>'boolean'
+        THEN RAISE EXCEPTION 'invalid putaway configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'allocation' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','rotation','allow_partial','require_complete_line'])
+           OR NEW.definition-ARRAY[
+              'kind','rotation','allow_partial','require_complete_line']<>'{}'::jsonb
+           OR NEW.definition->>'rotation' NOT IN ('fifo','fefo')
+           OR jsonb_typeof(NEW.definition->'allow_partial')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'require_complete_line')<>'boolean'
+           OR ((NEW.definition->>'allow_partial')::boolean
+               AND (NEW.definition->>'require_complete_line')::boolean)
+        THEN RAISE EXCEPTION 'invalid allocation configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'replenishment' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','minimum_percent','target_percent','include_inbound_projection'])
+           OR NEW.definition-ARRAY[
+              'kind','minimum_percent','target_percent','include_inbound_projection']<>'{}'::jsonb
+           OR (NEW.definition->>'minimum_percent')::integer NOT BETWEEN 0 AND 100
+           OR (NEW.definition->>'target_percent')::integer NOT BETWEEN 0 AND 100
+           OR (NEW.definition->>'minimum_percent')::integer >=
+              (NEW.definition->>'target_percent')::integer
+           OR jsonb_typeof(NEW.definition->'include_inbound_projection')<>'boolean'
+        THEN RAISE EXCEPTION 'invalid replenishment configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'wave' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','max_orders','require_complete_allocation'])
+           OR NEW.definition-ARRAY[
+              'kind','max_orders','require_complete_allocation']<>'{}'::jsonb
+           OR (NEW.definition->>'max_orders')::integer NOT BETWEEN 1 AND 10000
+           OR jsonb_typeof(NEW.definition->'require_complete_allocation')<>'boolean'
+        THEN RAISE EXCEPTION 'invalid wave configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'pick' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','require_source_location_scan','require_item_scan',
+              'require_destination_container_scan'])
+           OR NEW.definition-ARRAY[
+              'kind','require_source_location_scan','require_item_scan',
+              'require_destination_container_scan']<>'{}'::jsonb
+           OR jsonb_typeof(NEW.definition->'require_source_location_scan')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'require_item_scan')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'require_destination_container_scan')<>'boolean'
+        THEN RAISE EXCEPTION 'invalid pick configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'pack' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','require_station_scan','require_weight','allow_mixed_orders'])
+           OR NEW.definition-ARRAY[
+              'kind','require_station_scan','require_weight','allow_mixed_orders']<>'{}'::jsonb
+           OR jsonb_typeof(NEW.definition->'require_station_scan')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'require_weight')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'allow_mixed_orders')<>'boolean'
+        THEN RAISE EXCEPTION 'invalid pack configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'count' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','absolute_tolerance','percentage_tolerance_basis_points','approval_threshold'])
+           OR NEW.definition-ARRAY[
+              'kind','absolute_tolerance','percentage_tolerance_basis_points','approval_threshold']
+              <>'{}'::jsonb
+           OR (NEW.definition->>'absolute_tolerance')::bigint<0
+           OR (NEW.definition->>'percentage_tolerance_basis_points')::integer NOT BETWEEN 0 AND 10000
+           OR (NEW.definition->>'approval_threshold')::bigint<
+              (NEW.definition->>'absolute_tolerance')::bigint
+        THEN RAISE EXCEPTION 'invalid count configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'document' THEN
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','generate_packing_slip','generate_carton_label','require_tracking_barcode'])
+           OR NEW.definition-ARRAY[
+              'kind','generate_packing_slip','generate_carton_label','require_tracking_barcode']
+              <>'{}'::jsonb
+           OR jsonb_typeof(NEW.definition->'generate_packing_slip')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'generate_carton_label')<>'boolean'
+           OR jsonb_typeof(NEW.definition->'require_tracking_barcode')<>'boolean'
+           OR (NOT (NEW.definition->>'generate_packing_slip')::boolean
+               AND NOT (NEW.definition->>'generate_carton_label')::boolean)
+        THEN RAISE EXCEPTION 'invalid document configuration' USING ERRCODE='23514'; END IF;
+      WHEN 'billing' THEN
+        rate_minor:=(NEW.definition->>'rate_minor')::numeric;
+        minimum_minor:=(NEW.definition->>'minimum_charge_minor')::numeric;
+        IF NOT (NEW.definition ?& ARRAY[
+              'kind','event_type','unit','currency','rate_minor','minimum_charge_minor'])
+           OR NEW.definition-ARRAY[
+              'kind','event_type','unit','currency','rate_minor','minimum_charge_minor']
+              <>'{}'::jsonb
+           OR NEW.definition->>'event_type' NOT IN (
+              'receipt_line','received_unit','pallet_day','pick_line','picked_unit',
+              'packed_carton','shipped_unit','return_unit','relabel_unit','refurbishment_unit',
+              'kit_unit','assembly_unit','accessorial','detention_hour','value_added_service_unit')
+           OR NEW.definition->>'unit' NOT IN ('event','each','case','pallet','carton','hour','day')
+           OR NEW.definition->>'currency' !~ '^[A-Z]{3}$'
+           OR rate_minor NOT BETWEEN 1 AND 1000000000000
+           OR minimum_minor NOT BETWEEN 0 AND 1000000000000
+        THEN RAISE EXCEPTION 'invalid billing configuration' USING ERRCODE='23514'; END IF;
+    END CASE;
+    RETURN NEW;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RAISE EXCEPTION 'configuration definition has an invalid typed value' USING ERRCODE='23514';
+END $$;
+
+CREATE FUNCTION public.guard_configuration_version_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE overlap_id bigint; source public.configuration_versions%ROWTYPE;
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'configuration history is immutable' USING ERRCODE='55000';
+    END IF;
+    IF TG_OP='INSERT' THEN
+        IF NEW.rollback_of_configuration_id IS NOT NULL THEN
+            SELECT * INTO source FROM public.configuration_versions
+            WHERE tenant_id=NEW.tenant_id AND id=NEW.rollback_of_configuration_id FOR SHARE;
+            IF source.id IS NULL OR source.status NOT IN ('approved','active','retired')
+               OR source.kind<>NEW.kind OR source.scope_level<>NEW.scope_level
+               OR source.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+               OR source.facility_id IS DISTINCT FROM NEW.facility_id
+               OR source.definition<>NEW.definition THEN
+                RAISE EXCEPTION 'rollback must copy one approved configuration exactly'
+                    USING ERRCODE='23514';
+            END IF;
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id OR NEW.kind<>OLD.kind
+       OR NEW.scope_level<>OLD.scope_level
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.effective_from<>OLD.effective_from
+       OR NEW.effective_until IS DISTINCT FROM OLD.effective_until
+       OR NEW.definition<>OLD.definition OR NEW.created_by_user_id<>OLD.created_by_user_id
+       OR NEW.created_at<>OLD.created_at
+       OR NEW.rollback_of_configuration_id IS DISTINCT FROM OLD.rollback_of_configuration_id
+       OR NEW.revision<>OLD.revision+1 THEN
+        RAISE EXCEPTION 'configuration facts are immutable and revisions must advance once'
+            USING ERRCODE='55000';
+    END IF;
+    IF NOT (
+        (OLD.status='draft' AND NEW.status='pending_approval'
+          AND OLD.submitted_by_user_id IS NULL AND NEW.submitted_by_user_id IS NOT NULL
+          AND NEW.submitted_at IS NOT NULL)
+        OR (OLD.status='pending_approval' AND NEW.status='approved'
+          AND NEW.submitted_by_user_id=OLD.submitted_by_user_id
+          AND NEW.submitted_at=OLD.submitted_at
+          AND NEW.approved_by_user_id IS NOT NULL AND NEW.approved_at IS NOT NULL)
+        OR (OLD.status='approved' AND NEW.status='active'
+          AND NEW.submitted_by_user_id=OLD.submitted_by_user_id
+          AND NEW.submitted_at=OLD.submitted_at
+          AND NEW.approved_by_user_id=OLD.approved_by_user_id
+          AND NEW.approved_at=OLD.approved_at
+          AND NEW.activated_by_user_id IS NOT NULL AND NEW.activated_at IS NOT NULL)
+        OR (OLD.status IN ('approved','active') AND NEW.status='retired'
+          AND NEW.submitted_by_user_id=OLD.submitted_by_user_id
+          AND NEW.submitted_at=OLD.submitted_at
+          AND NEW.approved_by_user_id=OLD.approved_by_user_id
+          AND NEW.approved_at=OLD.approved_at
+          AND NEW.activated_by_user_id IS NOT DISTINCT FROM OLD.activated_by_user_id
+          AND NEW.activated_at IS NOT DISTINCT FROM OLD.activated_at
+          AND NEW.retired_by_user_id IS NOT NULL AND NEW.retired_at IS NOT NULL)) THEN
+        RAISE EXCEPTION 'invalid configuration lifecycle transition' USING ERRCODE='55000';
+    END IF;
+    IF NEW.status='active' THEN
+        IF NEW.activated_at<NEW.effective_from
+           OR (NEW.effective_until IS NOT NULL AND NEW.activated_at>=NEW.effective_until) THEN
+            RAISE EXCEPTION 'configuration activation is outside its effective window'
+                USING ERRCODE='55000';
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+          format('configuration:%s:%s:%s:%s:%s',NEW.tenant_id,NEW.kind,NEW.scope_level,
+            COALESCE(NEW.inventory_owner_id,0),COALESCE(NEW.facility_id,0)),0));
+        SELECT candidate.id INTO overlap_id FROM public.configuration_versions candidate
+        WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id<>NEW.id
+          AND candidate.kind=NEW.kind AND candidate.scope_level=NEW.scope_level
+          AND candidate.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id
+          AND candidate.facility_id IS NOT DISTINCT FROM NEW.facility_id
+          AND candidate.status='active'
+          AND tstzrange(candidate.effective_from,candidate.effective_until,'[)') &&
+              tstzrange(NEW.effective_from,NEW.effective_until,'[)')
+        LIMIT 1;
+        IF overlap_id IS NOT NULL THEN
+            RAISE EXCEPTION 'an active configuration already overlaps this effective window'
+                USING ERRCODE='55000';
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE TRIGGER configuration_versions_validate_definition
+BEFORE INSERT ON public.configuration_versions
+FOR EACH ROW EXECUTE FUNCTION public.validate_configuration_definition();
+CREATE TRIGGER configuration_versions_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.configuration_versions
+FOR EACH ROW EXECUTE FUNCTION public.guard_configuration_version_mutation();
+
+ALTER TABLE public.configuration_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.configuration_versions FORCE ROW LEVEL SECURITY;
+CREATE POLICY configuration_versions_tenant_isolation ON public.configuration_versions
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.configuration_versions TO wareboxes_app;
+GRANT UPDATE (
+    revision,status,submitted_by_user_id,submitted_at,approved_by_user_id,approved_at,
+    activated_by_user_id,activated_at,retired_by_user_id,retired_at)
+ON public.configuration_versions TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.configuration_versions_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_configuration_definition() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_configuration_version_mutation() FROM PUBLIC;
+
+-- Owner-scoped 3PL billing ledger, reconciliation, review, and financial export.
+CREATE TABLE public.billing_contracts (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    contract_number text NOT NULL CHECK (
+        contract_number=btrim(contract_number) AND contract_number<>''
+        AND char_length(contract_number)<=80),
+    currency text NOT NULL CHECK (currency~'^[A-Z]{3}$'),
+    effective_from timestamptz NOT NULL,
+    effective_until timestamptz,
+    status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','active','closed')),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision>0),
+    created_by_user_id bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    activated_by_user_id bigint,
+    activated_at timestamptz,
+    closed_by_user_id bigint,
+    closed_at timestamptz,
+    CONSTRAINT billing_contracts_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billing_contracts_number_key UNIQUE(tenant_id,inventory_owner_id,contract_number),
+    CONSTRAINT billing_contracts_window_check CHECK (
+        effective_until IS NULL OR effective_until>effective_from),
+    CONSTRAINT billing_contracts_lifecycle_check CHECK (
+        (status='draft' AND activated_by_user_id IS NULL AND activated_at IS NULL
+          AND closed_by_user_id IS NULL AND closed_at IS NULL)
+        OR (status='active' AND activated_by_user_id IS NOT NULL AND activated_at IS NOT NULL
+          AND closed_by_user_id IS NULL AND closed_at IS NULL)
+        OR (status='closed' AND activated_by_user_id IS NOT NULL AND activated_at IS NOT NULL
+          AND closed_by_user_id IS NOT NULL AND closed_at IS NOT NULL)),
+    FOREIGN KEY(tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    FOREIGN KEY(tenant_id,created_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    FOREIGN KEY(tenant_id,activated_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    FOREIGN KEY(tenant_id,closed_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.billing_rate_versions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    contract_id bigint NOT NULL,
+    event_type text NOT NULL CHECK (event_type IN (
+        'receipt_line','received_unit','pallet_day','pick_line','picked_unit',
+        'packed_carton','shipped_unit','return_unit','relabel_unit','refurbishment_unit',
+        'kit_unit','assembly_unit','accessorial','detention_hour','value_added_service_unit')),
+    unit text NOT NULL CHECK (unit IN ('event','each','case','pallet','carton','hour','day')),
+    currency text NOT NULL CHECK (currency~'^[A-Z]{3}$'),
+    rate_minor bigint NOT NULL CHECK (rate_minor BETWEEN 1 AND 1000000000000),
+    minimum_charge_minor bigint NOT NULL CHECK (
+        minimum_charge_minor BETWEEN 0 AND 1000000000000),
+    effective_from timestamptz NOT NULL,
+    effective_until timestamptz,
+    revision bigint NOT NULL CHECK (revision>0),
+    status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+    created_by_user_id bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retired_by_user_id bigint,
+    retired_at timestamptz,
+    CONSTRAINT billing_rate_versions_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billing_rate_versions_natural_revision_key UNIQUE(
+        tenant_id,contract_id,event_type,revision),
+    CONSTRAINT billing_rate_versions_window_check CHECK (
+        effective_until IS NULL OR effective_until>effective_from),
+    CONSTRAINT billing_rate_versions_lifecycle_check CHECK (
+        (status='active' AND retired_by_user_id IS NULL AND retired_at IS NULL)
+        OR (status='retired' AND retired_by_user_id IS NOT NULL AND retired_at IS NOT NULL)),
+    FOREIGN KEY(tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    FOREIGN KEY(tenant_id,contract_id)
+        REFERENCES public.billing_contracts(tenant_id,id),
+    FOREIGN KEY(tenant_id,created_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    FOREIGN KEY(tenant_id,retired_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE INDEX billing_rate_versions_resolution_idx ON public.billing_rate_versions(
+    tenant_id,contract_id,event_type,status,effective_from DESC,id DESC);
+
+CREATE TABLE public.billable_events (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    contract_id bigint NOT NULL,
+    event_type text NOT NULL CHECK (event_type IN (
+        'receipt_line','received_unit','pallet_day','pick_line','picked_unit',
+        'packed_carton','shipped_unit','return_unit','relabel_unit','refurbishment_unit',
+        'kit_unit','assembly_unit','accessorial','detention_hour','value_added_service_unit')),
+    unit text NOT NULL CHECK (unit IN ('event','each','case','pallet','carton','hour','day')),
+    quantity bigint NOT NULL CHECK (quantity BETWEEN 1 AND 1000000000000),
+    source_type text NOT NULL CHECK (
+        source_type=btrim(source_type) AND source_type<>'' AND char_length(source_type)<=64),
+    source_reference text NOT NULL CHECK (
+        source_reference=btrim(source_reference) AND source_reference<>''
+        AND char_length(source_reference)<=160),
+    description text CHECK (
+        description IS NULL OR (description=btrim(description) AND description<>''
+          AND char_length(description)<=500)),
+    occurred_at timestamptz NOT NULL,
+    captured_by_user_id bigint,
+    captured_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    CONSTRAINT billable_events_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billable_events_source_key UNIQUE(
+        tenant_id,contract_id,event_type,source_type,source_reference),
+    FOREIGN KEY(tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    FOREIGN KEY(tenant_id,facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+    FOREIGN KEY(tenant_id,contract_id)
+        REFERENCES public.billing_contracts(tenant_id,id),
+    FOREIGN KEY(tenant_id,captured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE INDEX billable_events_period_idx ON public.billable_events(
+    tenant_id,contract_id,occurred_at,id);
+
+CREATE TABLE public.billing_storage_snapshots (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    contract_id bigint NOT NULL,
+    snapshot_date date NOT NULL,
+    pallet_count bigint NOT NULL CHECK (pallet_count>=0),
+    unit_count bigint NOT NULL CHECK (unit_count>=0),
+    captured_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    CONSTRAINT billing_storage_snapshots_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billing_storage_snapshots_day_key UNIQUE(
+        tenant_id,contract_id,facility_id,snapshot_date),
+    FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+    FOREIGN KEY(tenant_id,contract_id)
+        REFERENCES public.billing_contracts(tenant_id,id)
+);
+
+CREATE TABLE public.billing_reconciliation_runs (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    contract_id bigint NOT NULL,
+    facility_id bigint,
+    attempt bigint NOT NULL CHECK (attempt>0),
+    supersedes_run_id bigint,
+    period_from timestamptz NOT NULL,
+    period_until timestamptz NOT NULL,
+    status text NOT NULL DEFAULT 'pending_review' CHECK (
+        status IN ('pending_review','approved','rejected','exported')),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision>0),
+    event_count bigint NOT NULL CHECK (event_count>=0),
+    charge_count bigint NOT NULL CHECK (charge_count>=0),
+    unmatched_event_count bigint NOT NULL CHECK (unmatched_event_count>=0),
+    total_minor bigint NOT NULL CHECK (total_minor>=0),
+    currency text NOT NULL CHECK (currency~'^[A-Z]{3}$'),
+    generated_by_user_id bigint NOT NULL,
+    generated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    reviewed_by_user_id bigint,
+    reviewed_at timestamptz,
+    review_note text CHECK (
+        review_note IS NULL OR (review_note=btrim(review_note) AND review_note<>''
+          AND char_length(review_note)<=500)),
+    exported_at timestamptz,
+    CONSTRAINT billing_reconciliation_runs_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billing_reconciliation_runs_attempt_key UNIQUE(
+        tenant_id,contract_id,facility_id,period_from,period_until,attempt),
+    CONSTRAINT billing_reconciliation_runs_period_check CHECK (period_until>period_from),
+    CONSTRAINT billing_reconciliation_runs_attempt_lineage_check CHECK (
+        (attempt=1 AND supersedes_run_id IS NULL)
+        OR (attempt>1 AND supersedes_run_id IS NOT NULL)),
+    CONSTRAINT billing_reconciliation_runs_review_separation_check CHECK (
+        reviewed_by_user_id IS NULL OR reviewed_by_user_id<>generated_by_user_id),
+    CONSTRAINT billing_reconciliation_runs_lifecycle_check CHECK (
+        (status='pending_review' AND reviewed_by_user_id IS NULL AND reviewed_at IS NULL
+          AND exported_at IS NULL)
+        OR (status IN ('approved','rejected') AND reviewed_by_user_id IS NOT NULL
+          AND reviewed_at IS NOT NULL AND exported_at IS NULL)
+        OR (status='exported' AND reviewed_by_user_id IS NOT NULL
+          AND reviewed_at IS NOT NULL AND exported_at IS NOT NULL)),
+    FOREIGN KEY(tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    FOREIGN KEY(tenant_id,contract_id)
+        REFERENCES public.billing_contracts(tenant_id,id),
+    FOREIGN KEY(tenant_id,supersedes_run_id)
+        REFERENCES public.billing_reconciliation_runs(tenant_id,id),
+    FOREIGN KEY(tenant_id,facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    FOREIGN KEY(tenant_id,generated_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    FOREIGN KEY(tenant_id,reviewed_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE INDEX billing_reconciliation_runs_page_idx ON public.billing_reconciliation_runs(
+    tenant_id,id DESC);
+CREATE UNIQUE INDEX billing_reconciliation_runs_null_facility_attempt_key
+ON public.billing_reconciliation_runs(
+    tenant_id,contract_id,period_from,period_until,attempt)
+WHERE facility_id IS NULL;
+
+CREATE TABLE public.billing_charges (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    contract_id bigint NOT NULL,
+    reconciliation_run_id bigint NOT NULL,
+    billable_event_id bigint NOT NULL,
+    rate_version_id bigint NOT NULL,
+    event_type text NOT NULL,
+    unit text NOT NULL,
+    quantity bigint NOT NULL CHECK (quantity>0),
+    rate_minor bigint NOT NULL CHECK (rate_minor>0),
+    minimum_charge_minor bigint NOT NULL CHECK (minimum_charge_minor>=0),
+    gross_minor bigint NOT NULL CHECK (gross_minor>=0),
+    amount_minor bigint NOT NULL CHECK (
+        amount_minor>=gross_minor AND amount_minor>=minimum_charge_minor),
+    currency text NOT NULL CHECK (currency~'^[A-Z]{3}$'),
+    source_type text NOT NULL,
+    source_reference text NOT NULL,
+    occurred_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    CONSTRAINT billing_charges_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billing_charges_run_event_key UNIQUE(
+        tenant_id,reconciliation_run_id,billable_event_id),
+    FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+    FOREIGN KEY(tenant_id,contract_id)
+        REFERENCES public.billing_contracts(tenant_id,id),
+    FOREIGN KEY(tenant_id,reconciliation_run_id)
+        REFERENCES public.billing_reconciliation_runs(tenant_id,id),
+    FOREIGN KEY(tenant_id,billable_event_id)
+        REFERENCES public.billable_events(tenant_id,id),
+    FOREIGN KEY(tenant_id,rate_version_id)
+        REFERENCES public.billing_rate_versions(tenant_id,id)
+);
+
+CREATE TABLE public.billing_reviews (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    reconciliation_run_id bigint NOT NULL,
+    decision text NOT NULL CHECK (decision IN ('approved','rejected')),
+    note text CHECK (
+        note IS NULL OR (note=btrim(note) AND note<>'' AND char_length(note)<=500)),
+    reviewed_by_user_id bigint NOT NULL,
+    reviewed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    resulting_revision bigint NOT NULL CHECK (resulting_revision>1),
+    CONSTRAINT billing_reviews_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billing_reviews_run_key UNIQUE(tenant_id,reconciliation_run_id),
+    FOREIGN KEY(tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    FOREIGN KEY(tenant_id,reconciliation_run_id)
+        REFERENCES public.billing_reconciliation_runs(tenant_id,id),
+    FOREIGN KEY(tenant_id,reviewed_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.billing_financial_exports (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    reconciliation_run_id bigint NOT NULL,
+    external_batch_key text NOT NULL CHECK (
+        external_batch_key=btrim(external_batch_key) AND external_batch_key<>''
+        AND char_length(external_batch_key)<=120),
+    content_sha256 text NOT NULL CHECK (content_sha256~'^[0-9a-f]{64}$'),
+    line_count bigint NOT NULL CHECK (line_count>=0),
+    total_minor bigint NOT NULL CHECK (total_minor>=0),
+    currency text NOT NULL CHECK (currency~'^[A-Z]{3}$'),
+    csv_content text NOT NULL,
+    exported_by_user_id bigint NOT NULL,
+    exported_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    resulting_revision bigint NOT NULL CHECK (resulting_revision>1),
+    CONSTRAINT billing_financial_exports_tenant_key UNIQUE(tenant_id,id),
+    CONSTRAINT billing_financial_exports_run_key UNIQUE(tenant_id,reconciliation_run_id),
+    CONSTRAINT billing_financial_exports_batch_key UNIQUE(tenant_id,external_batch_key),
+    FOREIGN KEY(tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    FOREIGN KEY(tenant_id,reconciliation_run_id)
+        REFERENCES public.billing_reconciliation_runs(tenant_id,id),
+    FOREIGN KEY(tenant_id,exported_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE FUNCTION public.reject_billing_ledger_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'billing ledger history is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.guard_billing_contract_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+       OR NEW.inventory_owner_id<>OLD.inventory_owner_id
+       OR NEW.contract_number<>OLD.contract_number OR NEW.currency<>OLD.currency
+       OR NEW.effective_from<>OLD.effective_from
+       OR NEW.effective_until IS DISTINCT FROM OLD.effective_until
+       OR NEW.created_by_user_id<>OLD.created_by_user_id OR NEW.created_at<>OLD.created_at
+       OR NEW.revision<>OLD.revision+1
+       OR (OLD.status='draft' AND NEW.status='active' AND NOT EXISTS(
+            SELECT 1 FROM public.billing_rate_versions rate
+            WHERE rate.tenant_id=OLD.tenant_id AND rate.contract_id=OLD.id
+              AND rate.status='active'))
+       OR (OLD.status='active' AND NEW.status='closed' AND EXISTS(
+            SELECT 1 FROM public.billing_reconciliation_runs run
+            WHERE run.tenant_id=OLD.tenant_id AND run.contract_id=OLD.id
+              AND run.status IN ('pending_review','approved')))
+       OR NOT ((OLD.status='draft' AND NEW.status='active'
+                  AND NEW.activated_by_user_id IS NOT NULL AND NEW.activated_at IS NOT NULL)
+               OR (OLD.status='active' AND NEW.status='closed'
+                  AND NEW.activated_by_user_id=OLD.activated_by_user_id
+                  AND NEW.activated_at=OLD.activated_at
+                  AND NEW.closed_by_user_id IS NOT NULL AND NEW.closed_at IS NOT NULL)) THEN
+        RAISE EXCEPTION 'invalid billing contract mutation' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_billing_rate_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE overlap_id bigint; BEGIN
+    IF TG_OP='INSERT' THEN
+        SELECT candidate.id INTO overlap_id FROM public.billing_rate_versions candidate
+        WHERE candidate.tenant_id=NEW.tenant_id AND candidate.contract_id=NEW.contract_id
+          AND candidate.event_type=NEW.event_type AND candidate.status='active'
+          AND tstzrange(candidate.effective_from,candidate.effective_until,'[)') &&
+              tstzrange(NEW.effective_from,NEW.effective_until,'[)') LIMIT 1;
+        IF overlap_id IS NOT NULL THEN
+            RAISE EXCEPTION 'active billing rate effective windows overlap' USING ERRCODE='55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+       OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.contract_id<>OLD.contract_id
+       OR NEW.event_type<>OLD.event_type OR NEW.unit<>OLD.unit OR NEW.currency<>OLD.currency
+       OR NEW.rate_minor<>OLD.rate_minor OR NEW.minimum_charge_minor<>OLD.minimum_charge_minor
+       OR NEW.effective_from<>OLD.effective_from
+       OR NEW.effective_until IS DISTINCT FROM OLD.effective_until OR NEW.revision<>OLD.revision
+       OR NEW.created_by_user_id<>OLD.created_by_user_id OR NEW.created_at<>OLD.created_at
+       OR OLD.status<>'active' OR NEW.status<>'retired'
+       OR NEW.retired_by_user_id IS NULL OR NEW.retired_at IS NULL THEN
+        RAISE EXCEPTION 'billing rate history is immutable' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_billing_run_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+    IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+       OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.contract_id<>OLD.contract_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.attempt<>OLD.attempt
+       OR NEW.supersedes_run_id IS DISTINCT FROM OLD.supersedes_run_id
+       OR NEW.period_from<>OLD.period_from OR NEW.period_until<>OLD.period_until
+       OR NEW.event_count<>OLD.event_count OR NEW.charge_count<>OLD.charge_count
+       OR NEW.unmatched_event_count<>OLD.unmatched_event_count OR NEW.total_minor<>OLD.total_minor
+       OR NEW.currency<>OLD.currency OR NEW.generated_by_user_id<>OLD.generated_by_user_id
+       OR NEW.generated_at<>OLD.generated_at OR NEW.revision<>OLD.revision+1
+       OR (NEW.status='approved' AND (
+            NEW.event_count=0 OR NEW.unmatched_event_count<>0
+            OR NEW.event_count<>NEW.charge_count))
+       OR NOT ((OLD.status='pending_review' AND NEW.status IN ('approved','rejected')
+                  AND NEW.reviewed_by_user_id IS NOT NULL AND NEW.reviewed_at IS NOT NULL)
+               OR (OLD.status='approved' AND NEW.status='exported'
+                  AND NEW.reviewed_by_user_id=OLD.reviewed_by_user_id
+                  AND NEW.reviewed_at=OLD.reviewed_at AND NEW.review_note IS NOT DISTINCT FROM OLD.review_note
+                  AND NEW.exported_at IS NOT NULL)) THEN
+        RAISE EXCEPTION 'invalid billing reconciliation lifecycle mutation' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_billing_rate_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE contract_row record; expected_revision bigint; BEGIN
+    SELECT * INTO contract_row FROM public.billing_contracts contract
+    WHERE contract.tenant_id=NEW.tenant_id AND contract.id=NEW.contract_id FOR SHARE;
+    SELECT COALESCE(max(rate.revision),0)+1 INTO expected_revision
+    FROM public.billing_rate_versions rate
+    WHERE rate.tenant_id=NEW.tenant_id AND rate.contract_id=NEW.contract_id
+      AND rate.event_type=NEW.event_type;
+    IF contract_row IS NULL OR contract_row.status='closed'
+       OR NEW.inventory_owner_id<>contract_row.inventory_owner_id
+       OR NEW.currency<>contract_row.currency OR NEW.revision<>expected_revision
+       OR NEW.effective_from<contract_row.effective_from
+       OR (contract_row.effective_until IS NOT NULL
+           AND (NEW.effective_until IS NULL
+                OR NEW.effective_until>contract_row.effective_until)) THEN
+        RAISE EXCEPTION 'billing rate does not match its contract or revision history'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_billable_event_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE contract_row record; BEGIN
+    SELECT * INTO contract_row FROM public.billing_contracts contract
+    WHERE contract.tenant_id=NEW.tenant_id AND contract.id=NEW.contract_id FOR SHARE;
+    IF contract_row IS NULL OR contract_row.status<>'active'
+       OR NEW.inventory_owner_id<>contract_row.inventory_owner_id
+       OR NEW.occurred_at<contract_row.effective_from
+       OR (contract_row.effective_until IS NOT NULL
+           AND NEW.occurred_at>=contract_row.effective_until) THEN
+        RAISE EXCEPTION 'billable event is outside its active contract'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_billing_snapshot_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE contract_row record; snapshot_at timestamptz; BEGIN
+    SELECT * INTO contract_row FROM public.billing_contracts contract
+    WHERE contract.tenant_id=NEW.tenant_id AND contract.id=NEW.contract_id FOR SHARE;
+    snapshot_at:=(NEW.snapshot_date::timestamp AT TIME ZONE 'UTC');
+    IF contract_row IS NULL OR contract_row.status<>'active'
+       OR NEW.inventory_owner_id<>contract_row.inventory_owner_id
+       OR snapshot_at<contract_row.effective_from
+       OR (contract_row.effective_until IS NOT NULL
+           AND snapshot_at>=contract_row.effective_until) THEN
+        RAISE EXCEPTION 'billing storage snapshot is outside its active contract'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_billing_run_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE contract_row record; prior_row record; BEGIN
+    SELECT * INTO contract_row FROM public.billing_contracts contract
+    WHERE contract.tenant_id=NEW.tenant_id AND contract.id=NEW.contract_id FOR SHARE;
+    IF contract_row IS NULL OR contract_row.status<>'active'
+       OR NEW.inventory_owner_id<>contract_row.inventory_owner_id
+       OR NEW.currency<>contract_row.currency
+       OR NEW.period_from<contract_row.effective_from
+       OR (contract_row.effective_until IS NOT NULL
+           AND NEW.period_until>contract_row.effective_until) THEN
+        RAISE EXCEPTION 'billing reconciliation run is outside its active contract'
+            USING ERRCODE='55000';
+    END IF;
+    IF NEW.attempt>1 THEN
+        SELECT * INTO prior_row FROM public.billing_reconciliation_runs run
+        WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.supersedes_run_id FOR SHARE;
+        IF prior_row IS NULL OR prior_row.status<>'rejected'
+           OR prior_row.inventory_owner_id<>NEW.inventory_owner_id
+           OR prior_row.contract_id<>NEW.contract_id
+           OR prior_row.facility_id IS DISTINCT FROM NEW.facility_id
+           OR prior_row.period_from<>NEW.period_from OR prior_row.period_until<>NEW.period_until
+           OR prior_row.attempt<>NEW.attempt-1 THEN
+            RAISE EXCEPTION 'billing correction attempt does not supersede the prior rejected run'
+                USING ERRCODE='55000';
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_billing_charge_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE run_row record; event_row record; rate_row record;
+gross numeric; amount numeric; BEGIN
+    SELECT * INTO run_row FROM public.billing_reconciliation_runs run
+    WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.reconciliation_run_id FOR SHARE;
+    SELECT * INTO event_row FROM public.billable_events event
+    WHERE event.tenant_id=NEW.tenant_id AND event.id=NEW.billable_event_id;
+    SELECT * INTO rate_row FROM public.billing_rate_versions rate
+    WHERE rate.tenant_id=NEW.tenant_id AND rate.id=NEW.rate_version_id;
+    gross:=NEW.rate_minor::numeric*NEW.quantity;
+    amount:=GREATEST(gross,NEW.minimum_charge_minor::numeric);
+    IF run_row IS NULL OR run_row.status<>'pending_review'
+       OR event_row IS NULL OR rate_row IS NULL
+       OR NEW.inventory_owner_id<>run_row.inventory_owner_id
+       OR NEW.contract_id<>run_row.contract_id
+       OR NEW.inventory_owner_id<>event_row.inventory_owner_id
+       OR NEW.facility_id<>event_row.facility_id
+       OR (run_row.facility_id IS NOT NULL AND NEW.facility_id<>run_row.facility_id)
+       OR event_row.occurred_at<run_row.period_from OR event_row.occurred_at>=run_row.period_until
+       OR rate_row.contract_id<>NEW.contract_id
+       OR rate_row.inventory_owner_id<>NEW.inventory_owner_id
+       OR NEW.event_type<>event_row.event_type OR NEW.event_type<>rate_row.event_type
+       OR NEW.unit<>event_row.unit OR NEW.unit<>rate_row.unit
+       OR NEW.quantity<>event_row.quantity OR NEW.rate_minor<>rate_row.rate_minor
+       OR NEW.minimum_charge_minor<>rate_row.minimum_charge_minor
+       OR NEW.currency<>run_row.currency OR NEW.currency<>rate_row.currency
+       OR event_row.occurred_at<rate_row.effective_from
+       OR (rate_row.effective_until IS NOT NULL
+           AND event_row.occurred_at>=rate_row.effective_until)
+       OR gross>9223372036854775807 OR NEW.gross_minor<>gross
+       OR amount>9223372036854775807 OR NEW.amount_minor<>amount
+       OR NEW.source_type<>event_row.source_type
+       OR NEW.source_reference<>event_row.source_reference
+       OR NEW.occurred_at<>event_row.occurred_at
+       OR EXISTS(
+          SELECT 1 FROM public.billing_charges prior_charge
+          JOIN public.billing_reconciliation_runs prior_run
+            ON prior_run.tenant_id=prior_charge.tenant_id
+           AND prior_run.id=prior_charge.reconciliation_run_id
+          WHERE prior_charge.tenant_id=NEW.tenant_id
+            AND prior_charge.billable_event_id=NEW.billable_event_id
+            AND prior_run.status<>'rejected') THEN
+        RAISE EXCEPTION 'billing charge does not reconcile its run, event, and rate'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_billing_review_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE run_row record; BEGIN
+    SELECT * INTO run_row FROM public.billing_reconciliation_runs run
+    WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.reconciliation_run_id FOR UPDATE;
+    IF run_row IS NULL OR run_row.status<>'pending_review'
+       OR NEW.inventory_owner_id<>run_row.inventory_owner_id
+       OR NEW.reviewed_by_user_id=run_row.generated_by_user_id
+       OR NEW.resulting_revision<>run_row.revision+1
+       OR (NEW.decision='approved' AND (
+            run_row.event_count=0 OR run_row.unmatched_event_count<>0
+            OR run_row.event_count<>run_row.charge_count)) THEN
+        RAISE EXCEPTION 'billing review does not match the pending reconciliation run'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_billing_export_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$ DECLARE run_row record; BEGIN
+    SELECT * INTO run_row FROM public.billing_reconciliation_runs run
+    WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.reconciliation_run_id FOR UPDATE;
+    IF run_row IS NULL OR run_row.status<>'approved'
+       OR NEW.inventory_owner_id<>run_row.inventory_owner_id
+       OR NEW.line_count<>run_row.charge_count OR NEW.total_minor<>run_row.total_minor
+       OR NEW.currency<>run_row.currency OR NEW.resulting_revision<>run_row.revision+1 THEN
+        RAISE EXCEPTION 'financial export does not match its approved reconciliation run'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE TRIGGER billing_contracts_guard BEFORE UPDATE OR DELETE ON public.billing_contracts
+FOR EACH ROW EXECUTE FUNCTION public.guard_billing_contract_mutation();
+CREATE TRIGGER billing_rate_versions_validate BEFORE INSERT ON public.billing_rate_versions
+FOR EACH ROW EXECUTE FUNCTION public.validate_billing_rate_insert();
+CREATE TRIGGER billing_rate_versions_guard BEFORE INSERT OR UPDATE OR DELETE ON public.billing_rate_versions
+FOR EACH ROW EXECUTE FUNCTION public.guard_billing_rate_mutation();
+CREATE TRIGGER billable_events_validate BEFORE INSERT ON public.billable_events
+FOR EACH ROW EXECUTE FUNCTION public.validate_billable_event_insert();
+CREATE TRIGGER billable_events_immutable BEFORE UPDATE OR DELETE ON public.billable_events
+FOR EACH ROW EXECUTE FUNCTION public.reject_billing_ledger_mutation();
+CREATE TRIGGER billing_storage_snapshots_validate BEFORE INSERT ON public.billing_storage_snapshots
+FOR EACH ROW EXECUTE FUNCTION public.validate_billing_snapshot_insert();
+CREATE TRIGGER billing_storage_snapshots_immutable BEFORE UPDATE OR DELETE ON public.billing_storage_snapshots
+FOR EACH ROW EXECUTE FUNCTION public.reject_billing_ledger_mutation();
+CREATE TRIGGER billing_reconciliation_runs_validate BEFORE INSERT ON public.billing_reconciliation_runs
+FOR EACH ROW EXECUTE FUNCTION public.validate_billing_run_insert();
+CREATE TRIGGER billing_reconciliation_runs_guard BEFORE UPDATE OR DELETE ON public.billing_reconciliation_runs
+FOR EACH ROW EXECUTE FUNCTION public.guard_billing_run_mutation();
+CREATE TRIGGER billing_charges_validate BEFORE INSERT ON public.billing_charges
+FOR EACH ROW EXECUTE FUNCTION public.validate_billing_charge_insert();
+CREATE TRIGGER billing_charges_immutable BEFORE UPDATE OR DELETE ON public.billing_charges
+FOR EACH ROW EXECUTE FUNCTION public.reject_billing_ledger_mutation();
+CREATE TRIGGER billing_reviews_validate BEFORE INSERT ON public.billing_reviews
+FOR EACH ROW EXECUTE FUNCTION public.validate_billing_review_insert();
+CREATE TRIGGER billing_reviews_immutable BEFORE UPDATE OR DELETE ON public.billing_reviews
+FOR EACH ROW EXECUTE FUNCTION public.reject_billing_ledger_mutation();
+CREATE TRIGGER billing_financial_exports_validate BEFORE INSERT ON public.billing_financial_exports
+FOR EACH ROW EXECUTE FUNCTION public.validate_billing_export_insert();
+CREATE TRIGGER billing_financial_exports_immutable BEFORE UPDATE OR DELETE ON public.billing_financial_exports
+FOR EACH ROW EXECUTE FUNCTION public.reject_billing_ledger_mutation();
+
+DO $$ DECLARE table_name text; BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'billing_contracts','billing_rate_versions','billable_events','billing_storage_snapshots',
+    'billing_reconciliation_runs','billing_charges','billing_reviews','billing_financial_exports'
+  ] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',table_name);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',table_name);
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I USING (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint) WITH CHECK (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint)',
+      table_name||'_tenant_isolation',table_name);
+  END LOOP;
+END $$;
+
+GRANT SELECT,INSERT ON public.billing_contracts TO wareboxes_app;
+GRANT UPDATE(revision,status,activated_by_user_id,activated_at,closed_by_user_id,closed_at)
+ON public.billing_contracts TO wareboxes_app;
+GRANT SELECT,INSERT ON public.billing_rate_versions TO wareboxes_app;
+GRANT UPDATE(status,retired_by_user_id,retired_at) ON public.billing_rate_versions TO wareboxes_app;
+GRANT SELECT,INSERT ON public.billable_events TO wareboxes_app;
+GRANT SELECT,INSERT ON public.billing_storage_snapshots TO wareboxes_app;
+GRANT SELECT,INSERT ON public.billing_reconciliation_runs TO wareboxes_app;
+GRANT UPDATE(revision,status,reviewed_by_user_id,reviewed_at,review_note,exported_at)
+ON public.billing_reconciliation_runs TO wareboxes_app;
+GRANT SELECT,INSERT ON public.billing_charges TO wareboxes_app;
+GRANT SELECT,INSERT ON public.billing_reviews TO wareboxes_app;
+GRANT SELECT,INSERT ON public.billing_financial_exports TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billing_contracts_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billing_rate_versions_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billable_events_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billing_storage_snapshots_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billing_reconciliation_runs_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billing_charges_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billing_reviews_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.billing_financial_exports_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.reject_billing_ledger_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_billing_contract_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_billing_rate_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_billing_run_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_billing_rate_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_billable_event_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_billing_snapshot_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_billing_run_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_billing_charge_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_billing_review_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_billing_export_insert() FROM PUBLIC;
+
+-- Typed yard appointments, gate visits, movements, dock work, and detention.
+CREATE TABLE public.yard_locations (
+    id bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.yard_locations_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    code text NOT NULL,
+    name text NOT NULL,
+    kind text NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamptz NOT NULL,
+    CONSTRAINT yard_locations_scope_id_key UNIQUE(tenant_id,facility_id,id),
+    CONSTRAINT yard_locations_code_key UNIQUE(tenant_id,facility_id,code),
+    CONSTRAINT yard_locations_code_check CHECK(code=btrim(code) AND code<>'' AND char_length(code)<=80),
+    CONSTRAINT yard_locations_name_check CHECK(name=btrim(name) AND name<>'' AND char_length(name)<=160),
+    CONSTRAINT yard_locations_kind_check CHECK(kind IN ('gate','parking','dock_door','inspection','staging')),
+    CONSTRAINT yard_locations_revision_check CHECK(revision>0),
+    CONSTRAINT yard_locations_facility_fkey FOREIGN KEY(tenant_id,facility_id)
+      REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT yard_locations_actor_fkey FOREIGN KEY(tenant_id,created_by_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.yard_assets (
+    id bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.yard_assets_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    kind text NOT NULL,
+    asset_number text NOT NULL,
+    carrier text NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamptz NOT NULL,
+    CONSTRAINT yard_assets_tenant_id_key UNIQUE(tenant_id,id),
+    CONSTRAINT yard_assets_number_key UNIQUE(tenant_id,kind,asset_number),
+    CONSTRAINT yard_assets_kind_check CHECK(kind IN ('trailer','container')),
+    CONSTRAINT yard_assets_number_check CHECK(asset_number=btrim(asset_number) AND asset_number<>'' AND char_length(asset_number)<=80),
+    CONSTRAINT yard_assets_carrier_check CHECK(carrier=btrim(carrier) AND carrier<>'' AND char_length(carrier)<=160),
+    CONSTRAINT yard_assets_revision_check CHECK(revision>0),
+    CONSTRAINT yard_assets_actor_fkey FOREIGN KEY(tenant_id,created_by_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.yard_appointments (
+    id bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.yard_appointments_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    direction text NOT NULL,
+    appointment_number text NOT NULL,
+    scheduled_from timestamptz NOT NULL,
+    scheduled_until timestamptz NOT NULL,
+    carrier text NOT NULL,
+    expected_asset_kind text NOT NULL,
+    expected_asset_number text,
+    inbound_load_id bigint,
+    outbound_load_id bigint,
+    free_minutes integer NOT NULL,
+    status text DEFAULT 'scheduled' NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    note text,
+    visit_id bigint,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamptz NOT NULL,
+    updated_by_user_id bigint,
+    updated_at timestamptz,
+    CONSTRAINT yard_appointments_tenant_id_key UNIQUE(tenant_id,id),
+    CONSTRAINT yard_appointments_scope_id_key UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_appointments_number_key UNIQUE(tenant_id,facility_id,appointment_number),
+    CONSTRAINT yard_appointments_direction_check CHECK(direction IN ('inbound','outbound')),
+    CONSTRAINT yard_appointments_status_check CHECK(status IN ('scheduled','checked_in','completed','cancelled','no_show')),
+    CONSTRAINT yard_appointments_window_check CHECK(scheduled_until>scheduled_from),
+    CONSTRAINT yard_appointments_load_direction_check CHECK(
+      (direction='inbound' AND outbound_load_id IS NULL)
+      OR (direction='outbound' AND inbound_load_id IS NULL)),
+    CONSTRAINT yard_appointments_number_check CHECK(appointment_number=btrim(appointment_number) AND appointment_number<>'' AND char_length(appointment_number)<=80),
+    CONSTRAINT yard_appointments_carrier_check CHECK(carrier=btrim(carrier) AND carrier<>'' AND char_length(carrier)<=160),
+    CONSTRAINT yard_appointments_asset_kind_check CHECK(expected_asset_kind IN ('trailer','container')),
+    CONSTRAINT yard_appointments_asset_number_check CHECK(expected_asset_number IS NULL OR (expected_asset_number=btrim(expected_asset_number) AND expected_asset_number<>'' AND char_length(expected_asset_number)<=80)),
+    CONSTRAINT yard_appointments_free_minutes_check CHECK(free_minutes BETWEEN 0 AND 10080),
+    CONSTRAINT yard_appointments_revision_check CHECK(revision>0),
+    CONSTRAINT yard_appointments_note_check CHECK(note IS NULL OR (note=btrim(note) AND note<>'' AND char_length(note)<=500)),
+    CONSTRAINT yard_appointments_update_evidence_check CHECK((updated_by_user_id IS NULL)=(updated_at IS NULL)),
+    CONSTRAINT yard_appointments_owner_fkey FOREIGN KEY(tenant_id,inventory_owner_id)
+      REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT yard_appointments_facility_fkey FOREIGN KEY(tenant_id,facility_id)
+      REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT yard_appointments_inbound_load_fkey FOREIGN KEY(tenant_id,inventory_owner_id,inbound_load_id)
+      REFERENCES public.loads(tenant_id,inventory_owner_id,id),
+    CONSTRAINT yard_appointments_outbound_load_fkey FOREIGN KEY(tenant_id,facility_id,outbound_load_id)
+      REFERENCES public.outbound_loads(tenant_id,facility_id,id),
+    CONSTRAINT yard_appointments_created_actor_fkey FOREIGN KEY(tenant_id,created_by_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT yard_appointments_updated_actor_fkey FOREIGN KEY(tenant_id,updated_by_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.yard_appointment_events (
+    id bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.yard_appointment_events_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    appointment_id bigint NOT NULL,
+    event_kind text NOT NULL,
+    from_status text,
+    to_status text NOT NULL,
+    note text,
+    resulting_revision bigint NOT NULL,
+    actor_user_id bigint NOT NULL,
+    occurred_at timestamptz NOT NULL,
+    CONSTRAINT yard_appointment_events_scope_id_key UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_appointment_events_revision_key UNIQUE(tenant_id,appointment_id,resulting_revision),
+    CONSTRAINT yard_appointment_events_kind_check CHECK(event_kind IN ('created','checked_in','completed','cancelled','no_show')),
+    CONSTRAINT yard_appointment_events_from_check CHECK(from_status IS NULL OR from_status IN ('scheduled','checked_in','completed','cancelled','no_show')),
+    CONSTRAINT yard_appointment_events_to_check CHECK(to_status IN ('scheduled','checked_in','completed','cancelled','no_show')),
+    CONSTRAINT yard_appointment_events_revision_check CHECK(resulting_revision>0),
+    CONSTRAINT yard_appointment_events_note_check CHECK(note IS NULL OR (note=btrim(note) AND note<>'' AND char_length(note)<=500)),
+    CONSTRAINT yard_appointment_events_appointment_fkey FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,appointment_id)
+      REFERENCES public.yard_appointments(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_appointment_events_actor_fkey FOREIGN KEY(tenant_id,actor_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.yard_visits (
+    id bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.yard_visits_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    appointment_id bigint,
+    direction text NOT NULL,
+    asset_id bigint NOT NULL,
+    driver_name text NOT NULL,
+    status text DEFAULT 'gated_in' NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    current_location_id bigint,
+    dock_door_location_id bigint,
+    inbound_load_id bigint,
+    outbound_load_id bigint,
+    gated_in_by_user_id bigint NOT NULL,
+    gated_in_at timestamptz NOT NULL,
+    operation_started_at timestamptz,
+    operation_completed_at timestamptz,
+    rejected_at timestamptz,
+    gated_out_at timestamptz,
+    CONSTRAINT yard_visits_tenant_id_key UNIQUE(tenant_id,id),
+    CONSTRAINT yard_visits_scope_id_key UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_visits_appointment_key UNIQUE(tenant_id,appointment_id),
+    CONSTRAINT yard_visits_direction_check CHECK(direction IN ('inbound','outbound')),
+    CONSTRAINT yard_visits_status_check CHECK(status IN ('gated_in','in_yard','at_door','loading','unloading','ready_to_depart','rejected','gated_out')),
+    CONSTRAINT yard_visits_direction_status_check CHECK((direction='inbound' AND status<>'loading') OR (direction='outbound' AND status<>'unloading')),
+    CONSTRAINT yard_visits_load_direction_check CHECK((direction='inbound' AND outbound_load_id IS NULL) OR (direction='outbound' AND inbound_load_id IS NULL)),
+    CONSTRAINT yard_visits_driver_check CHECK(driver_name=btrim(driver_name) AND driver_name<>'' AND char_length(driver_name)<=160),
+    CONSTRAINT yard_visits_revision_check CHECK(revision>0),
+    CONSTRAINT yard_visits_operation_time_check CHECK(operation_completed_at IS NULL OR (operation_started_at IS NOT NULL AND operation_completed_at>=operation_started_at)),
+    CONSTRAINT yard_visits_terminal_time_check CHECK((status='gated_out')=(gated_out_at IS NOT NULL)),
+    CONSTRAINT yard_visits_rejected_time_check CHECK(rejected_at IS NULL OR status IN ('rejected','gated_out')),
+    CONSTRAINT yard_visits_owner_fkey FOREIGN KEY(tenant_id,inventory_owner_id)
+      REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT yard_visits_facility_fkey FOREIGN KEY(tenant_id,facility_id)
+      REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT yard_visits_appointment_fkey FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,appointment_id)
+      REFERENCES public.yard_appointments(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_visits_asset_fkey FOREIGN KEY(tenant_id,asset_id)
+      REFERENCES public.yard_assets(tenant_id,id),
+    CONSTRAINT yard_visits_current_location_fkey FOREIGN KEY(tenant_id,facility_id,current_location_id)
+      REFERENCES public.yard_locations(tenant_id,facility_id,id),
+    CONSTRAINT yard_visits_door_location_fkey FOREIGN KEY(tenant_id,facility_id,dock_door_location_id)
+      REFERENCES public.yard_locations(tenant_id,facility_id,id),
+    CONSTRAINT yard_visits_inbound_load_fkey FOREIGN KEY(tenant_id,inventory_owner_id,inbound_load_id)
+      REFERENCES public.loads(tenant_id,inventory_owner_id,id),
+    CONSTRAINT yard_visits_outbound_load_fkey FOREIGN KEY(tenant_id,facility_id,outbound_load_id)
+      REFERENCES public.outbound_loads(tenant_id,facility_id,id),
+    CONSTRAINT yard_visits_actor_fkey FOREIGN KEY(tenant_id,gated_in_by_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE UNIQUE INDEX yard_visits_active_asset_key ON public.yard_visits(tenant_id,asset_id)
+WHERE status<>'gated_out';
+CREATE UNIQUE INDEX yard_visits_active_door_key ON public.yard_visits(tenant_id,facility_id,dock_door_location_id)
+WHERE dock_door_location_id IS NOT NULL AND status<>'gated_out';
+CREATE UNIQUE INDEX yard_visits_active_position_key ON public.yard_visits(tenant_id,facility_id,current_location_id)
+WHERE current_location_id IS NOT NULL AND status IN ('in_yard','at_door','loading','unloading','ready_to_depart');
+
+ALTER TABLE public.yard_appointments
+  ADD CONSTRAINT yard_appointments_visit_fkey FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,visit_id)
+  REFERENCES public.yard_visits(tenant_id,inventory_owner_id,facility_id,id);
+
+CREATE TABLE public.yard_visit_events (
+    id bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.yard_visit_events_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    visit_id bigint NOT NULL,
+    event_kind text NOT NULL,
+    from_status text,
+    to_status text NOT NULL,
+    from_location_id bigint,
+    to_location_id bigint,
+    operation text,
+    note text,
+    resulting_revision bigint NOT NULL,
+    actor_user_id bigint NOT NULL,
+    occurred_at timestamptz NOT NULL,
+    CONSTRAINT yard_visit_events_scope_id_key UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_visit_events_revision_key UNIQUE(tenant_id,visit_id,resulting_revision),
+    CONSTRAINT yard_visit_events_kind_check CHECK(event_kind IN ('gated_in','spotted','door_assigned','operation_started','operation_completed','rejected','gated_out')),
+    CONSTRAINT yard_visit_events_from_check CHECK(from_status IS NULL OR from_status IN ('gated_in','in_yard','at_door','loading','unloading','ready_to_depart','rejected','gated_out')),
+    CONSTRAINT yard_visit_events_to_check CHECK(to_status IN ('gated_in','in_yard','at_door','loading','unloading','ready_to_depart','rejected','gated_out')),
+    CONSTRAINT yard_visit_events_operation_check CHECK(operation IS NULL OR operation IN ('loading','unloading')),
+    CONSTRAINT yard_visit_events_note_check CHECK(note IS NULL OR (note=btrim(note) AND note<>'' AND char_length(note)<=500)),
+    CONSTRAINT yard_visit_events_revision_check CHECK(resulting_revision>0),
+    CONSTRAINT yard_visit_events_visit_fkey FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,visit_id)
+      REFERENCES public.yard_visits(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_visit_events_from_location_fkey FOREIGN KEY(tenant_id,facility_id,from_location_id)
+      REFERENCES public.yard_locations(tenant_id,facility_id,id),
+    CONSTRAINT yard_visit_events_to_location_fkey FOREIGN KEY(tenant_id,facility_id,to_location_id)
+      REFERENCES public.yard_locations(tenant_id,facility_id,id),
+    CONSTRAINT yard_visit_events_actor_fkey FOREIGN KEY(tenant_id,actor_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.yard_detention_records (
+    id bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME public.yard_detention_records_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    visit_id bigint NOT NULL,
+    total_minutes bigint NOT NULL,
+    free_minutes integer NOT NULL,
+    detention_minutes bigint NOT NULL,
+    billable_hours bigint NOT NULL,
+    billable_event_id bigint,
+    calculated_at timestamptz NOT NULL,
+    CONSTRAINT yard_detention_records_scope_id_key UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_detention_records_visit_key UNIQUE(tenant_id,visit_id),
+    CONSTRAINT yard_detention_records_values_check CHECK(total_minutes>=0 AND free_minutes BETWEEN 0 AND 10080 AND detention_minutes>=0 AND billable_hours>=0),
+    CONSTRAINT yard_detention_records_visit_fkey FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,visit_id)
+      REFERENCES public.yard_visits(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT yard_detention_records_event_fkey FOREIGN KEY(tenant_id,billable_event_id)
+      REFERENCES public.billable_events(tenant_id,id)
+);
+
+CREATE INDEX yard_appointments_queue_idx ON public.yard_appointments
+  (tenant_id,facility_id,status,scheduled_from,id);
+CREATE INDEX yard_visits_queue_idx ON public.yard_visits
+  (tenant_id,facility_id,status,gated_in_at,id);
+CREATE INDEX yard_visit_events_history_idx ON public.yard_visit_events(tenant_id,visit_id,resulting_revision);
+
+CREATE FUNCTION public.reject_yard_immutable_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'yard evidence is immutable' USING ERRCODE='55000'; END $$;
+
+CREATE FUNCTION public.validate_yard_appointment_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.status<>'scheduled' OR NEW.revision<>1 OR NEW.visit_id IS NOT NULL
+     OR NEW.updated_by_user_id IS NOT NULL OR NEW.updated_at IS NOT NULL THEN
+    RAISE EXCEPTION 'new yard appointment must begin scheduled at revision one' USING ERRCODE='55000';
+  END IF;
+  IF NEW.inbound_load_id IS NOT NULL AND NOT EXISTS(
+    SELECT 1 FROM public.loads load WHERE load.tenant_id=NEW.tenant_id
+      AND load.inventory_owner_id=NEW.inventory_owner_id AND load.facility_id=NEW.facility_id
+      AND load.id=NEW.inbound_load_id AND load.type='inbound' AND load.deleted IS NULL) THEN
+    RAISE EXCEPTION 'inbound yard appointment load does not match its scope' USING ERRCODE='55000';
+  END IF;
+  IF NEW.outbound_load_id IS NOT NULL AND NOT EXISTS(
+    SELECT 1 FROM public.outbound_loads outbound
+    JOIN public.outbound_load_shipments shipment ON shipment.tenant_id=outbound.tenant_id
+      AND shipment.outbound_load_id=outbound.id AND shipment.inventory_owner_id=NEW.inventory_owner_id
+    WHERE outbound.tenant_id=NEW.tenant_id AND outbound.facility_id=NEW.facility_id
+      AND outbound.id=NEW.outbound_load_id) THEN
+    RAISE EXCEPTION 'outbound yard appointment load does not match its scope' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_yard_appointment_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+     OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+     OR NEW.direction<>OLD.direction OR NEW.appointment_number<>OLD.appointment_number
+     OR NEW.scheduled_from<>OLD.scheduled_from OR NEW.scheduled_until<>OLD.scheduled_until
+     OR NEW.carrier<>OLD.carrier OR NEW.expected_asset_kind<>OLD.expected_asset_kind
+     OR NEW.expected_asset_number IS DISTINCT FROM OLD.expected_asset_number
+     OR NEW.inbound_load_id IS DISTINCT FROM OLD.inbound_load_id
+     OR NEW.outbound_load_id IS DISTINCT FROM OLD.outbound_load_id
+     OR NEW.free_minutes<>OLD.free_minutes OR NEW.note IS DISTINCT FROM OLD.note
+     OR NEW.created_by_user_id<>OLD.created_by_user_id OR NEW.created_at<>OLD.created_at
+     OR NEW.revision<>OLD.revision+1 OR NEW.updated_by_user_id IS NULL OR NEW.updated_at IS NULL
+     OR NOT ((OLD.status='scheduled' AND NEW.status IN ('checked_in','cancelled','no_show'))
+             OR (OLD.status='checked_in' AND NEW.status='completed'))
+     OR ((NEW.status IN ('checked_in','completed'))<>(NEW.visit_id IS NOT NULL))
+     OR (NEW.status='completed' AND NEW.visit_id IS NULL)
+     OR (NEW.status IN ('cancelled','no_show') AND NEW.visit_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'invalid yard appointment lifecycle mutation' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_yard_visit_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE appointment_row record; asset_row record; gate_row record;
+BEGIN
+  SELECT * INTO asset_row FROM public.yard_assets asset
+    WHERE asset.tenant_id=NEW.tenant_id AND asset.id=NEW.asset_id AND asset.active;
+  SELECT * INTO gate_row FROM public.yard_locations location
+    WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+      AND location.id=NEW.current_location_id AND location.kind='gate' AND location.active;
+  IF asset_row IS NULL OR gate_row IS NULL OR NEW.status<>'gated_in' OR NEW.revision<>1
+     OR NEW.dock_door_location_id IS NOT NULL OR NEW.operation_started_at IS NOT NULL
+     OR NEW.operation_completed_at IS NOT NULL OR NEW.rejected_at IS NOT NULL
+     OR NEW.gated_out_at IS NOT NULL THEN
+    RAISE EXCEPTION 'new yard visit does not match gate-in invariants' USING ERRCODE='55000';
+  END IF;
+  IF NEW.appointment_id IS NOT NULL THEN
+    SELECT * INTO appointment_row FROM public.yard_appointments appointment
+      WHERE appointment.tenant_id=NEW.tenant_id AND appointment.id=NEW.appointment_id FOR UPDATE;
+    IF appointment_row IS NULL OR appointment_row.status<>'scheduled'
+       OR appointment_row.inventory_owner_id<>NEW.inventory_owner_id
+       OR appointment_row.facility_id<>NEW.facility_id OR appointment_row.direction<>NEW.direction
+       OR appointment_row.expected_asset_kind<>asset_row.kind
+       OR (appointment_row.expected_asset_number IS NOT NULL
+           AND appointment_row.expected_asset_number<>asset_row.asset_number)
+       OR appointment_row.carrier<>asset_row.carrier
+       OR appointment_row.inbound_load_id IS DISTINCT FROM NEW.inbound_load_id
+       OR appointment_row.outbound_load_id IS DISTINCT FROM NEW.outbound_load_id THEN
+      RAISE EXCEPTION 'yard visit does not match its scheduled appointment' USING ERRCODE='55000';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_yard_visit_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+     OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+     OR NEW.appointment_id IS DISTINCT FROM OLD.appointment_id OR NEW.direction<>OLD.direction
+     OR NEW.asset_id<>OLD.asset_id OR NEW.driver_name<>OLD.driver_name
+     OR NEW.inbound_load_id IS DISTINCT FROM OLD.inbound_load_id
+     OR NEW.outbound_load_id IS DISTINCT FROM OLD.outbound_load_id
+     OR NEW.gated_in_by_user_id<>OLD.gated_in_by_user_id OR NEW.gated_in_at<>OLD.gated_in_at
+     OR NEW.revision<>OLD.revision+1
+     OR NOT ((OLD.status='gated_in' AND NEW.status IN ('in_yard','at_door','rejected'))
+          OR (OLD.status='in_yard' AND NEW.status IN ('in_yard','at_door','rejected'))
+          OR (OLD.status='at_door' AND NEW.status IN ('loading','unloading'))
+          OR (OLD.status IN ('loading','unloading') AND NEW.status='ready_to_depart')
+          OR (OLD.status IN ('ready_to_depart','rejected') AND NEW.status='gated_out'))
+     OR (NEW.status='in_yard' AND (
+          NEW.current_location_id IS NULL OR NEW.dock_door_location_id IS NOT NULL
+          OR NEW.operation_started_at IS DISTINCT FROM OLD.operation_started_at
+          OR NEW.operation_completed_at IS DISTINCT FROM OLD.operation_completed_at
+          OR NEW.rejected_at IS DISTINCT FROM OLD.rejected_at
+          OR NEW.gated_out_at IS DISTINCT FROM OLD.gated_out_at
+          OR NOT EXISTS(SELECT 1 FROM public.yard_locations location
+             WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+               AND location.id=NEW.current_location_id AND location.kind<>'dock_door'
+               AND location.active)))
+     OR (NEW.status='at_door' AND (
+          NEW.current_location_id IS NULL
+          OR NEW.current_location_id IS DISTINCT FROM NEW.dock_door_location_id
+          OR NEW.operation_started_at IS DISTINCT FROM OLD.operation_started_at
+          OR NEW.operation_completed_at IS DISTINCT FROM OLD.operation_completed_at
+          OR NEW.rejected_at IS DISTINCT FROM OLD.rejected_at
+          OR NEW.gated_out_at IS DISTINCT FROM OLD.gated_out_at
+          OR NOT EXISTS(SELECT 1 FROM public.yard_locations location
+             WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+               AND location.id=NEW.current_location_id AND location.kind='dock_door'
+               AND location.active)))
+     OR (NEW.status IN ('loading','unloading') AND (
+          NEW.current_location_id IS NULL
+          OR NEW.current_location_id IS DISTINCT FROM OLD.current_location_id
+          OR NEW.dock_door_location_id IS DISTINCT FROM OLD.dock_door_location_id
+          OR NEW.operation_started_at IS NULL OR NEW.operation_started_at<NEW.gated_in_at
+          OR OLD.operation_started_at IS NOT NULL
+          OR NEW.operation_completed_at IS DISTINCT FROM OLD.operation_completed_at
+          OR NEW.rejected_at IS DISTINCT FROM OLD.rejected_at
+          OR NEW.gated_out_at IS DISTINCT FROM OLD.gated_out_at))
+     OR (NEW.status='ready_to_depart' AND (
+          NEW.current_location_id IS DISTINCT FROM OLD.current_location_id
+          OR NEW.dock_door_location_id IS DISTINCT FROM OLD.dock_door_location_id
+          OR NEW.operation_started_at IS DISTINCT FROM OLD.operation_started_at
+          OR NEW.operation_completed_at IS NULL
+          OR OLD.operation_completed_at IS NOT NULL
+          OR NEW.operation_completed_at<NEW.operation_started_at
+          OR NEW.rejected_at IS DISTINCT FROM OLD.rejected_at
+          OR NEW.gated_out_at IS DISTINCT FROM OLD.gated_out_at))
+     OR (NEW.status='rejected' AND (
+          NEW.current_location_id IS DISTINCT FROM OLD.current_location_id
+          OR NEW.dock_door_location_id IS DISTINCT FROM OLD.dock_door_location_id
+          OR NEW.operation_started_at IS DISTINCT FROM OLD.operation_started_at
+          OR NEW.operation_completed_at IS DISTINCT FROM OLD.operation_completed_at
+          OR NEW.rejected_at IS NULL OR NEW.rejected_at<NEW.gated_in_at
+          OR OLD.rejected_at IS NOT NULL
+          OR NEW.gated_out_at IS DISTINCT FROM OLD.gated_out_at))
+     OR (NEW.status='gated_out' AND (
+          NEW.current_location_id IS NOT NULL OR NEW.dock_door_location_id IS NOT NULL
+          OR NEW.operation_started_at IS DISTINCT FROM OLD.operation_started_at
+          OR NEW.operation_completed_at IS DISTINCT FROM OLD.operation_completed_at
+          OR NEW.rejected_at IS DISTINCT FROM OLD.rejected_at
+          OR NEW.gated_out_at IS NULL OR NEW.gated_out_at<NEW.gated_in_at
+          OR OLD.gated_out_at IS NOT NULL)) THEN
+    RAISE EXCEPTION 'invalid yard visit lifecycle mutation' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_yard_appointment_event_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE appointment_row record; prior_row record; expected_kind text;
+BEGIN
+  SELECT * INTO appointment_row FROM public.yard_appointments appointment
+    WHERE appointment.tenant_id=NEW.tenant_id AND appointment.id=NEW.appointment_id FOR SHARE;
+  expected_kind:=CASE NEW.to_status WHEN 'scheduled' THEN 'created' WHEN 'checked_in' THEN 'checked_in'
+    WHEN 'completed' THEN 'completed' WHEN 'cancelled' THEN 'cancelled' WHEN 'no_show' THEN 'no_show' END;
+  IF appointment_row IS NULL OR NEW.inventory_owner_id<>appointment_row.inventory_owner_id
+     OR NEW.facility_id<>appointment_row.facility_id OR NEW.to_status<>appointment_row.status
+     OR NEW.resulting_revision<>appointment_row.revision OR NEW.event_kind<>expected_kind
+     OR (NEW.resulting_revision=1 AND NEW.from_status IS NOT NULL)
+     OR (NEW.resulting_revision>1 AND NEW.from_status IS NULL)
+     OR (NEW.resulting_revision=1 AND (
+          NEW.actor_user_id<>appointment_row.created_by_user_id
+          OR NEW.occurred_at IS DISTINCT FROM appointment_row.created_at))
+     OR (NEW.resulting_revision>1 AND (
+          NEW.actor_user_id IS DISTINCT FROM appointment_row.updated_by_user_id
+          OR NEW.occurred_at IS DISTINCT FROM appointment_row.updated_at)) THEN
+    RAISE EXCEPTION 'yard appointment event does not match aggregate state' USING ERRCODE='55000';
+  END IF;
+  IF NEW.resulting_revision>1 THEN
+    SELECT * INTO prior_row FROM public.yard_appointment_events event
+      WHERE event.tenant_id=NEW.tenant_id AND event.appointment_id=NEW.appointment_id
+        AND event.resulting_revision=NEW.resulting_revision-1;
+    IF prior_row IS NULL OR NEW.from_status<>prior_row.to_status
+       OR NEW.occurred_at<prior_row.occurred_at THEN
+      RAISE EXCEPTION 'yard appointment event does not continue immutable history' USING ERRCODE='55000';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_yard_visit_event_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE visit_row record; prior_row record; expected_kind text;
+BEGIN
+  SELECT * INTO visit_row FROM public.yard_visits visit
+    WHERE visit.tenant_id=NEW.tenant_id AND visit.id=NEW.visit_id FOR SHARE;
+  expected_kind:=CASE NEW.to_status
+    WHEN 'gated_in' THEN 'gated_in'
+    WHEN 'in_yard' THEN 'spotted'
+    WHEN 'at_door' THEN 'door_assigned'
+    WHEN 'loading' THEN 'operation_started'
+    WHEN 'unloading' THEN 'operation_started'
+    WHEN 'ready_to_depart' THEN 'operation_completed'
+    WHEN 'rejected' THEN 'rejected'
+    WHEN 'gated_out' THEN 'gated_out' END;
+  IF visit_row IS NULL OR NEW.inventory_owner_id<>visit_row.inventory_owner_id
+     OR NEW.facility_id<>visit_row.facility_id OR NEW.to_status<>visit_row.status
+     OR NEW.resulting_revision<>visit_row.revision OR NEW.event_kind<>expected_kind
+     OR (NEW.resulting_revision=1 AND (NEW.event_kind<>'gated_in' OR NEW.from_status IS NOT NULL))
+     OR (NEW.resulting_revision>1 AND NEW.from_status IS NULL)
+     OR (NEW.event_kind IN ('operation_started','operation_completed') AND (
+          NEW.operation IS NULL
+          OR (NEW.operation='loading')<>(NEW.to_status IN ('loading','ready_to_depart')
+             AND NEW.from_status IN ('at_door','loading'))
+          OR (NEW.operation='unloading')<>(NEW.to_status IN ('unloading','ready_to_depart')
+             AND NEW.from_status IN ('at_door','unloading'))))
+     OR (NEW.event_kind NOT IN ('operation_started','operation_completed')
+         AND NEW.operation IS NOT NULL)
+     OR (NEW.event_kind='spotted' AND NEW.from_status NOT IN ('gated_in','in_yard'))
+     OR (NEW.event_kind='door_assigned' AND NEW.from_status NOT IN ('gated_in','in_yard'))
+     OR (NEW.event_kind='rejected' AND NEW.from_status NOT IN ('gated_in','in_yard'))
+     OR (NEW.event_kind='gated_out' AND NEW.from_status NOT IN ('ready_to_depart','rejected'))
+     OR (NEW.to_status='gated_out' AND NEW.to_location_id IS NOT NULL)
+     OR (NEW.to_status<>'gated_out' AND NEW.to_location_id IS DISTINCT FROM visit_row.current_location_id)
+     OR (NEW.event_kind='operation_started' AND NEW.occurred_at IS DISTINCT FROM visit_row.operation_started_at)
+     OR (NEW.event_kind='operation_completed' AND NEW.occurred_at IS DISTINCT FROM visit_row.operation_completed_at)
+     OR (NEW.event_kind='rejected' AND NEW.occurred_at IS DISTINCT FROM visit_row.rejected_at)
+     OR (NEW.event_kind='gated_out' AND NEW.occurred_at IS DISTINCT FROM visit_row.gated_out_at) THEN
+    RAISE EXCEPTION 'yard visit event does not match aggregate state' USING ERRCODE='55000';
+  END IF;
+  IF NEW.resulting_revision>1 THEN
+    SELECT * INTO prior_row FROM public.yard_visit_events event
+      WHERE event.tenant_id=NEW.tenant_id AND event.visit_id=NEW.visit_id
+        AND event.resulting_revision=NEW.resulting_revision-1;
+    IF prior_row IS NULL OR NEW.from_status<>prior_row.to_status
+       OR NEW.from_location_id IS DISTINCT FROM prior_row.to_location_id
+       OR NEW.occurred_at<prior_row.occurred_at THEN
+      RAISE EXCEPTION 'yard visit event does not continue immutable history' USING ERRCODE='55000';
+    END IF;
+  ELSIF NEW.from_location_id IS NOT NULL OR NEW.to_location_id IS DISTINCT FROM visit_row.current_location_id
+        OR NEW.occurred_at IS DISTINCT FROM visit_row.gated_in_at THEN
+    RAISE EXCEPTION 'initial yard visit event does not match gate-in state' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_yard_appointment_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM public.yard_appointment_events event
+    WHERE event.tenant_id=NEW.tenant_id AND event.appointment_id=NEW.id
+      AND event.resulting_revision=NEW.revision AND event.to_status=NEW.status) THEN
+    RAISE EXCEPTION 'yard appointment state lacks immutable event evidence' USING ERRCODE='55000';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.require_yard_visit_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM public.yard_visit_events event
+    WHERE event.tenant_id=NEW.tenant_id AND event.visit_id=NEW.id
+      AND event.resulting_revision=NEW.revision AND event.to_status=NEW.status) THEN
+    RAISE EXCEPTION 'yard visit state lacks immutable event evidence' USING ERRCODE='55000';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.validate_yard_detention_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE visit_row record; expected_total bigint; expected_free integer;
+  expected_detention bigint; expected_hours bigint; active_contract boolean;
+BEGIN
+  SELECT * INTO visit_row FROM public.yard_visits visit
+    WHERE visit.tenant_id=NEW.tenant_id AND visit.id=NEW.visit_id FOR SHARE;
+  IF visit_row IS NULL OR visit_row.status<>'gated_out' THEN
+    RAISE EXCEPTION 'yard detention requires a completed visit' USING ERRCODE='55000';
+  END IF;
+  SELECT appointment.free_minutes INTO expected_free FROM public.yard_appointments appointment
+    WHERE appointment.tenant_id=visit_row.tenant_id AND appointment.id=visit_row.appointment_id;
+  expected_free:=COALESCE(expected_free,0);
+  expected_total:=floor(extract(epoch FROM (visit_row.gated_out_at-visit_row.gated_in_at))/60);
+  expected_detention:=GREATEST(expected_total-expected_free,0);
+  expected_hours:=(expected_detention+59)/60;
+  SELECT EXISTS(SELECT 1 FROM public.billing_contracts contract
+    WHERE contract.tenant_id=NEW.tenant_id AND contract.inventory_owner_id=NEW.inventory_owner_id
+      AND contract.status='active' AND contract.effective_from<=visit_row.gated_out_at
+      AND (contract.effective_until IS NULL OR contract.effective_until>visit_row.gated_out_at))
+    INTO active_contract;
+  IF NEW.inventory_owner_id<>visit_row.inventory_owner_id OR NEW.facility_id<>visit_row.facility_id
+     OR NEW.free_minutes<>expected_free OR NEW.calculated_at<>visit_row.gated_out_at
+     OR NEW.total_minutes<>expected_total OR NEW.detention_minutes<>expected_detention
+     OR NEW.billable_hours<>expected_hours
+     OR ((expected_hours>0 AND active_contract)<>(NEW.billable_event_id IS NOT NULL))
+     OR (NEW.billable_event_id IS NOT NULL AND NOT EXISTS(
+       SELECT 1 FROM public.billable_events event WHERE event.tenant_id=NEW.tenant_id
+        AND event.id=NEW.billable_event_id AND event.inventory_owner_id=NEW.inventory_owner_id
+        AND event.facility_id=NEW.facility_id AND event.event_type='detention_hour'
+        AND event.source_type='yard_detention' AND event.source_reference=NEW.visit_id::text
+        AND event.quantity=NEW.billable_hours AND event.occurred_at=NEW.calculated_at)) THEN
+    RAISE EXCEPTION 'yard detention record does not reconcile the completed visit' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER yard_locations_immutable BEFORE UPDATE OR DELETE ON public.yard_locations
+FOR EACH ROW EXECUTE FUNCTION public.reject_yard_immutable_mutation();
+CREATE TRIGGER yard_assets_immutable BEFORE UPDATE OR DELETE ON public.yard_assets
+FOR EACH ROW EXECUTE FUNCTION public.reject_yard_immutable_mutation();
+CREATE TRIGGER yard_appointments_validate BEFORE INSERT ON public.yard_appointments
+FOR EACH ROW EXECUTE FUNCTION public.validate_yard_appointment_insert();
+CREATE TRIGGER yard_appointments_guard BEFORE UPDATE OR DELETE ON public.yard_appointments
+FOR EACH ROW EXECUTE FUNCTION public.guard_yard_appointment_mutation();
+CREATE TRIGGER yard_appointment_events_validate BEFORE INSERT ON public.yard_appointment_events
+FOR EACH ROW EXECUTE FUNCTION public.validate_yard_appointment_event_insert();
+CREATE TRIGGER yard_appointment_events_immutable BEFORE UPDATE OR DELETE ON public.yard_appointment_events
+FOR EACH ROW EXECUTE FUNCTION public.reject_yard_immutable_mutation();
+CREATE CONSTRAINT TRIGGER yard_appointments_require_event AFTER INSERT OR UPDATE ON public.yard_appointments
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_yard_appointment_event();
+CREATE TRIGGER yard_visits_validate BEFORE INSERT ON public.yard_visits
+FOR EACH ROW EXECUTE FUNCTION public.validate_yard_visit_insert();
+CREATE TRIGGER yard_visits_guard BEFORE UPDATE OR DELETE ON public.yard_visits
+FOR EACH ROW EXECUTE FUNCTION public.guard_yard_visit_mutation();
+CREATE TRIGGER yard_visit_events_validate BEFORE INSERT ON public.yard_visit_events
+FOR EACH ROW EXECUTE FUNCTION public.validate_yard_visit_event_insert();
+CREATE TRIGGER yard_visit_events_immutable BEFORE UPDATE OR DELETE ON public.yard_visit_events
+FOR EACH ROW EXECUTE FUNCTION public.reject_yard_immutable_mutation();
+CREATE CONSTRAINT TRIGGER yard_visits_require_event AFTER INSERT OR UPDATE ON public.yard_visits
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_yard_visit_event();
+CREATE TRIGGER yard_detention_records_validate BEFORE INSERT ON public.yard_detention_records
+FOR EACH ROW EXECUTE FUNCTION public.validate_yard_detention_insert();
+CREATE TRIGGER yard_detention_records_immutable BEFORE UPDATE OR DELETE ON public.yard_detention_records
+FOR EACH ROW EXECUTE FUNCTION public.reject_yard_immutable_mutation();
+
+DO $$ DECLARE table_name text; BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'yard_locations','yard_assets','yard_appointments','yard_appointment_events',
+    'yard_visits','yard_visit_events','yard_detention_records'
+  ] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',table_name);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',table_name);
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I USING (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint) WITH CHECK (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint)',
+      table_name||'_tenant_isolation',table_name);
+  END LOOP;
+END $$;
+
+GRANT SELECT,INSERT ON public.yard_locations TO wareboxes_app;
+GRANT SELECT,INSERT ON public.yard_assets TO wareboxes_app;
+GRANT SELECT,INSERT ON public.yard_appointments TO wareboxes_app;
+GRANT UPDATE(status,revision,visit_id,updated_by_user_id,updated_at) ON public.yard_appointments TO wareboxes_app;
+GRANT SELECT,INSERT ON public.yard_appointment_events TO wareboxes_app;
+GRANT SELECT,INSERT ON public.yard_visits TO wareboxes_app;
+GRANT UPDATE(status,revision,current_location_id,dock_door_location_id,operation_started_at,
+  operation_completed_at,rejected_at,gated_out_at) ON public.yard_visits TO wareboxes_app;
+GRANT SELECT,INSERT ON public.yard_visit_events TO wareboxes_app;
+GRANT SELECT,INSERT ON public.yard_detention_records TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.yard_locations_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.yard_assets_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.yard_appointments_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.yard_appointment_events_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.yard_visits_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.yard_visit_events_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.yard_detention_records_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.reject_yard_immutable_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_yard_appointment_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_yard_appointment_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_yard_visit_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_yard_visit_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_yard_appointment_event_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_yard_visit_event_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_yard_appointment_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_yard_visit_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_yard_detention_insert() FROM PUBLIC;
+
+-- Typed value-added work. Inputs are held when work is released and the immutable
+-- inventory journal consumes the recipe and creates its outputs on completion.
+ALTER TABLE public.inventory_transactions
+  DROP CONSTRAINT inventory_transactions_transaction_type_check;
+ALTER TABLE public.inventory_transactions
+  ADD CONSTRAINT inventory_transactions_transaction_type_check CHECK (transaction_type IN (
+    'receive','move','adjust','ship','transfer','status_change','relabel','refurbishment',
+    'kit','dekit','assembly','value_added_service'));
+
+CREATE TABLE public.value_added_work_orders (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  work_number text NOT NULL CHECK (
+    work_number=btrim(work_number) AND work_number<>'' AND char_length(work_number)<=120),
+  kind text NOT NULL CHECK (
+    kind IN ('relabel','refurbishment','kit','dekit','assembly','value_added_service')),
+  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','released','completed','cancelled')),
+  revision bigint NOT NULL DEFAULT 1 CHECK (revision>0),
+  note text CHECK (note=btrim(note) AND note<>'' AND char_length(note)<=500),
+  completion_inventory_transaction_id bigint,
+  billable_event_id bigint,
+  created_by_user_id bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  released_by_user_id bigint,
+  released_at timestamptz,
+  completed_by_user_id bigint,
+  completed_at timestamptz,
+  cancelled_by_user_id bigint,
+  cancelled_at timestamptz,
+  CONSTRAINT value_added_work_orders_tenant_key UNIQUE(tenant_id,id),
+  CONSTRAINT value_added_work_orders_owner_key UNIQUE(tenant_id,inventory_owner_id,id),
+  CONSTRAINT value_added_work_orders_scope_number_key UNIQUE(
+    tenant_id,inventory_owner_id,facility_id,work_number),
+  CONSTRAINT value_added_work_orders_lifecycle_check CHECK (
+    (status='draft' AND released_by_user_id IS NULL AND released_at IS NULL
+      AND completed_by_user_id IS NULL AND completed_at IS NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND completion_inventory_transaction_id IS NULL AND billable_event_id IS NULL)
+    OR (status='released' AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+      AND completed_by_user_id IS NULL AND completed_at IS NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND completion_inventory_transaction_id IS NULL AND billable_event_id IS NULL)
+    OR (status='completed' AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+      AND completed_by_user_id IS NOT NULL AND completed_at IS NOT NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND completion_inventory_transaction_id IS NOT NULL)
+    OR (status='cancelled' AND completed_by_user_id IS NULL AND completed_at IS NULL
+      AND cancelled_by_user_id IS NOT NULL AND cancelled_at IS NOT NULL
+      AND completion_inventory_transaction_id IS NULL AND billable_event_id IS NULL)),
+  FOREIGN KEY(tenant_id,inventory_owner_id)
+    REFERENCES public.inventory_owners(tenant_id,id),
+  FOREIGN KEY(tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,created_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,released_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,completed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,cancelled_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,completion_inventory_transaction_id)
+    REFERENCES public.inventory_transactions(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,billable_event_id)
+    REFERENCES public.billable_events(tenant_id,id)
+);
+
+CREATE TABLE public.value_added_work_inputs (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  work_id bigint NOT NULL,
+  inventory_balance_id bigint NOT NULL,
+  quantity bigint NOT NULL CHECK (quantity>0),
+  inventory_hold_id bigint,
+  CONSTRAINT value_added_work_inputs_tenant_key UNIQUE(tenant_id,id),
+  CONSTRAINT value_added_work_inputs_work_balance_key UNIQUE(
+    tenant_id,work_id,inventory_balance_id),
+  CONSTRAINT value_added_work_inputs_hold_key UNIQUE(tenant_id,inventory_hold_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,work_id)
+    REFERENCES public.value_added_work_orders(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,inventory_balance_id)
+    REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,inventory_hold_id)
+    REFERENCES public.inventory_holds(tenant_id,inventory_owner_id,id)
+);
+
+CREATE TABLE public.value_added_work_outputs (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  work_id bigint NOT NULL,
+  location_id bigint NOT NULL,
+  license_plate_id bigint,
+  item_batch_id bigint NOT NULL,
+  inventory_status text NOT NULL CHECK (
+    inventory_status IN ('available','hold','damaged','quarantine')),
+  quantity bigint NOT NULL CHECK (quantity>0),
+  CONSTRAINT value_added_work_outputs_tenant_key UNIQUE(tenant_id,id),
+  CONSTRAINT value_added_work_outputs_identity_key UNIQUE(
+    tenant_id,work_id,location_id,license_plate_id,item_batch_id,inventory_status),
+  FOREIGN KEY(tenant_id,inventory_owner_id,work_id)
+    REFERENCES public.value_added_work_orders(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,facility_id,location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,license_plate_id)
+    REFERENCES public.license_plates(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,item_batch_id)
+    REFERENCES public.item_batches(tenant_id,inventory_owner_id,id)
+);
+
+CREATE TABLE public.value_added_work_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  work_id bigint NOT NULL,
+  from_status text CHECK (from_status IN ('draft','released','completed','cancelled')),
+  to_status text NOT NULL CHECK (to_status IN ('draft','released','completed','cancelled')),
+  note text CHECK (note=btrim(note) AND note<>'' AND char_length(note)<=500),
+  resulting_revision bigint NOT NULL CHECK (resulting_revision>0),
+  actor_user_id bigint NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  CONSTRAINT value_added_work_events_tenant_key UNIQUE(tenant_id,id),
+  CONSTRAINT value_added_work_events_revision_key UNIQUE(tenant_id,work_id,resulting_revision),
+  FOREIGN KEY(tenant_id,inventory_owner_id,work_id)
+    REFERENCES public.value_added_work_orders(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,actor_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE INDEX value_added_work_orders_queue_idx ON public.value_added_work_orders(
+  tenant_id,facility_id,inventory_owner_id,status,id DESC);
+CREATE INDEX value_added_work_inputs_work_idx ON public.value_added_work_inputs(tenant_id,work_id,id);
+CREATE INDEX value_added_work_outputs_work_idx ON public.value_added_work_outputs(tenant_id,work_id,id);
+CREATE UNIQUE INDEX value_added_work_outputs_exact_identity_key
+ON public.value_added_work_outputs(
+  tenant_id,work_id,location_id,COALESCE(license_plate_id,0),item_batch_id,inventory_status);
+
+CREATE FUNCTION public.reject_value_added_immutable_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'value-added evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.guard_value_added_input_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+     OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+     OR NEW.work_id<>OLD.work_id OR NEW.inventory_balance_id<>OLD.inventory_balance_id
+     OR NEW.quantity<>OLD.quantity OR OLD.inventory_hold_id IS NOT NULL
+     OR NEW.inventory_hold_id IS NULL THEN
+    RAISE EXCEPTION 'value-added input facts are immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_value_added_work_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+     OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+     OR NEW.work_number<>OLD.work_number OR NEW.kind<>OLD.kind OR NEW.note IS DISTINCT FROM OLD.note
+     OR NEW.created_by_user_id<>OLD.created_by_user_id OR NEW.created_at<>OLD.created_at
+     OR NEW.revision<>OLD.revision+1 THEN
+    RAISE EXCEPTION 'value-added work facts are immutable and revisions advance once'
+      USING ERRCODE='55000';
+  END IF;
+  IF NOT (
+    (OLD.status='draft' AND NEW.status='released'
+      AND NEW.released_by_user_id IS NOT NULL AND NEW.released_at IS NOT NULL
+      AND NEW.completed_by_user_id IS NULL AND NEW.completed_at IS NULL
+      AND NEW.cancelled_by_user_id IS NULL AND NEW.cancelled_at IS NULL
+      AND NEW.completion_inventory_transaction_id IS NULL AND NEW.billable_event_id IS NULL)
+    OR (OLD.status='draft' AND NEW.status='cancelled'
+      AND NEW.released_by_user_id IS NULL AND NEW.released_at IS NULL
+      AND NEW.cancelled_by_user_id IS NOT NULL AND NEW.cancelled_at IS NOT NULL
+      AND NEW.completed_by_user_id IS NULL AND NEW.completed_at IS NULL
+      AND NEW.completion_inventory_transaction_id IS NULL AND NEW.billable_event_id IS NULL)
+    OR (OLD.status='released' AND NEW.status='completed'
+      AND NEW.released_by_user_id=OLD.released_by_user_id AND NEW.released_at=OLD.released_at
+      AND NEW.completed_by_user_id IS NOT NULL AND NEW.completed_at IS NOT NULL
+      AND NEW.cancelled_by_user_id IS NULL AND NEW.cancelled_at IS NULL
+      AND NEW.completion_inventory_transaction_id IS NOT NULL)
+    OR (OLD.status='released' AND NEW.status='cancelled'
+      AND NEW.released_by_user_id=OLD.released_by_user_id AND NEW.released_at=OLD.released_at
+      AND NEW.cancelled_by_user_id IS NOT NULL AND NEW.cancelled_at IS NOT NULL
+      AND NEW.completed_by_user_id IS NULL AND NEW.completed_at IS NULL
+      AND NEW.completion_inventory_transaction_id IS NULL AND NEW.billable_event_id IS NULL)
+  ) THEN
+    RAISE EXCEPTION 'invalid value-added work lifecycle transition' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_value_added_event_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE work_row record; prior_row record; expected_actor bigint; expected_time timestamptz;
+BEGIN
+  SELECT * INTO work_row FROM public.value_added_work_orders work
+    WHERE work.tenant_id=NEW.tenant_id AND work.id=NEW.work_id FOR SHARE;
+  IF work_row IS NULL OR NEW.inventory_owner_id<>work_row.inventory_owner_id
+     OR NEW.facility_id<>work_row.facility_id OR NEW.to_status<>work_row.status
+     OR NEW.resulting_revision<>work_row.revision
+     OR (NEW.resulting_revision=1 AND (NEW.from_status IS NOT NULL OR NEW.to_status<>'draft'
+       OR NEW.actor_user_id<>work_row.created_by_user_id OR NEW.occurred_at<>work_row.created_at))
+     OR (NEW.resulting_revision>1 AND NEW.from_status IS NULL) THEN
+    RAISE EXCEPTION 'value-added event does not match aggregate state' USING ERRCODE='55000';
+  END IF;
+  IF NEW.resulting_revision>1 THEN
+    SELECT * INTO prior_row FROM public.value_added_work_events event
+      WHERE event.tenant_id=NEW.tenant_id AND event.work_id=NEW.work_id
+        AND event.resulting_revision=NEW.resulting_revision-1;
+    IF prior_row IS NULL OR NEW.from_status<>prior_row.to_status
+       OR NEW.occurred_at<prior_row.occurred_at THEN
+      RAISE EXCEPTION 'value-added event does not continue immutable history' USING ERRCODE='55000';
+    END IF;
+    expected_actor:=CASE NEW.to_status
+      WHEN 'released' THEN work_row.released_by_user_id
+      WHEN 'completed' THEN work_row.completed_by_user_id
+      WHEN 'cancelled' THEN work_row.cancelled_by_user_id END;
+    expected_time:=CASE NEW.to_status
+      WHEN 'released' THEN work_row.released_at
+      WHEN 'completed' THEN work_row.completed_at
+      WHEN 'cancelled' THEN work_row.cancelled_at END;
+    IF expected_actor IS NULL OR expected_time IS NULL
+       OR NEW.actor_user_id<>expected_actor OR NEW.occurred_at<>expected_time THEN
+      RAISE EXCEPTION 'value-added event actor and time do not match aggregate state'
+        USING ERRCODE='55000';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_value_added_work_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE work_row record; input_count bigint; output_count bigint; expected_type text;
+  expected_billable_type text; expected_billable_quantity bigint; active_contract boolean;
+  target_tenant_id bigint; target_work_id bigint;
+BEGIN
+  target_tenant_id:=NEW.tenant_id;
+  IF TG_TABLE_NAME='value_added_work_orders' THEN
+    target_work_id:=NEW.id;
+  ELSE
+    target_work_id:=(to_jsonb(NEW)->>'work_id')::bigint;
+  END IF;
+  SELECT * INTO work_row FROM public.value_added_work_orders work
+    WHERE work.tenant_id=target_tenant_id AND work.id=target_work_id;
+  IF work_row IS NULL THEN
+    RAISE EXCEPTION 'value-added recipe has no owning work order' USING ERRCODE='23514';
+  END IF;
+  SELECT count(*) INTO input_count FROM public.value_added_work_inputs input
+    WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id;
+  SELECT count(*) INTO output_count FROM public.value_added_work_outputs output
+    WHERE output.tenant_id=work_row.tenant_id AND output.work_id=work_row.id;
+  IF input_count=0 OR output_count=0 OR input_count>100 OR output_count>100
+     OR (work_row.kind IN ('relabel','refurbishment') AND (input_count<>1 OR output_count<>1))
+     OR (work_row.kind IN ('kit','assembly') AND (input_count<2 OR output_count<>1))
+     OR (work_row.kind='dekit' AND (input_count<>1 OR output_count<2)) THEN
+    RAISE EXCEPTION 'value-added work recipe does not match its typed workflow'
+      USING ERRCODE='23514';
+  END IF;
+  IF work_row.kind IN ('relabel','refurbishment')
+     AND (SELECT sum(quantity) FROM public.value_added_work_inputs input
+          WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id)
+       <> (SELECT sum(quantity) FROM public.value_added_work_outputs output
+          WHERE output.tenant_id=work_row.tenant_id AND output.work_id=work_row.id) THEN
+    RAISE EXCEPTION 'relabeling and refurbishment must conserve quantity'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.value_added_work_inputs input
+    LEFT JOIN public.inventory_balances balance ON balance.tenant_id=input.tenant_id
+      AND balance.inventory_owner_id=input.inventory_owner_id
+      AND balance.id=input.inventory_balance_id
+    WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id
+      AND (input.inventory_owner_id<>work_row.inventory_owner_id
+        OR input.facility_id<>work_row.facility_id OR balance.facility_id<>work_row.facility_id))
+     OR EXISTS(SELECT 1 FROM public.value_added_work_outputs output
+       WHERE output.tenant_id=work_row.tenant_id AND output.work_id=work_row.id
+         AND (output.inventory_owner_id<>work_row.inventory_owner_id
+           OR output.facility_id<>work_row.facility_id)) THEN
+    RAISE EXCEPTION 'value-added recipe is outside work scope' USING ERRCODE='23514';
+  END IF;
+  IF work_row.status='draft' AND EXISTS(SELECT 1 FROM public.value_added_work_inputs input
+       WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id
+         AND input.inventory_hold_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'draft value-added work cannot reserve inventory' USING ERRCODE='23514';
+  END IF;
+  IF work_row.status='released' AND EXISTS(SELECT 1 FROM public.value_added_work_inputs input
+       LEFT JOIN public.inventory_holds hold ON hold.tenant_id=input.tenant_id
+        AND hold.inventory_owner_id=input.inventory_owner_id AND hold.id=input.inventory_hold_id
+       WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id
+        AND (hold.id IS NULL OR hold.status<>'active' OR hold.deleted IS NOT NULL
+          OR hold.inventory_balance_id<>input.inventory_balance_id OR hold.qty<>input.quantity
+          OR hold.reference_type<>'value_added_work_order' OR hold.reference_id<>work_row.id)) THEN
+    RAISE EXCEPTION 'released value-added inputs require matching active holds'
+      USING ERRCODE='23514';
+  END IF;
+  IF work_row.status IN ('completed','cancelled') AND EXISTS(
+       SELECT 1 FROM public.value_added_work_inputs input
+       LEFT JOIN public.inventory_holds hold ON hold.tenant_id=input.tenant_id
+        AND hold.inventory_owner_id=input.inventory_owner_id AND hold.id=input.inventory_hold_id
+       WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id
+        AND input.inventory_hold_id IS NOT NULL
+        AND (hold.id IS NULL OR hold.status<>'released' OR hold.deleted IS NULL)) THEN
+    RAISE EXCEPTION 'closed value-added work cannot retain active holds' USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.value_added_work_events event
+      WHERE event.tenant_id=work_row.tenant_id AND event.work_id=work_row.id
+        AND event.resulting_revision=work_row.revision AND event.to_status=work_row.status) THEN
+    RAISE EXCEPTION 'value-added state lacks immutable event evidence' USING ERRCODE='23514';
+  END IF;
+  IF work_row.status='completed' THEN
+    expected_type:=work_row.kind;
+    IF NOT EXISTS(SELECT 1 FROM public.inventory_transactions transaction
+       WHERE transaction.tenant_id=work_row.tenant_id
+        AND transaction.inventory_owner_id=work_row.inventory_owner_id
+        AND transaction.id=work_row.completion_inventory_transaction_id
+        AND transaction.transaction_type=expected_type
+        AND transaction.reference_type='value_added_work_order'
+        AND transaction.reference_id=work_row.id
+        AND transaction.actor_user_id=work_row.completed_by_user_id
+        AND transaction.created=work_row.completed_at)
+       OR (SELECT count(*) FROM public.inventory_entries entry
+          WHERE entry.tenant_id=work_row.tenant_id
+            AND entry.transaction_id=work_row.completion_inventory_transaction_id)
+          <> input_count+output_count
+       OR EXISTS(SELECT 1 FROM public.value_added_work_inputs input
+          JOIN public.inventory_balances balance ON balance.tenant_id=input.tenant_id
+            AND balance.inventory_owner_id=input.inventory_owner_id
+            AND balance.id=input.inventory_balance_id
+          WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id
+            AND NOT EXISTS(SELECT 1 FROM public.inventory_entries entry
+              WHERE entry.tenant_id=input.tenant_id
+                AND entry.transaction_id=work_row.completion_inventory_transaction_id
+                AND entry.facility_id=input.facility_id
+                AND entry.location_id=balance.location_id
+                AND entry.license_plate_id IS NOT DISTINCT FROM balance.license_plate_id
+                AND entry.item_batch_id=balance.item_batch_id AND entry.status=balance.status
+                AND entry.quantity_delta=-input.quantity))
+       OR EXISTS(SELECT 1 FROM public.value_added_work_outputs output
+          WHERE output.tenant_id=work_row.tenant_id AND output.work_id=work_row.id
+            AND NOT EXISTS(SELECT 1 FROM public.inventory_entries entry
+              WHERE entry.tenant_id=output.tenant_id
+                AND entry.transaction_id=work_row.completion_inventory_transaction_id
+                AND entry.facility_id=output.facility_id AND entry.location_id=output.location_id
+                AND entry.license_plate_id IS NOT DISTINCT FROM output.license_plate_id
+                AND entry.item_batch_id=output.item_batch_id
+                AND entry.status=output.inventory_status
+                AND entry.quantity_delta=output.quantity)) THEN
+      RAISE EXCEPTION 'completed value-added work does not reconcile with inventory journal'
+        USING ERRCODE='23514';
+    END IF;
+    SELECT EXISTS(SELECT 1 FROM public.billing_contracts contract
+      WHERE contract.tenant_id=work_row.tenant_id
+        AND contract.inventory_owner_id=work_row.inventory_owner_id
+        AND contract.status='active' AND contract.effective_from<=work_row.completed_at
+        AND (contract.effective_until IS NULL OR contract.effective_until>work_row.completed_at))
+      INTO active_contract;
+    IF active_contract<>(work_row.billable_event_id IS NOT NULL) THEN
+      RAISE EXCEPTION 'value-added completion billing evidence does not match effective contract'
+        USING ERRCODE='23514';
+    END IF;
+    IF work_row.billable_event_id IS NOT NULL THEN
+      expected_billable_type:=CASE work_row.kind
+        WHEN 'relabel' THEN 'relabel_unit' WHEN 'refurbishment' THEN 'refurbishment_unit'
+        WHEN 'kit' THEN 'kit_unit' WHEN 'dekit' THEN 'kit_unit'
+        WHEN 'assembly' THEN 'assembly_unit' ELSE 'value_added_service_unit' END;
+      SELECT CASE WHEN work_row.kind='dekit'
+          THEN (SELECT sum(quantity) FROM public.value_added_work_inputs input
+                WHERE input.tenant_id=work_row.tenant_id AND input.work_id=work_row.id)
+          ELSE (SELECT sum(quantity) FROM public.value_added_work_outputs output
+                WHERE output.tenant_id=work_row.tenant_id AND output.work_id=work_row.id) END
+        INTO expected_billable_quantity;
+      IF NOT EXISTS(SELECT 1 FROM public.billable_events event
+        WHERE event.tenant_id=work_row.tenant_id AND event.id=work_row.billable_event_id
+          AND event.inventory_owner_id=work_row.inventory_owner_id
+          AND event.facility_id=work_row.facility_id AND event.event_type=expected_billable_type
+          AND event.unit='each' AND event.quantity=expected_billable_quantity
+          AND event.source_type='value_added_work_order'
+          AND event.source_reference=work_row.id::text
+          AND event.occurred_at=work_row.completed_at) THEN
+        RAISE EXCEPTION 'value-added billable event does not reconcile with completed work'
+          USING ERRCODE='23514';
+      END IF;
+    END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER value_added_work_orders_guard BEFORE UPDATE OR DELETE
+ON public.value_added_work_orders FOR EACH ROW EXECUTE FUNCTION public.guard_value_added_work_mutation();
+CREATE TRIGGER value_added_work_inputs_guard BEFORE UPDATE OR DELETE
+ON public.value_added_work_inputs FOR EACH ROW EXECUTE FUNCTION public.guard_value_added_input_mutation();
+CREATE TRIGGER value_added_work_outputs_immutable BEFORE UPDATE OR DELETE
+ON public.value_added_work_outputs FOR EACH ROW EXECUTE FUNCTION public.reject_value_added_immutable_mutation();
+CREATE TRIGGER value_added_work_events_validate BEFORE INSERT
+ON public.value_added_work_events FOR EACH ROW EXECUTE FUNCTION public.validate_value_added_event_insert();
+CREATE TRIGGER value_added_work_events_immutable BEFORE UPDATE OR DELETE
+ON public.value_added_work_events FOR EACH ROW EXECUTE FUNCTION public.reject_value_added_immutable_mutation();
+CREATE CONSTRAINT TRIGGER value_added_work_orders_require_integrity
+AFTER INSERT OR UPDATE ON public.value_added_work_orders DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_value_added_work_integrity();
+CREATE CONSTRAINT TRIGGER value_added_work_inputs_require_integrity
+AFTER INSERT OR UPDATE ON public.value_added_work_inputs DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_value_added_work_integrity();
+CREATE CONSTRAINT TRIGGER value_added_work_outputs_require_integrity
+AFTER INSERT ON public.value_added_work_outputs DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_value_added_work_integrity();
+
+DO $$ DECLARE table_name text; BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'value_added_work_orders','value_added_work_inputs','value_added_work_outputs',
+    'value_added_work_events'
+  ] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',table_name);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',table_name);
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I USING (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint) WITH CHECK (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint)',
+      table_name||'_tenant_isolation',table_name);
+  END LOOP;
+END $$;
+
+GRANT SELECT,INSERT ON public.value_added_work_orders TO wareboxes_app;
+GRANT UPDATE(status,revision,completion_inventory_transaction_id,billable_event_id,
+  released_by_user_id,released_at,completed_by_user_id,completed_at,
+  cancelled_by_user_id,cancelled_at) ON public.value_added_work_orders TO wareboxes_app;
+GRANT SELECT,INSERT ON public.value_added_work_inputs TO wareboxes_app;
+GRANT UPDATE(inventory_hold_id) ON public.value_added_work_inputs TO wareboxes_app;
+GRANT SELECT,INSERT ON public.value_added_work_outputs TO wareboxes_app;
+GRANT SELECT,INSERT ON public.value_added_work_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.value_added_work_orders_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.value_added_work_inputs_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.value_added_work_outputs_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.value_added_work_events_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.reject_value_added_immutable_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_value_added_input_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_value_added_work_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_value_added_event_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_value_added_work_integrity() FROM PUBLIC;
+
+-- Vendor returns reserve explicit stock and remove it through a typed outbound
+-- journal transaction only after physical shipment is confirmed.
+ALTER TABLE public.inventory_transactions
+  DROP CONSTRAINT inventory_transactions_transaction_type_check;
+ALTER TABLE public.inventory_transactions
+  ADD CONSTRAINT inventory_transactions_transaction_type_check CHECK (transaction_type IN (
+    'receive','move','adjust','ship','transfer','status_change','relabel','refurbishment',
+    'kit','dekit','assembly','value_added_service','return_to_vendor'));
+
+CREATE TABLE public.vendor_returns (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  return_number text NOT NULL CHECK (
+    return_number=btrim(return_number) AND return_number<>'' AND char_length(return_number)<=120),
+  vendor_name text NOT NULL CHECK (
+    vendor_name=btrim(vendor_name) AND vendor_name<>'' AND char_length(vendor_name)<=200),
+  vendor_reference text CHECK (
+    vendor_reference=btrim(vendor_reference) AND vendor_reference<>''
+      AND char_length(vendor_reference)<=200),
+  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','released','shipped','cancelled')),
+  revision bigint NOT NULL DEFAULT 1 CHECK (revision>0),
+  note text CHECK (note=btrim(note) AND note<>'' AND char_length(note)<=500),
+  shipment_inventory_transaction_id bigint,
+  billable_event_id bigint,
+  created_by_user_id bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  released_by_user_id bigint,
+  released_at timestamptz,
+  shipped_by_user_id bigint,
+  shipped_at timestamptz,
+  cancelled_by_user_id bigint,
+  cancelled_at timestamptz,
+  CONSTRAINT vendor_returns_tenant_key UNIQUE(tenant_id,id),
+  CONSTRAINT vendor_returns_owner_key UNIQUE(tenant_id,inventory_owner_id,id),
+  CONSTRAINT vendor_returns_scope_number_key UNIQUE(
+    tenant_id,inventory_owner_id,facility_id,return_number),
+  CONSTRAINT vendor_returns_lifecycle_check CHECK (
+    (status='draft' AND released_by_user_id IS NULL AND released_at IS NULL
+      AND shipped_by_user_id IS NULL AND shipped_at IS NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND shipment_inventory_transaction_id IS NULL AND billable_event_id IS NULL)
+    OR (status='released' AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+      AND shipped_by_user_id IS NULL AND shipped_at IS NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND shipment_inventory_transaction_id IS NULL AND billable_event_id IS NULL)
+    OR (status='shipped' AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+      AND shipped_by_user_id IS NOT NULL AND shipped_at IS NOT NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND shipment_inventory_transaction_id IS NOT NULL)
+    OR (status='cancelled' AND shipped_by_user_id IS NULL AND shipped_at IS NULL
+      AND cancelled_by_user_id IS NOT NULL AND cancelled_at IS NOT NULL
+      AND shipment_inventory_transaction_id IS NULL AND billable_event_id IS NULL)),
+  FOREIGN KEY(tenant_id,inventory_owner_id)
+    REFERENCES public.inventory_owners(tenant_id,id),
+  FOREIGN KEY(tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,created_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,released_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,shipped_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,cancelled_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,shipment_inventory_transaction_id)
+    REFERENCES public.inventory_transactions(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,billable_event_id)
+    REFERENCES public.billable_events(tenant_id,id)
+);
+
+CREATE TABLE public.vendor_return_lines (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  vendor_return_id bigint NOT NULL,
+  inventory_balance_id bigint NOT NULL,
+  quantity bigint NOT NULL CHECK (quantity>0),
+  reason text NOT NULL CHECK (
+    reason IN ('damaged','defective','expired','recall','overstock','vendor_request','other')),
+  note text CHECK (note=btrim(note) AND note<>'' AND char_length(note)<=500),
+  inventory_hold_id bigint,
+  CONSTRAINT vendor_return_lines_tenant_key UNIQUE(tenant_id,id),
+  CONSTRAINT vendor_return_lines_balance_key UNIQUE(
+    tenant_id,vendor_return_id,inventory_balance_id),
+  CONSTRAINT vendor_return_lines_hold_key UNIQUE(tenant_id,inventory_hold_id),
+  CONSTRAINT vendor_return_lines_other_note_check CHECK (reason<>'other' OR note IS NOT NULL),
+  FOREIGN KEY(tenant_id,inventory_owner_id,vendor_return_id)
+    REFERENCES public.vendor_returns(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,inventory_balance_id)
+    REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,inventory_hold_id)
+    REFERENCES public.inventory_holds(tenant_id,inventory_owner_id,id)
+);
+
+CREATE TABLE public.vendor_return_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  vendor_return_id bigint NOT NULL,
+  from_status text CHECK (from_status IN ('draft','released','shipped','cancelled')),
+  to_status text NOT NULL CHECK (to_status IN ('draft','released','shipped','cancelled')),
+  note text CHECK (note=btrim(note) AND note<>'' AND char_length(note)<=500),
+  resulting_revision bigint NOT NULL CHECK (resulting_revision>0),
+  actor_user_id bigint NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  CONSTRAINT vendor_return_events_tenant_key UNIQUE(tenant_id,id),
+  CONSTRAINT vendor_return_events_revision_key UNIQUE(
+    tenant_id,vendor_return_id,resulting_revision),
+  FOREIGN KEY(tenant_id,inventory_owner_id,vendor_return_id)
+    REFERENCES public.vendor_returns(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,actor_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE INDEX vendor_returns_queue_idx ON public.vendor_returns(
+  tenant_id,facility_id,inventory_owner_id,status,id DESC);
+CREATE INDEX vendor_return_lines_return_idx ON public.vendor_return_lines(
+  tenant_id,vendor_return_id,id);
+
+CREATE FUNCTION public.reject_vendor_return_evidence_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'vendor-return evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.guard_vendor_return_line_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+     OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+     OR NEW.vendor_return_id<>OLD.vendor_return_id
+     OR NEW.inventory_balance_id<>OLD.inventory_balance_id OR NEW.quantity<>OLD.quantity
+     OR NEW.reason<>OLD.reason OR NEW.note IS DISTINCT FROM OLD.note
+     OR OLD.inventory_hold_id IS NOT NULL OR NEW.inventory_hold_id IS NULL THEN
+    RAISE EXCEPTION 'vendor-return line facts are immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_vendor_return_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR NEW.tenant_id<>OLD.tenant_id OR NEW.id<>OLD.id
+     OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+     OR NEW.return_number<>OLD.return_number OR NEW.vendor_name<>OLD.vendor_name
+     OR NEW.vendor_reference IS DISTINCT FROM OLD.vendor_reference
+     OR NEW.note IS DISTINCT FROM OLD.note OR NEW.created_by_user_id<>OLD.created_by_user_id
+     OR NEW.created_at<>OLD.created_at OR NEW.revision<>OLD.revision+1 THEN
+    RAISE EXCEPTION 'vendor-return facts are immutable and revisions advance once'
+      USING ERRCODE='55000';
+  END IF;
+  IF NOT (
+    (OLD.status='draft' AND NEW.status='released'
+      AND NEW.released_by_user_id IS NOT NULL AND NEW.released_at IS NOT NULL
+      AND NEW.shipped_by_user_id IS NULL AND NEW.shipped_at IS NULL
+      AND NEW.cancelled_by_user_id IS NULL AND NEW.cancelled_at IS NULL
+      AND NEW.shipment_inventory_transaction_id IS NULL AND NEW.billable_event_id IS NULL)
+    OR (OLD.status='draft' AND NEW.status='cancelled'
+      AND NEW.released_by_user_id IS NULL AND NEW.released_at IS NULL
+      AND NEW.shipped_by_user_id IS NULL AND NEW.shipped_at IS NULL
+      AND NEW.cancelled_by_user_id IS NOT NULL AND NEW.cancelled_at IS NOT NULL
+      AND NEW.shipment_inventory_transaction_id IS NULL AND NEW.billable_event_id IS NULL)
+    OR (OLD.status='released' AND NEW.status='shipped'
+      AND NEW.released_by_user_id=OLD.released_by_user_id AND NEW.released_at=OLD.released_at
+      AND NEW.shipped_by_user_id IS NOT NULL AND NEW.shipped_at IS NOT NULL
+      AND NEW.cancelled_by_user_id IS NULL AND NEW.cancelled_at IS NULL
+      AND NEW.shipment_inventory_transaction_id IS NOT NULL)
+    OR (OLD.status='released' AND NEW.status='cancelled'
+      AND NEW.released_by_user_id=OLD.released_by_user_id AND NEW.released_at=OLD.released_at
+      AND NEW.shipped_by_user_id IS NULL AND NEW.shipped_at IS NULL
+      AND NEW.cancelled_by_user_id IS NOT NULL AND NEW.cancelled_at IS NOT NULL
+      AND NEW.shipment_inventory_transaction_id IS NULL AND NEW.billable_event_id IS NULL)
+  ) THEN
+    RAISE EXCEPTION 'invalid vendor-return lifecycle transition' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_vendor_return_event_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE return_row record; prior_row record; expected_actor bigint; expected_time timestamptz;
+BEGIN
+  SELECT * INTO return_row FROM public.vendor_returns vendor_return
+    WHERE vendor_return.tenant_id=NEW.tenant_id AND vendor_return.id=NEW.vendor_return_id
+    FOR SHARE;
+  IF return_row IS NULL OR NEW.inventory_owner_id<>return_row.inventory_owner_id
+     OR NEW.facility_id<>return_row.facility_id OR NEW.to_status<>return_row.status
+     OR NEW.resulting_revision<>return_row.revision
+     OR (NEW.resulting_revision=1 AND (NEW.from_status IS NOT NULL OR NEW.to_status<>'draft'
+       OR NEW.actor_user_id<>return_row.created_by_user_id
+       OR NEW.occurred_at<>return_row.created_at))
+     OR (NEW.resulting_revision>1 AND NEW.from_status IS NULL) THEN
+    RAISE EXCEPTION 'vendor-return event does not match aggregate state' USING ERRCODE='55000';
+  END IF;
+  IF NEW.resulting_revision>1 THEN
+    SELECT * INTO prior_row FROM public.vendor_return_events event
+      WHERE event.tenant_id=NEW.tenant_id AND event.vendor_return_id=NEW.vendor_return_id
+        AND event.resulting_revision=NEW.resulting_revision-1;
+    IF prior_row IS NULL OR NEW.from_status<>prior_row.to_status
+       OR NEW.occurred_at<prior_row.occurred_at THEN
+      RAISE EXCEPTION 'vendor-return event does not continue immutable history'
+        USING ERRCODE='55000';
+    END IF;
+    expected_actor:=CASE NEW.to_status WHEN 'released' THEN return_row.released_by_user_id
+      WHEN 'shipped' THEN return_row.shipped_by_user_id
+      WHEN 'cancelled' THEN return_row.cancelled_by_user_id END;
+    expected_time:=CASE NEW.to_status WHEN 'released' THEN return_row.released_at
+      WHEN 'shipped' THEN return_row.shipped_at
+      WHEN 'cancelled' THEN return_row.cancelled_at END;
+    IF expected_actor IS NULL OR expected_time IS NULL OR NEW.actor_user_id<>expected_actor
+       OR NEW.occurred_at<>expected_time THEN
+      RAISE EXCEPTION 'vendor-return event actor and time do not match aggregate state'
+        USING ERRCODE='55000';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_vendor_return_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE return_row record; line_count bigint; active_contract boolean;
+  expected_billable_quantity bigint; target_tenant_id bigint; target_return_id bigint;
+BEGIN
+  target_tenant_id:=NEW.tenant_id;
+  IF TG_TABLE_NAME='vendor_returns' THEN target_return_id:=NEW.id;
+  ELSE target_return_id:=(to_jsonb(NEW)->>'vendor_return_id')::bigint; END IF;
+  SELECT * INTO return_row FROM public.vendor_returns vendor_return
+    WHERE vendor_return.tenant_id=target_tenant_id AND vendor_return.id=target_return_id;
+  IF return_row IS NULL THEN
+    RAISE EXCEPTION 'vendor-return line has no owning return' USING ERRCODE='23514';
+  END IF;
+  SELECT count(*),sum(quantity) INTO line_count,expected_billable_quantity
+    FROM public.vendor_return_lines line
+    WHERE line.tenant_id=return_row.tenant_id AND line.vendor_return_id=return_row.id;
+  IF line_count<1 OR line_count>100 THEN
+    RAISE EXCEPTION 'vendor return requires between one and 100 lines' USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.vendor_return_lines line
+    LEFT JOIN public.inventory_balances balance ON balance.tenant_id=line.tenant_id
+      AND balance.inventory_owner_id=line.inventory_owner_id
+      AND balance.id=line.inventory_balance_id
+    WHERE line.tenant_id=return_row.tenant_id AND line.vendor_return_id=return_row.id
+      AND (line.inventory_owner_id<>return_row.inventory_owner_id
+        OR line.facility_id<>return_row.facility_id OR balance.facility_id<>return_row.facility_id)) THEN
+    RAISE EXCEPTION 'vendor-return stock is outside return scope' USING ERRCODE='23514';
+  END IF;
+  IF return_row.status='draft' AND EXISTS(SELECT 1 FROM public.vendor_return_lines line
+    WHERE line.tenant_id=return_row.tenant_id AND line.vendor_return_id=return_row.id
+      AND line.inventory_hold_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'draft vendor return cannot reserve inventory' USING ERRCODE='23514';
+  END IF;
+  IF return_row.status='released' AND EXISTS(SELECT 1 FROM public.vendor_return_lines line
+    LEFT JOIN public.inventory_holds hold ON hold.tenant_id=line.tenant_id
+      AND hold.inventory_owner_id=line.inventory_owner_id AND hold.id=line.inventory_hold_id
+    WHERE line.tenant_id=return_row.tenant_id AND line.vendor_return_id=return_row.id
+      AND (hold.id IS NULL OR hold.status<>'active' OR hold.deleted IS NOT NULL
+        OR hold.inventory_balance_id<>line.inventory_balance_id OR hold.qty<>line.quantity
+        OR hold.reference_type<>'vendor_return' OR hold.reference_id<>return_row.id)) THEN
+    RAISE EXCEPTION 'released vendor-return lines require matching active holds'
+      USING ERRCODE='23514';
+  END IF;
+  IF return_row.status IN ('shipped','cancelled') AND EXISTS(
+    SELECT 1 FROM public.vendor_return_lines line
+    LEFT JOIN public.inventory_holds hold ON hold.tenant_id=line.tenant_id
+      AND hold.inventory_owner_id=line.inventory_owner_id AND hold.id=line.inventory_hold_id
+    WHERE line.tenant_id=return_row.tenant_id AND line.vendor_return_id=return_row.id
+      AND line.inventory_hold_id IS NOT NULL
+      AND (hold.id IS NULL OR hold.status<>'released' OR hold.deleted IS NULL)) THEN
+    RAISE EXCEPTION 'closed vendor return cannot retain active holds' USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.vendor_return_events event
+    WHERE event.tenant_id=return_row.tenant_id AND event.vendor_return_id=return_row.id
+      AND event.resulting_revision=return_row.revision AND event.to_status=return_row.status) THEN
+    RAISE EXCEPTION 'vendor-return state lacks immutable event evidence' USING ERRCODE='23514';
+  END IF;
+  IF return_row.status='shipped' THEN
+    IF NOT EXISTS(SELECT 1 FROM public.inventory_transactions transaction
+      WHERE transaction.tenant_id=return_row.tenant_id
+        AND transaction.inventory_owner_id=return_row.inventory_owner_id
+        AND transaction.id=return_row.shipment_inventory_transaction_id
+        AND transaction.transaction_type='return_to_vendor'
+        AND transaction.reference_type='vendor_return' AND transaction.reference_id=return_row.id
+        AND transaction.actor_user_id=return_row.shipped_by_user_id
+        AND transaction.created=return_row.shipped_at)
+      OR (SELECT count(*) FROM public.inventory_entries entry
+        WHERE entry.tenant_id=return_row.tenant_id
+          AND entry.transaction_id=return_row.shipment_inventory_transaction_id)<>line_count
+      OR EXISTS(SELECT 1 FROM public.vendor_return_lines line
+        JOIN public.inventory_balances balance ON balance.tenant_id=line.tenant_id
+          AND balance.inventory_owner_id=line.inventory_owner_id
+          AND balance.id=line.inventory_balance_id
+        WHERE line.tenant_id=return_row.tenant_id AND line.vendor_return_id=return_row.id
+          AND NOT EXISTS(SELECT 1 FROM public.inventory_entries entry
+            WHERE entry.tenant_id=line.tenant_id
+              AND entry.transaction_id=return_row.shipment_inventory_transaction_id
+              AND entry.facility_id=line.facility_id AND entry.location_id=balance.location_id
+              AND entry.license_plate_id IS NOT DISTINCT FROM balance.license_plate_id
+              AND entry.item_batch_id=balance.item_batch_id AND entry.status=balance.status
+              AND entry.quantity_delta=-line.quantity)) THEN
+      RAISE EXCEPTION 'shipped vendor return does not reconcile with inventory journal'
+        USING ERRCODE='23514';
+    END IF;
+    SELECT EXISTS(SELECT 1 FROM public.billing_contracts contract
+      WHERE contract.tenant_id=return_row.tenant_id
+        AND contract.inventory_owner_id=return_row.inventory_owner_id
+        AND contract.status='active' AND contract.effective_from<=return_row.shipped_at
+        AND (contract.effective_until IS NULL OR contract.effective_until>return_row.shipped_at))
+      INTO active_contract;
+    IF active_contract<>(return_row.billable_event_id IS NOT NULL) THEN
+      RAISE EXCEPTION 'vendor-return billing evidence does not match effective contract'
+        USING ERRCODE='23514';
+    END IF;
+    IF return_row.billable_event_id IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.billable_events event
+      WHERE event.tenant_id=return_row.tenant_id AND event.id=return_row.billable_event_id
+        AND event.inventory_owner_id=return_row.inventory_owner_id
+        AND event.facility_id=return_row.facility_id AND event.event_type='return_unit'
+        AND event.unit='each' AND event.quantity=expected_billable_quantity
+        AND event.source_type='vendor_return' AND event.source_reference=return_row.id::text
+        AND event.occurred_at=return_row.shipped_at) THEN
+      RAISE EXCEPTION 'vendor-return billable event does not reconcile with shipment'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER vendor_returns_guard BEFORE UPDATE OR DELETE ON public.vendor_returns
+FOR EACH ROW EXECUTE FUNCTION public.guard_vendor_return_mutation();
+CREATE TRIGGER vendor_return_lines_guard BEFORE UPDATE OR DELETE ON public.vendor_return_lines
+FOR EACH ROW EXECUTE FUNCTION public.guard_vendor_return_line_mutation();
+CREATE TRIGGER vendor_return_events_validate BEFORE INSERT ON public.vendor_return_events
+FOR EACH ROW EXECUTE FUNCTION public.validate_vendor_return_event_insert();
+CREATE TRIGGER vendor_return_events_immutable BEFORE UPDATE OR DELETE ON public.vendor_return_events
+FOR EACH ROW EXECUTE FUNCTION public.reject_vendor_return_evidence_mutation();
+CREATE CONSTRAINT TRIGGER vendor_returns_require_integrity
+AFTER INSERT OR UPDATE ON public.vendor_returns DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_vendor_return_integrity();
+CREATE CONSTRAINT TRIGGER vendor_return_lines_require_integrity
+AFTER INSERT OR UPDATE ON public.vendor_return_lines DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_vendor_return_integrity();
+
+DO $$ DECLARE table_name text; BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'vendor_returns','vendor_return_lines','vendor_return_events'
+  ] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',table_name);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',table_name);
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I USING (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint) WITH CHECK (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint)',
+      table_name||'_tenant_isolation',table_name);
+  END LOOP;
+END $$;
+
+GRANT SELECT,INSERT ON public.vendor_returns TO wareboxes_app;
+GRANT UPDATE(status,revision,shipment_inventory_transaction_id,billable_event_id,
+  released_by_user_id,released_at,shipped_by_user_id,shipped_at,
+  cancelled_by_user_id,cancelled_at) ON public.vendor_returns TO wareboxes_app;
+GRANT SELECT,INSERT ON public.vendor_return_lines TO wareboxes_app;
+GRANT UPDATE(inventory_hold_id) ON public.vendor_return_lines TO wareboxes_app;
+GRANT SELECT,INSERT ON public.vendor_return_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.vendor_returns_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.vendor_return_lines_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.vendor_return_events_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.reject_vendor_return_evidence_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_vendor_return_line_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_vendor_return_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_vendor_return_event_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_vendor_return_integrity() FROM PUBLIC;
+
+-- Audited employee-to-interactive-user identity lifecycle.
+ALTER TABLE public.employees
+  ADD COLUMN identity_revision bigint NOT NULL DEFAULT 0,
+  ADD COLUMN identity_changed_by_user_id bigint,
+  ADD COLUMN identity_changed_at timestamptz,
+  ADD CONSTRAINT employees_identity_revision_check CHECK(identity_revision>=0),
+  ADD CONSTRAINT employees_identity_state_check CHECK(
+    (identity_revision=0 AND user_id IS NULL
+      AND identity_changed_by_user_id IS NULL AND identity_changed_at IS NULL)
+    OR
+    (identity_revision>0 AND identity_changed_by_user_id IS NOT NULL
+      AND identity_changed_at IS NOT NULL)),
+  ADD CONSTRAINT employees_identity_actor_fk
+    FOREIGN KEY(tenant_id,identity_changed_by_user_id)
+      REFERENCES public.tenant_memberships(tenant_id,user_id);
+
+CREATE TABLE public.employee_identity_changes (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  employee_id bigint NOT NULL,
+  previous_user_id bigint,
+  user_id bigint,
+  change_kind text NOT NULL CHECK(change_kind IN('linked','relinked','unlinked')),
+  reason text NOT NULL CHECK(reason=btrim(reason) AND char_length(reason) BETWEEN 1 AND 500
+    AND reason!~'[[:cntrl:]]'),
+  resulting_revision bigint NOT NULL CHECK(resulting_revision>0),
+  changed_by_user_id bigint NOT NULL,
+  changed_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,employee_id,resulting_revision),
+  FOREIGN KEY(tenant_id) REFERENCES public.tenants(id),
+  FOREIGN KEY(tenant_id,employee_id) REFERENCES public.employees(tenant_id,id),
+  FOREIGN KEY(tenant_id,previous_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,user_id) REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,changed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(
+    (change_kind='linked' AND previous_user_id IS NULL AND user_id IS NOT NULL)
+    OR (change_kind='relinked' AND previous_user_id IS NOT NULL AND user_id IS NOT NULL
+      AND previous_user_id<>user_id)
+    OR (change_kind='unlinked' AND previous_user_id IS NOT NULL AND user_id IS NULL))
+);
+
+CREATE INDEX employee_identity_changes_employee_time
+  ON public.employee_identity_changes(tenant_id,employee_id,changed_at DESC,id DESC);
+
+CREATE FUNCTION public.guard_employee_identity_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.user_id IS NOT DISTINCT FROM OLD.user_id
+      AND NEW.identity_revision=OLD.identity_revision
+      AND NEW.identity_changed_by_user_id IS NOT DISTINCT FROM OLD.identity_changed_by_user_id
+      AND NEW.identity_changed_at IS NOT DISTINCT FROM OLD.identity_changed_at THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.user_id IS NOT DISTINCT FROM OLD.user_id
+      OR NEW.identity_revision<>OLD.identity_revision+1
+      OR NEW.identity_changed_by_user_id IS NULL OR NEW.identity_changed_at IS NULL
+      OR NEW.identity_changed_at<transaction_timestamp()-INTERVAL '5 minutes'
+      OR NEW.identity_changed_at>clock_timestamp()+INTERVAL '1 minute'
+      OR NEW.deleted IS NOT NULL
+      OR NEW.terminated IS NOT NULL AND NEW.terminated<=NEW.identity_changed_at THEN
+    RAISE EXCEPTION 'employee identity requires an attributed single-revision transition'
+      USING ERRCODE='23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    concat_ws(':','labor_timeline',NEW.tenant_id,NEW.id),0));
+  IF EXISTS(SELECT 1 FROM public.attendance_intervals attendance
+      WHERE attendance.tenant_id=NEW.tenant_id AND attendance.employee_id=NEW.id
+        AND attendance.status='open')
+    OR EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=NEW.tenant_id AND activity.employee_id=NEW.id
+        AND activity.status='active') THEN
+    RAISE EXCEPTION 'employee identity cannot change while attendance or labor is open'
+      USING ERRCODE='55000';
+  END IF;
+  IF NEW.user_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+      NEW.tenant_id::text||':'||NEW.user_id::text,0));
+    IF NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+        JOIN public.users user_account ON user_account.id=membership.user_id
+        WHERE membership.tenant_id=NEW.tenant_id AND membership.user_id=NEW.user_id
+          AND membership.deleted IS NULL AND user_account.deleted IS NULL) THEN
+      RAISE EXCEPTION 'employee identity requires an active interactive tenant member'
+        USING ERRCODE='23514';
+    END IF;
+    IF EXISTS(SELECT 1 FROM public.employee_facilities assignment
+        WHERE assignment.tenant_id=NEW.tenant_id AND assignment.employee_id=NEW.id
+          AND assignment.deleted IS NULL
+          AND NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+            WHERE membership.tenant_id=NEW.tenant_id AND membership.user_id=NEW.user_id
+              AND membership.deleted IS NULL
+              AND (membership.all_facilities OR EXISTS(
+                SELECT 1 FROM public.user_facilities user_facility
+                WHERE user_facility.tenant_id=membership.tenant_id
+                  AND user_facility.user_id=membership.user_id
+                  AND user_facility.facility_id=assignment.facility_id
+                  AND user_facility.deleted IS NULL)))) THEN
+      RAISE EXCEPTION 'interactive user scope does not cover employee facilities'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_employee_identity_change() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM public.employees employee
+      WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id
+        AND employee.identity_revision=NEW.resulting_revision
+        AND employee.user_id IS NOT DISTINCT FROM NEW.user_id
+        AND employee.identity_changed_by_user_id=NEW.changed_by_user_id
+        AND employee.identity_changed_at=NEW.changed_at) THEN
+    RAISE EXCEPTION 'employee identity audit does not match employee state'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_employee_identity_audit() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.user_id IS DISTINCT FROM OLD.user_id AND NOT EXISTS(
+      SELECT 1 FROM public.employee_identity_changes change
+      WHERE change.tenant_id=NEW.tenant_id AND change.employee_id=NEW.id
+        AND change.previous_user_id IS NOT DISTINCT FROM OLD.user_id
+        AND change.user_id IS NOT DISTINCT FROM NEW.user_id
+        AND change.resulting_revision=NEW.identity_revision
+        AND change.changed_by_user_id=NEW.identity_changed_by_user_id
+        AND change.changed_at=NEW.identity_changed_at) THEN
+    RAISE EXCEPTION 'employee identity transition lacks immutable audit evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.reject_employee_identity_change_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'employee identity audit is immutable' USING ERRCODE='23514';
+END $$;
+
+CREATE FUNCTION public.require_linked_employee_user_scope(
+  checked_tenant_id bigint, checked_user_id bigint) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    checked_tenant_id::text||':'||checked_user_id::text,0));
+  IF EXISTS(SELECT 1 FROM public.employees employee
+      JOIN public.employee_facilities assignment
+        ON assignment.tenant_id=employee.tenant_id AND assignment.employee_id=employee.id
+        AND assignment.deleted IS NULL
+      WHERE employee.tenant_id=checked_tenant_id AND employee.user_id=checked_user_id
+        AND NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+          WHERE membership.tenant_id=employee.tenant_id AND membership.user_id=employee.user_id
+            AND membership.deleted IS NULL
+            AND (membership.all_facilities OR EXISTS(SELECT 1
+              FROM public.user_facilities user_facility
+              WHERE user_facility.tenant_id=membership.tenant_id
+                AND user_facility.user_id=membership.user_id
+                AND user_facility.facility_id=assignment.facility_id
+                AND user_facility.deleted IS NULL)))) THEN
+    RAISE EXCEPTION 'identity-linked employee facilities exceed interactive user scope'
+      USING ERRCODE='55000';
+  END IF;
+END $$;
+
+CREATE FUNCTION public.guard_linked_membership_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_tenant_id bigint; checked_user_id bigint;
+BEGIN
+  checked_tenant_id:=COALESCE(NEW.tenant_id,OLD.tenant_id);
+  checked_user_id:=COALESCE(NEW.user_id,OLD.user_id);
+  PERFORM public.require_linked_employee_user_scope(checked_tenant_id,checked_user_id);
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.guard_linked_employee_assignment_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE linked_user_id bigint;
+BEGIN
+  SELECT employee.user_id INTO linked_user_id FROM public.employees employee
+  WHERE employee.tenant_id=COALESCE(NEW.tenant_id,OLD.tenant_id)
+    AND employee.id=COALESCE(NEW.employee_id,OLD.employee_id);
+  IF linked_user_id IS NOT NULL THEN
+    PERFORM public.require_linked_employee_user_scope(
+      COALESCE(NEW.tenant_id,OLD.tenant_id),linked_user_id);
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER employees_identity_guard
+BEFORE UPDATE OF user_id,identity_revision,identity_changed_by_user_id,identity_changed_at
+ON public.employees FOR EACH ROW EXECUTE FUNCTION public.guard_employee_identity_mutation();
+CREATE CONSTRAINT TRIGGER employees_identity_require_audit
+AFTER UPDATE OF user_id,identity_revision,identity_changed_by_user_id,identity_changed_at
+ON public.employees DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_employee_identity_audit();
+CREATE TRIGGER employee_identity_changes_validate
+BEFORE INSERT ON public.employee_identity_changes
+FOR EACH ROW EXECUTE FUNCTION public.validate_employee_identity_change();
+CREATE TRIGGER employee_identity_changes_immutable
+BEFORE UPDATE OR DELETE ON public.employee_identity_changes
+FOR EACH ROW EXECUTE FUNCTION public.reject_employee_identity_change_mutation();
+CREATE CONSTRAINT TRIGGER tenant_memberships_linked_employee_scope
+AFTER UPDATE OF deleted,all_facilities OR DELETE ON public.tenant_memberships
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.guard_linked_membership_scope();
+CREATE CONSTRAINT TRIGGER user_facilities_linked_employee_scope
+AFTER INSERT OR UPDATE OR DELETE ON public.user_facilities
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.guard_linked_membership_scope();
+CREATE CONSTRAINT TRIGGER employee_facilities_linked_user_scope
+AFTER INSERT OR UPDATE OR DELETE ON public.employee_facilities
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.guard_linked_employee_assignment_scope();
+
+ALTER TABLE public.employee_identity_changes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.employee_identity_changes FORCE ROW LEVEL SECURITY;
+CREATE POLICY employee_identity_changes_tenant_isolation
+ON public.employee_identity_changes
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.employee_identity_changes TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.employee_identity_changes_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.guard_employee_identity_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_employee_identity_change() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_employee_identity_audit() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_employee_identity_change_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_linked_employee_user_scope(bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_linked_membership_scope() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_linked_employee_assignment_scope() FROM PUBLIC;
+
+-- Labor execution, standards, certification, and equipment eligibility.
+CREATE TABLE public.labor_skills (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  code text NOT NULL,
+  name text NOT NULL,
+  certification_required boolean NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  revision bigint NOT NULL DEFAULT 1 CHECK (revision>0),
+  configured_by_user_id bigint NOT NULL,
+  configured_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id), UNIQUE(tenant_id,code),
+  FOREIGN KEY(tenant_id) REFERENCES public.tenants(id),
+  FOREIGN KEY(tenant_id,configured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(code=btrim(code) AND char_length(code) BETWEEN 1 AND 80 AND code!~'[[:cntrl:]]'),
+  CHECK(name=btrim(name) AND char_length(name) BETWEEN 1 AND 160 AND name!~'[[:cntrl:]]')
+);
+
+CREATE TABLE public.employee_certifications (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  employee_id bigint NOT NULL,
+  skill_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  certification_number text,
+  issued_at timestamptz NOT NULL,
+  expires_at timestamptz,
+  note text,
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  certified_by_user_id bigint NOT NULL,
+  certified_at timestamptz NOT NULL,
+  revoked_by_user_id bigint,
+  revoked_at timestamptz,
+  revocation_note text,
+  UNIQUE(tenant_id,id),
+  FOREIGN KEY(tenant_id,employee_id) REFERENCES public.employees(tenant_id,id),
+  FOREIGN KEY(tenant_id,skill_id) REFERENCES public.labor_skills(tenant_id,id),
+  FOREIGN KEY(tenant_id,employee_id,facility_id)
+    REFERENCES public.employee_facilities(tenant_id,employee_id,facility_id),
+  FOREIGN KEY(tenant_id,certified_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,revoked_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(expires_at IS NULL OR expires_at>issued_at),
+  CHECK(issued_at<=certified_at),
+  CHECK(certification_number IS NULL OR
+    (certification_number=btrim(certification_number) AND
+     char_length(certification_number) BETWEEN 1 AND 80 AND
+     certification_number!~'[[:cntrl:]]')),
+  CHECK(note IS NULL OR (note=btrim(note) AND char_length(note) BETWEEN 1 AND 500 AND note!~'[[:cntrl:]]')),
+  CHECK((revoked_at IS NULL AND revoked_by_user_id IS NULL AND revocation_note IS NULL) OR
+    (revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL AND revocation_note IS NOT NULL
+      AND revoked_at>=certified_at)),
+  CHECK(revocation_note IS NULL OR
+    (revocation_note=btrim(revocation_note) AND char_length(revocation_note) BETWEEN 1 AND 500
+      AND revocation_note!~'[[:cntrl:]]'))
+);
+CREATE INDEX employee_certifications_validity
+  ON public.employee_certifications(tenant_id,employee_id,skill_id,facility_id,issued_at,expires_at)
+  WHERE revoked_at IS NULL;
+CREATE INDEX employee_certifications_expiry
+  ON public.employee_certifications(tenant_id,facility_id,expires_at)
+  WHERE revoked_at IS NULL;
+
+CREATE TABLE public.equipment_classes (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  code text NOT NULL,
+  name text NOT NULL,
+  required_skill_id bigint,
+  active boolean NOT NULL DEFAULT true,
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  configured_by_user_id bigint NOT NULL,
+  configured_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id), UNIQUE(tenant_id,code),
+  FOREIGN KEY(tenant_id) REFERENCES public.tenants(id),
+  FOREIGN KEY(tenant_id,required_skill_id) REFERENCES public.labor_skills(tenant_id,id),
+  FOREIGN KEY(tenant_id,configured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(code=btrim(code) AND char_length(code) BETWEEN 1 AND 80 AND code!~'[[:cntrl:]]'),
+  CHECK(name=btrim(name) AND char_length(name) BETWEEN 1 AND 160 AND name!~'[[:cntrl:]]')
+);
+
+CREATE TABLE public.equipment_assets (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  equipment_class_id bigint NOT NULL,
+  equipment_number text NOT NULL,
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'available'
+    CHECK(status IN('available','assigned','out_of_service','retired')),
+  assigned_employee_id bigint,
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  status_note text,
+  configured_by_user_id bigint NOT NULL,
+  configured_at timestamptz NOT NULL,
+  status_changed_by_user_id bigint,
+  status_changed_at timestamptz,
+  UNIQUE(tenant_id,id), UNIQUE(tenant_id,equipment_number),
+  FOREIGN KEY(tenant_id,facility_id) REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY(tenant_id,equipment_class_id) REFERENCES public.equipment_classes(tenant_id,id),
+  FOREIGN KEY(tenant_id,assigned_employee_id) REFERENCES public.employees(tenant_id,id),
+  FOREIGN KEY(tenant_id,configured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,status_changed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(equipment_number=btrim(equipment_number) AND
+    char_length(equipment_number) BETWEEN 1 AND 80 AND equipment_number!~'[[:cntrl:]]'),
+  CHECK(name=btrim(name) AND char_length(name) BETWEEN 1 AND 160 AND name!~'[[:cntrl:]]'),
+  CHECK(status_note IS NULL OR
+    (status_note=btrim(status_note) AND char_length(status_note) BETWEEN 1 AND 500
+      AND status_note!~'[[:cntrl:]]')),
+  CHECK((status='assigned')=(assigned_employee_id IS NOT NULL))
+);
+CREATE INDEX equipment_assets_facility_status
+  ON public.equipment_assets(tenant_id,facility_id,status,id);
+
+CREATE TABLE public.labor_standards (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  inventory_owner_id bigint,
+  code text NOT NULL,
+  name text NOT NULL,
+  activity_kind text NOT NULL CHECK(activity_kind IN(
+    'receiving','putaway','replenishment','picking','packing','shipping','cycle_count',
+    'inventory_relocation','cross_dock','yard','customer_return','vendor_return',
+    'value_added_work')),
+  quantity_basis text NOT NULL CHECK(quantity_basis IN('unit','line','container','task','weight_gram')),
+  setup_seconds bigint NOT NULL CHECK(setup_seconds BETWEEN 0 AND 86400),
+  seconds_per_unit bigint NOT NULL CHECK(seconds_per_unit BETWEEN 1 AND 86400),
+  required_skill_id bigint,
+  required_equipment_class_id bigint,
+  effective_from timestamptz NOT NULL,
+  effective_until timestamptz,
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  supersedes_standard_id bigint,
+  configured_by_user_id bigint NOT NULL,
+  configured_at timestamptz NOT NULL,
+  retired_by_user_id bigint,
+  retired_at timestamptz,
+  UNIQUE(tenant_id,id),
+  FOREIGN KEY(tenant_id,facility_id) REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id) REFERENCES public.inventory_owners(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,required_skill_id) REFERENCES public.labor_skills(tenant_id,id),
+  FOREIGN KEY(tenant_id,required_equipment_class_id)
+    REFERENCES public.equipment_classes(tenant_id,id),
+  FOREIGN KEY(tenant_id,supersedes_standard_id)
+    REFERENCES public.labor_standards(tenant_id,id),
+  FOREIGN KEY(tenant_id,configured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,retired_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(effective_until IS NULL OR effective_until>effective_from),
+  CHECK((retired_by_user_id IS NULL AND retired_at IS NULL) OR
+    (effective_until IS NOT NULL AND retired_by_user_id IS NOT NULL AND retired_at IS NOT NULL)),
+  CHECK((revision=1 AND supersedes_standard_id IS NULL) OR
+    (revision>1 AND supersedes_standard_id IS NOT NULL)),
+  CHECK(code=btrim(code) AND char_length(code) BETWEEN 1 AND 80 AND code!~'[[:cntrl:]]'),
+  CHECK(name=btrim(name) AND char_length(name) BETWEEN 1 AND 160 AND name!~'[[:cntrl:]]')
+);
+CREATE UNIQUE INDEX labor_standards_version_unique
+  ON public.labor_standards(tenant_id,facility_id,inventory_owner_id,code,effective_from)
+  NULLS NOT DISTINCT;
+CREATE UNIQUE INDEX labor_standards_revision_unique
+  ON public.labor_standards(tenant_id,facility_id,inventory_owner_id,code,revision)
+  NULLS NOT DISTINCT;
+CREATE UNIQUE INDEX labor_standards_one_successor
+  ON public.labor_standards(tenant_id,supersedes_standard_id)
+  WHERE supersedes_standard_id IS NOT NULL;
+CREATE INDEX labor_standards_resolution
+  ON public.labor_standards(tenant_id,facility_id,inventory_owner_id,activity_kind,effective_from DESC);
+
+CREATE TABLE public.attendance_intervals (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  employee_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  status text NOT NULL CHECK(status IN('open','closed')),
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  clocked_in_at timestamptz NOT NULL,
+  clocked_out_at timestamptz,
+  paid_seconds bigint CHECK(paid_seconds>0),
+  clock_in_note text,
+  clock_out_note text,
+  clocked_in_by_user_id bigint NOT NULL,
+  clocked_out_by_user_id bigint,
+  UNIQUE(tenant_id,id),
+  FOREIGN KEY(tenant_id,employee_id) REFERENCES public.employees(tenant_id,id),
+  FOREIGN KEY(tenant_id,employee_id,facility_id)
+    REFERENCES public.employee_facilities(tenant_id,employee_id,facility_id),
+  FOREIGN KEY(tenant_id,clocked_in_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,clocked_out_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK((status='open' AND clocked_out_at IS NULL AND paid_seconds IS NULL
+      AND clocked_out_by_user_id IS NULL AND clock_out_note IS NULL) OR
+    (status='closed' AND clocked_out_at IS NOT NULL AND clocked_out_at>clocked_in_at
+      AND paid_seconds IS NOT NULL AND paid_seconds>0
+      AND clocked_out_by_user_id IS NOT NULL)),
+  CHECK(clock_in_note IS NULL OR
+    (clock_in_note=btrim(clock_in_note) AND char_length(clock_in_note) BETWEEN 1 AND 500
+      AND clock_in_note!~'[[:cntrl:]]')),
+  CHECK(clock_out_note IS NULL OR
+    (clock_out_note=btrim(clock_out_note) AND char_length(clock_out_note) BETWEEN 1 AND 500
+      AND clock_out_note!~'[[:cntrl:]]'))
+);
+CREATE UNIQUE INDEX attendance_intervals_one_open
+  ON public.attendance_intervals(tenant_id,employee_id) WHERE status='open';
+CREATE INDEX attendance_intervals_facility_time
+  ON public.attendance_intervals(tenant_id,facility_id,clocked_in_at DESC,id DESC);
+
+CREATE TABLE public.labor_activities (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  attendance_interval_id bigint NOT NULL,
+  employee_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  inventory_owner_id bigint,
+  activity_kind text NOT NULL CHECK(activity_kind IN(
+    'receiving','putaway','replenishment','picking','packing','shipping','cycle_count',
+    'inventory_relocation','cross_dock','yard','customer_return','vendor_return',
+    'value_added_work','break','meeting','training','maintenance','delay','other_indirect')),
+  quantity_basis text CHECK(quantity_basis IN('unit','line','container','task','weight_gram')),
+  status text NOT NULL CHECK(status IN('active','completed','cancelled')),
+  labor_standard_id bigint,
+  equipment_asset_id bigint,
+  reference_type text,
+  reference_id bigint,
+  reference_quantity bigint,
+  standard_setup_seconds bigint,
+  standard_seconds_per_unit bigint,
+  required_skill_id bigint,
+  required_skill_certification_id bigint,
+  required_equipment_class_id bigint,
+  equipment_required_skill_id bigint,
+  equipment_skill_certification_id bigint,
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  started_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  actual_seconds bigint,
+  exception_seconds bigint,
+  exception_reason text CHECK(exception_reason IS NULL OR exception_reason IN(
+    'equipment','congestion','inventory','quality','safety','system','training','personal','other')),
+  exception_note text,
+  exception_approved_by_user_id bigint,
+  completed_quantity bigint,
+  expected_seconds bigint,
+  efficiency_basis_points bigint,
+  started_by_user_id bigint NOT NULL,
+  completed_by_user_id bigint,
+  cancelled_by_user_id bigint,
+  note text,
+  UNIQUE(tenant_id,id),
+  FOREIGN KEY(tenant_id,attendance_interval_id) REFERENCES public.attendance_intervals(tenant_id,id),
+  FOREIGN KEY(tenant_id,employee_id) REFERENCES public.employees(tenant_id,id),
+  FOREIGN KEY(tenant_id,employee_id,facility_id)
+    REFERENCES public.employee_facilities(tenant_id,employee_id,facility_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id) REFERENCES public.inventory_owners(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,labor_standard_id) REFERENCES public.labor_standards(tenant_id,id),
+  FOREIGN KEY(tenant_id,equipment_asset_id) REFERENCES public.equipment_assets(tenant_id,id),
+  FOREIGN KEY(tenant_id,required_skill_id) REFERENCES public.labor_skills(tenant_id,id),
+  FOREIGN KEY(tenant_id,required_skill_certification_id)
+    REFERENCES public.employee_certifications(tenant_id,id),
+  FOREIGN KEY(tenant_id,required_equipment_class_id)
+    REFERENCES public.equipment_classes(tenant_id,id),
+  FOREIGN KEY(tenant_id,equipment_required_skill_id)
+    REFERENCES public.labor_skills(tenant_id,id),
+  FOREIGN KEY(tenant_id,equipment_skill_certification_id)
+    REFERENCES public.employee_certifications(tenant_id,id),
+  FOREIGN KEY(tenant_id,started_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,completed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,cancelled_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,exception_approved_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK((labor_standard_id IS NULL AND standard_setup_seconds IS NULL
+      AND standard_seconds_per_unit IS NULL AND required_skill_id IS NULL
+      AND required_equipment_class_id IS NULL) OR
+    (labor_standard_id IS NOT NULL AND standard_setup_seconds BETWEEN 0 AND 86400
+      AND standard_setup_seconds IS NOT NULL AND standard_seconds_per_unit IS NOT NULL
+      AND standard_seconds_per_unit BETWEEN 1 AND 86400)),
+  CHECK(equipment_asset_id IS NOT NULL OR equipment_required_skill_id IS NULL),
+  CHECK((required_skill_id IS NULL)=(required_skill_certification_id IS NULL)),
+  CHECK((equipment_required_skill_id IS NULL)=(equipment_skill_certification_id IS NULL)),
+  CHECK((activity_kind IN('receiving','putaway','replenishment','picking','packing','shipping',
+      'cycle_count','inventory_relocation','cross_dock','yard','customer_return','vendor_return',
+      'value_added_work')
+      AND (inventory_owner_id IS NOT NULL OR activity_kind='cycle_count')
+      AND reference_type IS NOT NULL
+      AND reference_id IS NOT NULL AND reference_id>0 AND quantity_basis IS NOT NULL
+      AND reference_quantity IS NOT NULL AND reference_quantity BETWEEN 1 AND 1000000000) OR
+    (activity_kind IN('break','meeting','training','maintenance','delay','other_indirect')
+      AND reference_type IS NULL AND reference_id IS NULL AND inventory_owner_id IS NULL
+      AND quantity_basis IS NULL AND reference_quantity IS NULL)),
+  CHECK(reference_type IS NULL OR
+    (reference_type=btrim(reference_type) AND char_length(reference_type) BETWEEN 1 AND 80
+      AND reference_type!~'[[:cntrl:]]')),
+  CHECK(note IS NULL OR (note=btrim(note) AND char_length(note) BETWEEN 1 AND 500
+    AND note!~'[[:cntrl:]]')),
+  CHECK(exception_note IS NULL OR (exception_note=btrim(exception_note)
+    AND char_length(exception_note) BETWEEN 1 AND 500 AND exception_note!~'[[:cntrl:]]')),
+  CHECK(exception_seconds IS NULL OR exception_seconds>=0),
+  CHECK((exception_seconds IS NULL AND exception_reason IS NULL AND exception_note IS NULL
+      AND exception_approved_by_user_id IS NULL) OR
+    (exception_seconds=0 AND exception_reason IS NULL AND exception_note IS NULL
+      AND exception_approved_by_user_id IS NULL) OR
+    (exception_seconds>0 AND exception_reason IS NOT NULL AND exception_note IS NOT NULL
+      AND exception_approved_by_user_id IS NOT NULL)),
+  CHECK(completed_quantity IS NULL OR completed_quantity BETWEEN 1 AND 1000000000),
+  CHECK(efficiency_basis_points IS NULL OR efficiency_basis_points BETWEEN 0 AND 1000000),
+  CHECK((status='active' AND completed_at IS NULL AND actual_seconds IS NULL
+      AND exception_seconds IS NULL AND completed_quantity IS NULL AND expected_seconds IS NULL
+      AND efficiency_basis_points IS NULL AND completed_by_user_id IS NULL
+      AND cancelled_by_user_id IS NULL) OR
+    (status='completed' AND completed_at IS NOT NULL AND completed_at>started_at
+      AND actual_seconds IS NOT NULL AND actual_seconds>0
+      AND exception_seconds IS NOT NULL AND exception_seconds BETWEEN 0 AND actual_seconds
+      AND completed_by_user_id IS NOT NULL
+      AND cancelled_by_user_id IS NULL) OR
+    (status='cancelled' AND completed_at IS NOT NULL AND completed_at>started_at
+      AND actual_seconds IS NOT NULL AND actual_seconds>0
+      AND exception_seconds IS NULL AND completed_quantity IS NULL AND expected_seconds IS NULL
+      AND efficiency_basis_points IS NULL AND completed_by_user_id IS NULL
+      AND cancelled_by_user_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX labor_activities_one_active
+  ON public.labor_activities(tenant_id,employee_id) WHERE status='active';
+CREATE INDEX labor_activities_active_attendance
+  ON public.labor_activities(tenant_id,attendance_interval_id) WHERE status='active';
+CREATE UNIQUE INDEX labor_activities_one_equipment_assignment
+  ON public.labor_activities(tenant_id,equipment_asset_id) WHERE status='active';
+CREATE INDEX labor_activities_facility_time
+  ON public.labor_activities(tenant_id,facility_id,started_at DESC,id DESC);
+CREATE INDEX labor_activities_reference
+  ON public.labor_activities(tenant_id,reference_type,reference_id);
+
+CREATE TABLE public.attendance_adjustments (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  attendance_interval_id bigint NOT NULL,
+  supersedes_adjustment_id bigint,
+  expected_revision bigint NOT NULL CHECK(expected_revision>0),
+  resulting_revision bigint NOT NULL CHECK(resulting_revision=expected_revision+1),
+  before_clocked_in_at timestamptz NOT NULL,
+  before_clocked_out_at timestamptz NOT NULL,
+  before_paid_seconds bigint NOT NULL CHECK(before_paid_seconds>0),
+  corrected_clocked_in_at timestamptz NOT NULL,
+  corrected_clocked_out_at timestamptz NOT NULL,
+  corrected_paid_seconds bigint NOT NULL CHECK(corrected_paid_seconds>0),
+  correction_reason text NOT NULL CHECK(correction_reason IN(
+    'missed_punch','timekeeping_error','system_error','other')),
+  correction_note text NOT NULL,
+  adjusted_by_user_id bigint NOT NULL,
+  adjusted_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,attendance_interval_id,resulting_revision),
+  FOREIGN KEY(tenant_id,attendance_interval_id)
+    REFERENCES public.attendance_intervals(tenant_id,id),
+  FOREIGN KEY(tenant_id,supersedes_adjustment_id)
+    REFERENCES public.attendance_adjustments(tenant_id,id),
+  FOREIGN KEY(tenant_id,adjusted_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(before_clocked_out_at>before_clocked_in_at),
+  CHECK(corrected_clocked_out_at>corrected_clocked_in_at),
+  CHECK(before_paid_seconds=
+    trunc(EXTRACT(EPOCH FROM before_clocked_out_at-before_clocked_in_at))::bigint),
+  CHECK(corrected_paid_seconds=
+    trunc(EXTRACT(EPOCH FROM corrected_clocked_out_at-corrected_clocked_in_at))::bigint),
+  CHECK(before_clocked_in_at IS DISTINCT FROM corrected_clocked_in_at
+    OR before_clocked_out_at IS DISTINCT FROM corrected_clocked_out_at),
+  CHECK(correction_note=btrim(correction_note)
+    AND char_length(correction_note) BETWEEN 1 AND 500
+    AND correction_note!~'[[:cntrl:]]')
+);
+CREATE UNIQUE INDEX attendance_adjustments_one_successor
+  ON public.attendance_adjustments(tenant_id,supersedes_adjustment_id)
+  WHERE supersedes_adjustment_id IS NOT NULL;
+CREATE INDEX attendance_adjustments_target_revision
+  ON public.attendance_adjustments(tenant_id,attendance_interval_id,resulting_revision DESC,id DESC);
+
+CREATE TABLE public.labor_activity_adjustments (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  labor_activity_id bigint NOT NULL,
+  supersedes_adjustment_id bigint,
+  expected_revision bigint NOT NULL CHECK(expected_revision>0),
+  resulting_revision bigint NOT NULL CHECK(resulting_revision=expected_revision+1),
+  before_started_at timestamptz NOT NULL,
+  corrected_started_at timestamptz NOT NULL,
+  before_completed_at timestamptz NOT NULL,
+  corrected_completed_at timestamptz NOT NULL,
+  before_actual_seconds bigint NOT NULL CHECK(before_actual_seconds>0),
+  corrected_actual_seconds bigint NOT NULL CHECK(corrected_actual_seconds>0),
+  before_quantity bigint,
+  corrected_quantity bigint,
+  before_exception_seconds bigint NOT NULL CHECK(before_exception_seconds>=0),
+  corrected_exception_seconds bigint NOT NULL CHECK(corrected_exception_seconds>=0),
+  before_exception_reason text CHECK(before_exception_reason IS NULL OR before_exception_reason IN(
+    'equipment','congestion','inventory','quality','safety','system','training','personal','other')),
+  corrected_exception_reason text CHECK(corrected_exception_reason IS NULL OR corrected_exception_reason IN(
+    'equipment','congestion','inventory','quality','safety','system','training','personal','other')),
+  before_exception_note text,
+  corrected_exception_note text,
+  before_exception_approved_by_user_id bigint,
+  corrected_exception_approved_by_user_id bigint,
+  before_expected_seconds bigint,
+  corrected_expected_seconds bigint,
+  before_efficiency_basis_points bigint,
+  corrected_efficiency_basis_points bigint,
+  correction_reason text NOT NULL CHECK(correction_reason IN(
+    'timekeeping_error','quantity_error','exception_error','system_error','other')),
+  correction_note text NOT NULL,
+  adjusted_by_user_id bigint NOT NULL,
+  adjusted_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,labor_activity_id,resulting_revision),
+  FOREIGN KEY(tenant_id,labor_activity_id) REFERENCES public.labor_activities(tenant_id,id),
+  FOREIGN KEY(tenant_id,supersedes_adjustment_id)
+    REFERENCES public.labor_activity_adjustments(tenant_id,id),
+  FOREIGN KEY(tenant_id,before_exception_approved_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,corrected_exception_approved_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,adjusted_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CHECK(before_quantity IS NULL OR before_quantity BETWEEN 1 AND 1000000000),
+  CHECK(corrected_quantity IS NULL OR corrected_quantity BETWEEN 1 AND 1000000000),
+  CHECK(before_completed_at>before_started_at
+    AND before_actual_seconds=
+      trunc(EXTRACT(EPOCH FROM before_completed_at-before_started_at))::bigint),
+  CHECK(corrected_completed_at>corrected_started_at
+    AND corrected_actual_seconds=
+      trunc(EXTRACT(EPOCH FROM corrected_completed_at-corrected_started_at))::bigint),
+  CHECK(before_expected_seconds IS NULL OR before_expected_seconds>=0),
+  CHECK(corrected_expected_seconds IS NULL OR corrected_expected_seconds>=0),
+  CHECK(before_efficiency_basis_points IS NULL
+    OR before_efficiency_basis_points BETWEEN 0 AND 1000000),
+  CHECK(corrected_efficiency_basis_points IS NULL
+    OR corrected_efficiency_basis_points BETWEEN 0 AND 1000000),
+  CHECK((before_exception_seconds=0 AND before_exception_reason IS NULL
+      AND before_exception_note IS NULL AND before_exception_approved_by_user_id IS NULL)
+    OR (before_exception_seconds>0 AND before_exception_reason IS NOT NULL
+      AND before_exception_note IS NOT NULL AND before_exception_approved_by_user_id IS NOT NULL)),
+  CHECK((corrected_exception_seconds=0 AND corrected_exception_reason IS NULL
+      AND corrected_exception_note IS NULL AND corrected_exception_approved_by_user_id IS NULL)
+    OR (corrected_exception_seconds>0 AND corrected_exception_reason IS NOT NULL
+      AND corrected_exception_note IS NOT NULL
+      AND corrected_exception_approved_by_user_id IS NOT NULL)),
+  CHECK(before_exception_note IS NULL OR (before_exception_note=btrim(before_exception_note)
+    AND char_length(before_exception_note) BETWEEN 1 AND 500
+    AND before_exception_note!~'[[:cntrl:]]')),
+  CHECK(corrected_exception_note IS NULL OR (corrected_exception_note=btrim(corrected_exception_note)
+    AND char_length(corrected_exception_note) BETWEEN 1 AND 500
+    AND corrected_exception_note!~'[[:cntrl:]]')),
+  CHECK(correction_note=btrim(correction_note)
+    AND char_length(correction_note) BETWEEN 1 AND 500
+    AND correction_note!~'[[:cntrl:]]'),
+  CHECK(before_started_at IS DISTINCT FROM corrected_started_at
+    OR before_completed_at IS DISTINCT FROM corrected_completed_at
+    OR before_quantity IS DISTINCT FROM corrected_quantity
+    OR before_exception_seconds IS DISTINCT FROM corrected_exception_seconds
+    OR before_exception_reason IS DISTINCT FROM corrected_exception_reason
+    OR before_exception_note IS DISTINCT FROM corrected_exception_note)
+);
+CREATE UNIQUE INDEX labor_activity_adjustments_one_successor
+  ON public.labor_activity_adjustments(tenant_id,supersedes_adjustment_id)
+  WHERE supersedes_adjustment_id IS NOT NULL;
+CREATE INDEX labor_activity_adjustments_target_revision
+  ON public.labor_activity_adjustments(tenant_id,labor_activity_id,resulting_revision DESC,id DESC);
+
+CREATE FUNCTION public.resolve_labor_reference_quantity(
+  checked_tenant_id bigint,checked_activity_kind text,checked_quantity_basis text,
+  checked_reference_id bigint) RETURNS bigint
+LANGUAGE plpgsql STABLE SET search_path TO 'pg_catalog','public' AS $$
+DECLARE resolved_quantity bigint;
+BEGIN
+  IF checked_tenant_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint THEN
+    RAISE EXCEPTION 'labor reference quantity requires exact tenant context'
+      USING ERRCODE='42501';
+  END IF;
+  IF checked_quantity_basis='task' THEN RETURN 1; END IF;
+
+  CASE checked_activity_kind
+    WHEN 'receiving' THEN
+      SELECT CASE checked_quantity_basis
+        WHEN 'unit' THEN SUM(line.expected_qty)
+        WHEN 'line' THEN COUNT(*)
+        END INTO resolved_quantity
+      FROM public.load_lines line
+      WHERE line.tenant_id=checked_tenant_id AND line.load_id=checked_reference_id
+        AND line.deleted IS NULL;
+    WHEN 'putaway' THEN
+      SELECT CASE checked_quantity_basis
+        WHEN 'unit' THEN putaway.planned_quantity
+        WHEN 'line' THEN COALESCE(plate.planned_balance_count,1)
+        WHEN 'container' THEN CASE WHEN plate.task_id IS NOT NULL THEN 1 END
+        END INTO resolved_quantity
+      FROM public.work_tasks task
+      LEFT JOIN public.putaway_tasks putaway ON putaway.tenant_id=task.tenant_id
+        AND putaway.task_id=task.id
+      LEFT JOIN public.license_plate_putaway_tasks plate ON plate.tenant_id=task.tenant_id
+        AND plate.task_id=task.id
+      WHERE task.tenant_id=checked_tenant_id AND task.id=checked_reference_id;
+    WHEN 'replenishment' THEN
+      SELECT CASE checked_quantity_basis WHEN 'unit' THEN replenishment.planned_qty
+        WHEN 'line' THEN 1 END INTO resolved_quantity
+      FROM public.replenishment_tasks replenishment
+      WHERE replenishment.tenant_id=checked_tenant_id
+        AND replenishment.task_id=checked_reference_id;
+    WHEN 'picking' THEN
+      SELECT CASE checked_quantity_basis WHEN 'unit' THEN SUM(content.planned_qty)
+        WHEN 'line' THEN COUNT(*) END INTO resolved_quantity
+      FROM public.pick_task_contents content
+      WHERE content.tenant_id=checked_tenant_id AND content.task_id=checked_reference_id;
+    WHEN 'packing' THEN
+      SELECT CASE checked_quantity_basis WHEN 'unit' THEN session.expected_qty
+        WHEN 'line' THEN session.expected_allocation_count END INTO resolved_quantity
+      FROM public.packing_sessions session
+      WHERE session.tenant_id=checked_tenant_id AND session.id=checked_reference_id;
+    WHEN 'shipping' THEN
+      IF checked_quantity_basis='weight_gram' THEN
+        SELECT CASE WHEN COUNT(*)>0 AND COUNT(carton.weight_g)=COUNT(*)
+          THEN SUM(carton.weight_g) END INTO resolved_quantity
+        FROM public.shipment_cartons carton
+        WHERE carton.tenant_id=checked_tenant_id AND carton.shipment_id=checked_reference_id;
+      ELSE
+        SELECT CASE checked_quantity_basis WHEN 'unit' THEN shipment.shipped_qty
+          WHEN 'line' THEN shipment.content_count WHEN 'container' THEN shipment.carton_count END
+          INTO resolved_quantity
+        FROM public.shipments shipment
+        WHERE shipment.tenant_id=checked_tenant_id AND shipment.id=checked_reference_id;
+      END IF;
+    WHEN 'cycle_count' THEN
+      IF checked_quantity_basis='line' THEN resolved_quantity:=1; END IF;
+    WHEN 'inventory_relocation' THEN
+      SELECT CASE checked_quantity_basis
+        WHEN 'unit' THEN relocation.planned_quantity
+        WHEN 'line' THEN COALESCE(relocation.planned_balance_count,1)
+        WHEN 'container' THEN CASE WHEN relocation.license_plate_id IS NOT NULL THEN 1 END
+        END INTO resolved_quantity
+      FROM public.inventory_relocation_tasks relocation
+      WHERE relocation.tenant_id=checked_tenant_id
+        AND relocation.task_id=checked_reference_id;
+    WHEN 'cross_dock' THEN
+      SELECT CASE checked_quantity_basis WHEN 'unit' THEN cross_dock.planned_quantity
+        WHEN 'line' THEN 1 END INTO resolved_quantity
+      FROM public.cross_dock_tasks cross_dock
+      WHERE cross_dock.tenant_id=checked_tenant_id
+        AND cross_dock.task_id=checked_reference_id;
+    WHEN 'yard' THEN
+      IF checked_quantity_basis='container' THEN resolved_quantity:=1; END IF;
+    WHEN 'customer_return' THEN
+      SELECT CASE checked_quantity_basis WHEN 'unit' THEN SUM(line.expected_quantity)
+        WHEN 'line' THEN COUNT(*) END INTO resolved_quantity
+      FROM public.customer_return_lines return_line
+      JOIN public.inbound_asn_lines line ON line.tenant_id=return_line.tenant_id
+        AND line.id=return_line.inbound_asn_line_id
+      WHERE return_line.tenant_id=checked_tenant_id
+        AND return_line.customer_return_id=checked_reference_id;
+    WHEN 'vendor_return' THEN
+      SELECT CASE checked_quantity_basis WHEN 'unit' THEN SUM(line.quantity)
+        WHEN 'line' THEN COUNT(*) END INTO resolved_quantity
+      FROM public.vendor_return_lines line
+      WHERE line.tenant_id=checked_tenant_id AND line.vendor_return_id=checked_reference_id;
+    WHEN 'value_added_work' THEN
+      SELECT CASE checked_quantity_basis WHEN 'unit' THEN SUM(input.quantity)
+        WHEN 'line' THEN COUNT(*) END INTO resolved_quantity
+      FROM public.value_added_work_inputs input
+      WHERE input.tenant_id=checked_tenant_id AND input.work_id=checked_reference_id;
+    ELSE resolved_quantity:=NULL;
+  END CASE;
+  IF resolved_quantity BETWEEN 1 AND 1000000000 THEN RETURN resolved_quantity; END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.validate_labor_standard_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NOT (
+    NEW.quantity_basis='task'
+    OR NEW.activity_kind IN('receiving','replenishment','picking','packing','cross_dock',
+      'customer_return','vendor_return','value_added_work')
+      AND NEW.quantity_basis IN('unit','line')
+    OR NEW.activity_kind IN('putaway','inventory_relocation')
+      AND NEW.quantity_basis IN('unit','line','container')
+    OR NEW.activity_kind='shipping'
+      AND NEW.quantity_basis IN('unit','line','container','weight_gram')
+    OR NEW.activity_kind='cycle_count' AND NEW.quantity_basis='line'
+    OR NEW.activity_kind='yard' AND NEW.quantity_basis='container') THEN
+    RAISE EXCEPTION 'labor quantity basis is unsupported for activity kind'
+      USING ERRCODE='23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_standard',NEW.tenant_id,
+    NEW.facility_id,COALESCE(NEW.inventory_owner_id,0),NEW.code),0));
+  IF EXISTS(SELECT 1 FROM public.labor_standards candidate
+    WHERE candidate.tenant_id=NEW.tenant_id AND candidate.facility_id=NEW.facility_id
+      AND candidate.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id
+      AND candidate.code=NEW.code
+      AND tstzrange(candidate.effective_from,candidate.effective_until,'[)') &&
+          tstzrange(NEW.effective_from,NEW.effective_until,'[)')) THEN
+    RAISE EXCEPTION 'labor standard effective windows overlap' USING ERRCODE='23505';
+  END IF;
+  IF NEW.required_skill_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.labor_skills skill
+    WHERE skill.tenant_id=NEW.tenant_id AND skill.id=NEW.required_skill_id AND skill.active) THEN
+    RAISE EXCEPTION 'labor standard requires an active skill' USING ERRCODE='23514';
+  END IF;
+  IF NEW.required_equipment_class_id IS NOT NULL AND NOT EXISTS(
+    SELECT 1 FROM public.equipment_classes class
+    WHERE class.tenant_id=NEW.tenant_id AND class.id=NEW.required_equipment_class_id
+      AND class.active) THEN
+    RAISE EXCEPTION 'labor standard requires an active equipment class' USING ERRCODE='23514';
+  END IF;
+  IF NEW.supersedes_standard_id IS NOT NULL AND NOT EXISTS(
+    SELECT 1 FROM public.labor_standards prior
+    WHERE prior.tenant_id=NEW.tenant_id AND prior.id=NEW.supersedes_standard_id
+      AND prior.facility_id=NEW.facility_id
+      AND prior.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id
+      AND prior.code=NEW.code AND prior.revision+1=NEW.revision
+      AND prior.effective_until<=NEW.effective_from
+      AND ((prior.retired_by_user_id IS NULL AND prior.retired_at IS NULL)
+        OR (prior.retired_by_user_id=NEW.configured_by_user_id
+          AND prior.retired_at=NEW.configured_at))) THEN
+    RAISE EXCEPTION 'labor standard successor does not continue its version history'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_employee_certification_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.revision<>1 OR NEW.revoked_by_user_id IS NOT NULL OR NEW.revoked_at IS NOT NULL
+    OR NEW.revocation_note IS NOT NULL THEN
+    RAISE EXCEPTION 'new employee certification must begin unrevoked at revision one'
+      USING ERRCODE='23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_certification',
+    NEW.tenant_id,NEW.employee_id,NEW.skill_id,NEW.facility_id),0));
+  IF NOT EXISTS(SELECT 1 FROM public.labor_skills skill
+    WHERE skill.tenant_id=NEW.tenant_id AND skill.id=NEW.skill_id AND skill.active) THEN
+    RAISE EXCEPTION 'employee certification requires an active skill' USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.labor_skills skill
+    WHERE skill.tenant_id=NEW.tenant_id AND skill.id=NEW.skill_id
+      AND skill.certification_required AND NEW.certification_number IS NULL) THEN
+    RAISE EXCEPTION 'certified skill requires a certification number' USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.employees employee
+    JOIN public.employee_facilities assignment ON assignment.tenant_id=employee.tenant_id
+      AND assignment.employee_id=employee.id AND assignment.facility_id=NEW.facility_id
+      AND assignment.deleted IS NULL
+    WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id
+      AND employee.deleted IS NULL AND employee.hired<=NEW.issued_at
+      AND (employee.terminated IS NULL OR employee.terminated>NEW.issued_at)) THEN
+    RAISE EXCEPTION 'certification employee is inactive or outside facility assignment'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.employee_certifications certification
+    WHERE certification.tenant_id=NEW.tenant_id
+      AND certification.employee_id=NEW.employee_id
+      AND certification.skill_id=NEW.skill_id
+      AND certification.facility_id=NEW.facility_id
+      AND certification.issued_at<COALESCE(NEW.expires_at,'infinity'::timestamptz)
+      AND NEW.issued_at<LEAST(
+        COALESCE(certification.expires_at,'infinity'::timestamptz),
+        COALESCE(certification.revoked_at,'infinity'::timestamptz))) THEN
+    RAISE EXCEPTION 'employee certification validity windows overlap'
+      USING ERRCODE='23505';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_labor_standard_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.facility_id<>OLD.facility_id
+    OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+    OR NEW.code<>OLD.code OR NEW.name<>OLD.name OR NEW.activity_kind<>OLD.activity_kind
+    OR NEW.quantity_basis<>OLD.quantity_basis OR NEW.setup_seconds<>OLD.setup_seconds
+    OR NEW.seconds_per_unit<>OLD.seconds_per_unit
+    OR NEW.required_skill_id IS DISTINCT FROM OLD.required_skill_id
+    OR NEW.required_equipment_class_id IS DISTINCT FROM OLD.required_equipment_class_id
+    OR NEW.effective_from<>OLD.effective_from OR NEW.revision<>OLD.revision
+    OR NEW.supersedes_standard_id IS DISTINCT FROM OLD.supersedes_standard_id
+    OR NEW.configured_by_user_id<>OLD.configured_by_user_id
+    OR NEW.configured_at<>OLD.configured_at OR OLD.effective_until IS NOT NULL
+    OR NEW.effective_until IS NULL OR NEW.effective_until<=OLD.effective_from
+    OR NEW.retired_by_user_id IS NULL OR NEW.retired_at IS NULL
+    OR NEW.retired_at<OLD.configured_at THEN
+    RAISE EXCEPTION 'labor standard permits only one attributed retirement'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.labor_activities activity
+    WHERE activity.tenant_id=OLD.tenant_id AND activity.labor_standard_id=OLD.id
+      AND activity.started_at>=NEW.effective_until) THEN
+    RAISE EXCEPTION 'labor standard retirement would invalidate recorded labor'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_employee_certification_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'employee certifications are immutable' USING ERRCODE='23514';
+  END IF;
+  IF NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id OR NEW.employee_id<>OLD.employee_id
+    OR NEW.skill_id<>OLD.skill_id OR NEW.facility_id<>OLD.facility_id
+    OR NEW.certification_number IS DISTINCT FROM OLD.certification_number
+    OR NEW.issued_at<>OLD.issued_at OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
+    OR NEW.note IS DISTINCT FROM OLD.note OR NEW.certified_by_user_id<>OLD.certified_by_user_id
+    OR NEW.certified_at<>OLD.certified_at OR OLD.revoked_at IS NOT NULL
+    OR NEW.revision<>OLD.revision+1 OR NEW.revoked_at IS NULL
+    OR NEW.revoked_at<OLD.certified_at
+    OR NEW.revoked_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.revoked_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NEW.revoked_by_user_id IS NULL OR NEW.revocation_note IS NULL THEN
+    RAISE EXCEPTION 'only one attributed certification revocation is allowed'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.labor_activities activity
+    WHERE activity.tenant_id=OLD.tenant_id AND activity.employee_id=OLD.employee_id
+      AND activity.facility_id=OLD.facility_id
+      AND (activity.required_skill_id=OLD.skill_id
+        OR activity.equipment_required_skill_id=OLD.skill_id)
+      AND activity.status='active') THEN
+    RAISE EXCEPTION 'certification is required by active labor' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_labor_skill_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.code<>OLD.code OR NEW.revision<>OLD.revision+1
+    OR NEW.configured_by_user_id IS NULL OR NEW.configured_at<OLD.configured_at THEN
+    RAISE EXCEPTION 'labor skill updates require an attributed single revision'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_equipment_class_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.code<>OLD.code OR NEW.revision<>OLD.revision+1
+    OR NEW.configured_by_user_id IS NULL OR NEW.configured_at<OLD.configured_at THEN
+    RAISE EXCEPTION 'equipment class updates require an attributed single revision'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_equipment_asset_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP='INSERT' THEN
+    IF NEW.status<>'available' OR NEW.assigned_employee_id IS NOT NULL OR NEW.revision<>1
+      OR NEW.status_note IS NOT NULL OR NEW.status_changed_by_user_id IS NOT NULL
+      OR NEW.status_changed_at IS NOT NULL THEN
+      RAISE EXCEPTION 'new equipment must begin available and unassigned' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.facility_id<>OLD.facility_id OR NEW.equipment_class_id<>OLD.equipment_class_id
+    OR NEW.equipment_number<>OLD.equipment_number OR NEW.name<>OLD.name
+    OR NEW.configured_by_user_id<>OLD.configured_by_user_id
+    OR NEW.configured_at<>OLD.configured_at OR NEW.revision<>OLD.revision+1
+    OR OLD.status='retired' OR NEW.status=OLD.status OR NEW.status_note IS NULL
+    OR NEW.status_changed_by_user_id IS NULL OR NEW.status_changed_at IS NULL
+    OR OLD.status_changed_at IS NOT NULL AND NEW.status_changed_at<OLD.status_changed_at
+    OR (NEW.status='assigned' AND
+      (OLD.status<>'available' OR NEW.assigned_employee_id IS NULL))
+    OR (OLD.status='assigned' AND
+      (NEW.status<>'available' OR NEW.assigned_employee_id IS NOT NULL))
+    OR (OLD.status<>'assigned' AND NEW.status<>'assigned'
+      AND NEW.assigned_employee_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'invalid equipment lifecycle transition' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_attendance_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    IF NEW.status<>'open' OR NEW.revision<>1 OR NEW.clocked_out_at IS NOT NULL
+      OR NEW.paid_seconds IS NOT NULL OR NEW.clock_out_note IS NOT NULL
+      OR NEW.clocked_out_by_user_id IS NOT NULL THEN
+      RAISE EXCEPTION 'new attendance must begin open' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'attendance intervals are immutable' USING ERRCODE='23514';
+  END IF;
+  IF NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id OR NEW.employee_id<>OLD.employee_id
+    OR NEW.facility_id<>OLD.facility_id OR NEW.clocked_in_at<>OLD.clocked_in_at
+    OR NEW.clock_in_note IS DISTINCT FROM OLD.clock_in_note
+    OR NEW.clocked_in_by_user_id<>OLD.clocked_in_by_user_id OR OLD.status<>'open'
+    OR NEW.status<>'closed' OR NEW.revision<>OLD.revision+1 OR NEW.clocked_out_at IS NULL
+    OR NEW.paid_seconds IS DISTINCT FROM
+      trunc(EXTRACT(EPOCH FROM NEW.clocked_out_at-OLD.clocked_in_at))::bigint
+    OR NEW.clocked_out_by_user_id IS NULL THEN
+    RAISE EXCEPTION 'attendance permits only an exact open-to-closed transition'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_labor_activity_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    IF NEW.status<>'active' OR NEW.revision<>1 OR NEW.completed_at IS NOT NULL
+      OR NEW.actual_seconds IS NOT NULL OR NEW.exception_seconds IS NOT NULL
+      OR NEW.completed_quantity IS NOT NULL OR NEW.expected_seconds IS NOT NULL
+      OR NEW.efficiency_basis_points IS NOT NULL OR NEW.completed_by_user_id IS NOT NULL
+      OR NEW.cancelled_by_user_id IS NOT NULL THEN
+      RAISE EXCEPTION 'new labor activity must begin active' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'labor activities are immutable' USING ERRCODE='23514';
+  END IF;
+  IF NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.attendance_interval_id<>OLD.attendance_interval_id
+    OR NEW.employee_id<>OLD.employee_id OR NEW.facility_id<>OLD.facility_id
+    OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+    OR NEW.activity_kind<>OLD.activity_kind
+    OR NEW.quantity_basis IS DISTINCT FROM OLD.quantity_basis
+    OR NEW.labor_standard_id IS DISTINCT FROM OLD.labor_standard_id
+    OR NEW.equipment_asset_id IS DISTINCT FROM OLD.equipment_asset_id
+    OR NEW.reference_type IS DISTINCT FROM OLD.reference_type
+    OR NEW.reference_id IS DISTINCT FROM OLD.reference_id
+    OR NEW.reference_quantity IS DISTINCT FROM OLD.reference_quantity
+    OR NEW.standard_setup_seconds IS DISTINCT FROM OLD.standard_setup_seconds
+    OR NEW.standard_seconds_per_unit IS DISTINCT FROM OLD.standard_seconds_per_unit
+    OR NEW.required_skill_id IS DISTINCT FROM OLD.required_skill_id
+    OR NEW.required_skill_certification_id IS DISTINCT FROM OLD.required_skill_certification_id
+    OR NEW.required_equipment_class_id IS DISTINCT FROM OLD.required_equipment_class_id
+    OR NEW.equipment_required_skill_id IS DISTINCT FROM OLD.equipment_required_skill_id
+    OR NEW.equipment_skill_certification_id IS DISTINCT FROM OLD.equipment_skill_certification_id
+    OR NEW.started_at<>OLD.started_at OR NEW.started_by_user_id<>OLD.started_by_user_id
+    OR OLD.status<>'active' OR NEW.status NOT IN('completed','cancelled')
+    OR NEW.revision<>OLD.revision+1 OR NEW.completed_at IS NULL
+    OR NEW.actual_seconds IS DISTINCT FROM
+      trunc(EXTRACT(EPOCH FROM NEW.completed_at-OLD.started_at))::bigint THEN
+    RAISE EXCEPTION 'labor activity permits only one exact terminal transition'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_labor_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE attendance_row record; equipment_row record; standard_row record;
+  reference_valid boolean; resolved_reference_quantity bigint;
+BEGIN
+  IF TG_TABLE_NAME='attendance_intervals' THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_timeline',
+      NEW.tenant_id,NEW.employee_id),0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_facility',
+      NEW.tenant_id,NEW.facility_id),0));
+    IF TG_OP='INSERT' AND NOT EXISTS(SELECT 1 FROM public.employees employee
+      JOIN public.employee_facilities assignment ON assignment.tenant_id=employee.tenant_id
+        AND assignment.employee_id=employee.id AND assignment.facility_id=NEW.facility_id
+        AND assignment.deleted IS NULL
+      JOIN public.facilities facility ON facility.tenant_id=employee.tenant_id
+        AND facility.id=assignment.facility_id AND facility.deleted IS NULL
+      WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id
+        AND employee.deleted IS NULL AND employee.hired<=NEW.clocked_in_at
+        AND (employee.terminated IS NULL OR employee.terminated>NEW.clocked_in_at)) THEN
+      RAISE EXCEPTION 'attendance employee is inactive or outside facility assignment'
+        USING ERRCODE='23514';
+    END IF;
+    IF NEW.status='closed' AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=NEW.tenant_id
+        AND activity.attendance_interval_id=NEW.id AND activity.status='active') THEN
+      RAISE EXCEPTION 'closed attendance cannot retain active labor' USING ERRCODE='23514';
+    END IF;
+    IF EXISTS(SELECT 1 FROM public.attendance_intervals other
+      WHERE other.tenant_id=NEW.tenant_id AND other.employee_id=NEW.employee_id
+        AND other.id<>NEW.id
+        AND other.clocked_in_at<COALESCE(NEW.clocked_out_at,'infinity'::timestamptz)
+        AND NEW.clocked_in_at<COALESCE(other.clocked_out_at,'infinity'::timestamptz)) THEN
+      RAISE EXCEPTION 'employee attendance intervals cannot overlap' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+  END IF;
+  IF TG_TABLE_NAME='equipment_assets' THEN
+    IF TG_OP='INSERT' AND NOT EXISTS(SELECT 1 FROM public.facilities facility
+      JOIN public.equipment_classes class ON class.tenant_id=facility.tenant_id
+        AND class.id=NEW.equipment_class_id AND class.active
+      WHERE facility.tenant_id=NEW.tenant_id AND facility.id=NEW.facility_id
+        AND facility.deleted IS NULL) THEN
+      RAISE EXCEPTION 'equipment requires an active facility and equipment class'
+        USING ERRCODE='23514';
+    END IF;
+    IF NEW.status='assigned' AND NOT EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=NEW.tenant_id AND activity.equipment_asset_id=NEW.id
+        AND activity.employee_id=NEW.assigned_employee_id AND activity.status='active') THEN
+      RAISE EXCEPTION 'assigned equipment lacks matching active labor' USING ERRCODE='23514';
+    END IF;
+    IF NEW.status<>'assigned' AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=NEW.tenant_id AND activity.equipment_asset_id=NEW.id
+        AND activity.status='active') THEN
+      RAISE EXCEPTION 'active labor requires assigned equipment' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_timeline',
+    NEW.tenant_id,NEW.employee_id),0));
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_facility',
+    NEW.tenant_id,NEW.facility_id),0));
+  IF NEW.reference_type IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_reference',
+      NEW.tenant_id,NEW.reference_type,NEW.reference_id),0));
+  END IF;
+  SELECT * INTO attendance_row FROM public.attendance_intervals attendance
+    WHERE attendance.tenant_id=NEW.tenant_id AND attendance.id=NEW.attendance_interval_id;
+  IF attendance_row.id IS NULL OR attendance_row.employee_id<>NEW.employee_id
+    OR attendance_row.facility_id<>NEW.facility_id
+    OR NEW.started_at<attendance_row.clocked_in_at
+    OR NEW.completed_at IS NOT NULL AND NEW.completed_at>COALESCE(attendance_row.clocked_out_at,NEW.completed_at)
+    OR NEW.status='active' AND attendance_row.status<>'open' THEN
+    RAISE EXCEPTION 'labor activity does not reconcile with attendance' USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='INSERT' AND NOT EXISTS(SELECT 1 FROM public.employees employee
+    JOIN public.employee_facilities assignment ON assignment.tenant_id=employee.tenant_id
+      AND assignment.employee_id=employee.id AND assignment.facility_id=NEW.facility_id
+      AND assignment.deleted IS NULL
+    JOIN public.facilities facility ON facility.tenant_id=employee.tenant_id
+      AND facility.id=assignment.facility_id AND facility.deleted IS NULL
+    WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id
+      AND employee.deleted IS NULL AND employee.hired<=NEW.started_at
+      AND (employee.terminated IS NULL OR employee.terminated>NEW.started_at)) THEN
+    RAISE EXCEPTION 'labor employee is inactive or outside facility assignment' USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.labor_activities other
+    WHERE other.tenant_id=NEW.tenant_id AND other.employee_id=NEW.employee_id
+      AND other.id<>NEW.id
+      AND other.started_at<COALESCE(NEW.completed_at,'infinity'::timestamptz)
+      AND NEW.started_at<COALESCE(other.completed_at,'infinity'::timestamptz)) THEN
+    RAISE EXCEPTION 'employee labor activities cannot overlap' USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='INSERT' AND NEW.activity_kind IN('receiving','putaway','replenishment','picking','packing','shipping',
+      'cycle_count','inventory_relocation','cross_dock','yard','customer_return','vendor_return',
+      'value_added_work') THEN
+    IF NEW.reference_type='work_task' THEN
+      PERFORM 1 FROM public.work_tasks task
+        WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.reference_id FOR SHARE;
+    ELSIF NEW.reference_type='inbound_load' THEN
+      PERFORM 1 FROM public.loads load
+        WHERE load.tenant_id=NEW.tenant_id AND load.id=NEW.reference_id FOR SHARE;
+    ELSIF NEW.reference_type='pick_task' THEN
+      PERFORM 1 FROM public.pick_tasks task
+        WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.reference_id FOR SHARE;
+    ELSIF NEW.reference_type='packing_session' THEN
+      PERFORM 1 FROM public.packing_sessions session
+        WHERE session.tenant_id=NEW.tenant_id AND session.id=NEW.reference_id FOR SHARE;
+    ELSIF NEW.reference_type='shipment' THEN
+      PERFORM 1 FROM public.shipments shipment
+        WHERE shipment.tenant_id=NEW.tenant_id AND shipment.id=NEW.reference_id FOR SHARE;
+    ELSIF NEW.reference_type='yard_visit' THEN
+      PERFORM 1 FROM public.yard_visits visit
+        WHERE visit.tenant_id=NEW.tenant_id AND visit.id=NEW.reference_id FOR SHARE;
+    ELSIF NEW.reference_type='customer_return' THEN
+      PERFORM 1 FROM public.customer_returns customer_return
+        JOIN public.inbound_asns asn ON asn.tenant_id=customer_return.tenant_id
+          AND asn.id=customer_return.inbound_asn_id
+        JOIN public.loads load ON load.tenant_id=asn.tenant_id AND load.id=asn.load_id
+        WHERE customer_return.tenant_id=NEW.tenant_id
+          AND customer_return.id=NEW.reference_id
+        FOR SHARE OF customer_return,asn,load;
+    ELSIF NEW.reference_type='vendor_return' THEN
+      PERFORM 1 FROM public.vendor_returns vendor_return
+        WHERE vendor_return.tenant_id=NEW.tenant_id AND vendor_return.id=NEW.reference_id
+        FOR SHARE;
+    ELSIF NEW.reference_type='value_added_work_order' THEN
+      PERFORM 1 FROM public.value_added_work_orders work
+        WHERE work.tenant_id=NEW.tenant_id AND work.id=NEW.reference_id FOR SHARE;
+    END IF;
+    reference_valid:=false;
+    IF NEW.activity_kind='receiving' AND NEW.reference_type='inbound_load' THEN
+      SELECT EXISTS(SELECT 1 FROM public.loads load WHERE load.tenant_id=NEW.tenant_id
+        AND load.id=NEW.reference_id AND load.inventory_owner_id=NEW.inventory_owner_id
+        AND load.facility_id=NEW.facility_id AND load.type='inbound'
+        AND load.status IN('arrived','receiving') AND load.deleted IS NULL)
+        INTO reference_valid;
+    ELSIF NEW.activity_kind='putaway' AND NEW.reference_type='work_task' THEN
+      SELECT EXISTS(SELECT 1 FROM public.work_tasks task WHERE task.tenant_id=NEW.tenant_id
+        AND task.id=NEW.reference_id AND task.inventory_owner_id=NEW.inventory_owner_id
+        AND task.facility_id=NEW.facility_id
+        AND task.task_type IN('putaway','license_plate_putaway')
+        AND task.status IN('assigned','in_progress')
+        AND task.lease_expires_at>NEW.started_at
+        AND task.assigned_user_id=(SELECT employee.user_id FROM public.employees employee
+          WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id)
+        AND task.deleted IS NULL)
+        INTO reference_valid;
+    ELSIF NEW.activity_kind='replenishment' AND NEW.reference_type='work_task' THEN
+      SELECT EXISTS(SELECT 1 FROM public.work_tasks task WHERE task.tenant_id=NEW.tenant_id
+        AND task.id=NEW.reference_id AND task.inventory_owner_id=NEW.inventory_owner_id
+        AND task.facility_id=NEW.facility_id AND task.task_type='replenishment'
+        AND task.status IN('assigned','in_progress')
+        AND task.lease_expires_at>NEW.started_at
+        AND task.assigned_user_id=(SELECT employee.user_id FROM public.employees employee
+          WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id)
+        AND task.deleted IS NULL) INTO reference_valid;
+    ELSIF NEW.activity_kind='picking' AND NEW.reference_type='pick_task' THEN
+      SELECT EXISTS(SELECT 1 FROM public.pick_tasks task WHERE task.tenant_id=NEW.tenant_id
+        AND task.id=NEW.reference_id AND task.inventory_owner_id=NEW.inventory_owner_id
+        AND task.facility_id=NEW.facility_id AND task.status='in_progress'
+        AND task.lease_expires_at>NEW.started_at
+        AND task.assigned_user_id=(SELECT employee.user_id FROM public.employees employee
+          WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id))
+        INTO reference_valid;
+    ELSIF NEW.activity_kind='packing' AND NEW.reference_type='packing_session' THEN
+      SELECT EXISTS(SELECT 1 FROM public.packing_sessions session
+        WHERE session.tenant_id=NEW.tenant_id AND session.id=NEW.reference_id
+        AND session.inventory_owner_id=NEW.inventory_owner_id
+        AND session.facility_id=NEW.facility_id AND session.state='open'
+        AND session.started_by_user_id=(SELECT employee.user_id FROM public.employees employee
+          WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id))
+        INTO reference_valid;
+    ELSIF NEW.activity_kind='shipping' AND NEW.reference_type='shipment' THEN
+      SELECT EXISTS(SELECT 1 FROM public.shipments shipment
+        WHERE shipment.tenant_id=NEW.tenant_id AND shipment.id=NEW.reference_id
+        AND shipment.inventory_owner_id=NEW.inventory_owner_id
+        AND shipment.facility_id=NEW.facility_id
+        AND shipment.state IN('awaiting manifest','manifested','partially departed'))
+        INTO reference_valid;
+    ELSIF NEW.activity_kind='cycle_count' AND NEW.reference_type='work_task' THEN
+      SELECT EXISTS(SELECT 1 FROM public.work_tasks task WHERE task.tenant_id=NEW.tenant_id
+        AND task.id=NEW.reference_id
+        AND task.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id
+        AND task.facility_id=NEW.facility_id
+        AND ((NEW.inventory_owner_id IS NOT NULL AND task.task_type='cycle_count_item_location')
+          OR (NEW.inventory_owner_id IS NULL AND task.task_type='cycle_count_location'))
+        AND task.status IN('assigned','in_progress')
+        AND task.lease_expires_at>NEW.started_at
+        AND task.assigned_user_id=(SELECT employee.user_id FROM public.employees employee
+          WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id)
+        AND task.deleted IS NULL) INTO reference_valid;
+    ELSIF NEW.activity_kind='inventory_relocation' AND NEW.reference_type='work_task' THEN
+      SELECT EXISTS(SELECT 1 FROM public.work_tasks task WHERE task.tenant_id=NEW.tenant_id
+        AND task.id=NEW.reference_id AND task.inventory_owner_id=NEW.inventory_owner_id
+        AND task.facility_id=NEW.facility_id AND task.task_type='inventory_relocation'
+        AND task.status IN('assigned','in_progress')
+        AND task.lease_expires_at>NEW.started_at
+        AND task.assigned_user_id=(SELECT employee.user_id FROM public.employees employee
+          WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id)
+        AND task.deleted IS NULL) INTO reference_valid;
+    ELSIF NEW.activity_kind='cross_dock' AND NEW.reference_type='work_task' THEN
+      SELECT EXISTS(SELECT 1 FROM public.cross_dock_tasks cross_dock
+        JOIN public.work_tasks task ON task.tenant_id=cross_dock.tenant_id
+          AND task.id=cross_dock.task_id
+        WHERE cross_dock.tenant_id=NEW.tenant_id AND cross_dock.task_id=NEW.reference_id
+          AND cross_dock.inventory_owner_id=NEW.inventory_owner_id
+          AND cross_dock.facility_id=NEW.facility_id
+          AND task.status IN('assigned','in_progress')
+          AND task.lease_expires_at>NEW.started_at
+          AND task.assigned_user_id=(SELECT employee.user_id FROM public.employees employee
+            WHERE employee.tenant_id=NEW.tenant_id AND employee.id=NEW.employee_id)
+          AND task.deleted IS NULL) INTO reference_valid;
+    ELSIF NEW.activity_kind='yard' AND NEW.reference_type='yard_visit' THEN
+      SELECT EXISTS(SELECT 1 FROM public.yard_visits visit WHERE visit.tenant_id=NEW.tenant_id
+        AND visit.id=NEW.reference_id AND visit.inventory_owner_id=NEW.inventory_owner_id
+        AND visit.facility_id=NEW.facility_id
+        AND visit.status IN('at_door','loading','unloading')) INTO reference_valid;
+    ELSIF NEW.activity_kind='customer_return' AND NEW.reference_type='customer_return' THEN
+      SELECT EXISTS(SELECT 1 FROM public.customer_returns customer_return
+        JOIN public.inbound_asns asn ON asn.tenant_id=customer_return.tenant_id
+          AND asn.id=customer_return.inbound_asn_id
+        JOIN public.loads load ON load.tenant_id=asn.tenant_id AND load.id=asn.load_id
+        WHERE customer_return.tenant_id=NEW.tenant_id
+          AND customer_return.id=NEW.reference_id
+          AND customer_return.inventory_owner_id=NEW.inventory_owner_id
+          AND customer_return.facility_id=NEW.facility_id AND asn.status='planned'
+          AND load.status IN('arrived','receiving')) INTO reference_valid;
+    ELSIF NEW.activity_kind='vendor_return' AND NEW.reference_type='vendor_return' THEN
+      SELECT EXISTS(SELECT 1 FROM public.vendor_returns vendor_return
+        WHERE vendor_return.tenant_id=NEW.tenant_id AND vendor_return.id=NEW.reference_id
+          AND vendor_return.inventory_owner_id=NEW.inventory_owner_id
+          AND vendor_return.facility_id=NEW.facility_id AND vendor_return.status='released')
+        INTO reference_valid;
+    ELSIF NEW.activity_kind='value_added_work'
+        AND NEW.reference_type='value_added_work_order' THEN
+      SELECT EXISTS(SELECT 1 FROM public.value_added_work_orders work
+        WHERE work.tenant_id=NEW.tenant_id AND work.id=NEW.reference_id
+        AND work.inventory_owner_id=NEW.inventory_owner_id
+        AND work.facility_id=NEW.facility_id AND work.status='released') INTO reference_valid;
+    END IF;
+    IF NOT reference_valid THEN
+      RAISE EXCEPTION 'direct labor reference does not match typed work scope'
+        USING ERRCODE='23514';
+    END IF;
+    resolved_reference_quantity:=public.resolve_labor_reference_quantity(
+      NEW.tenant_id,NEW.activity_kind,NEW.quantity_basis,NEW.reference_id);
+    IF resolved_reference_quantity IS NULL
+      OR NEW.reference_quantity IS DISTINCT FROM resolved_reference_quantity THEN
+      RAISE EXCEPTION 'labor quantity basis does not reconcile with work evidence'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  IF NEW.labor_standard_id IS NOT NULL THEN
+    SELECT * INTO standard_row FROM public.labor_standards standard
+      WHERE standard.tenant_id=NEW.tenant_id AND standard.id=NEW.labor_standard_id;
+    IF standard_row.id IS NULL OR standard_row.facility_id<>NEW.facility_id
+      OR (standard_row.inventory_owner_id IS NOT NULL
+        AND standard_row.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id)
+      OR standard_row.activity_kind<>NEW.activity_kind
+      OR standard_row.quantity_basis IS DISTINCT FROM NEW.quantity_basis
+      OR standard_row.setup_seconds IS DISTINCT FROM NEW.standard_setup_seconds
+      OR standard_row.seconds_per_unit IS DISTINCT FROM NEW.standard_seconds_per_unit
+      OR standard_row.required_skill_id IS DISTINCT FROM NEW.required_skill_id
+      OR standard_row.required_equipment_class_id IS DISTINCT FROM NEW.required_equipment_class_id
+      OR NOT (standard_row.effective_from<=NEW.started_at AND
+        (standard_row.effective_until IS NULL OR standard_row.effective_until>NEW.started_at)) THEN
+      RAISE EXCEPTION 'labor activity standard snapshot is invalid' USING ERRCODE='23514';
+    END IF;
+  END IF;
+  IF TG_OP='INSERT' AND NEW.required_skill_id IS NOT NULL AND NOT EXISTS(
+    SELECT 1 FROM public.employee_certifications certification
+    WHERE certification.tenant_id=NEW.tenant_id
+      AND certification.id=NEW.required_skill_certification_id
+      AND certification.employee_id=NEW.employee_id
+      AND certification.facility_id=NEW.facility_id AND certification.skill_id=NEW.required_skill_id
+      AND certification.issued_at<=NEW.started_at
+      AND (certification.expires_at IS NULL OR certification.expires_at>NEW.started_at)
+      AND (certification.revoked_at IS NULL OR certification.revoked_at>NEW.started_at)) THEN
+    RAISE EXCEPTION 'labor employee lacks valid required certification' USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='INSERT' AND NEW.equipment_required_skill_id IS NOT NULL AND NOT EXISTS(
+    SELECT 1 FROM public.employee_certifications certification
+    WHERE certification.tenant_id=NEW.tenant_id
+      AND certification.id=NEW.equipment_skill_certification_id
+      AND certification.employee_id=NEW.employee_id
+      AND certification.facility_id=NEW.facility_id
+      AND certification.skill_id=NEW.equipment_required_skill_id
+      AND certification.issued_at<=NEW.started_at
+      AND (certification.expires_at IS NULL OR certification.expires_at>NEW.started_at)
+      AND (certification.revoked_at IS NULL OR certification.revoked_at>NEW.started_at)) THEN
+    RAISE EXCEPTION 'labor employee lacks valid equipment certification' USING ERRCODE='23514';
+  END IF;
+  IF NEW.required_equipment_class_id IS NOT NULL AND NEW.equipment_asset_id IS NULL THEN
+    RAISE EXCEPTION 'labor standard requires equipment' USING ERRCODE='23514';
+  END IF;
+  IF NEW.equipment_asset_id IS NOT NULL THEN
+    SELECT * INTO equipment_row FROM public.equipment_assets equipment
+      WHERE equipment.tenant_id=NEW.tenant_id AND equipment.id=NEW.equipment_asset_id;
+    IF equipment_row.id IS NULL OR equipment_row.facility_id<>NEW.facility_id
+      OR NEW.required_equipment_class_id IS NOT NULL
+        AND equipment_row.equipment_class_id<>NEW.required_equipment_class_id
+      OR TG_OP='INSERT' AND NOT EXISTS(SELECT 1 FROM public.equipment_classes class
+        WHERE class.tenant_id=NEW.tenant_id AND class.id=equipment_row.equipment_class_id
+          AND class.required_skill_id IS NOT DISTINCT FROM NEW.equipment_required_skill_id)
+      OR NEW.status='active' AND
+        (equipment_row.status<>'assigned' OR equipment_row.assigned_employee_id<>NEW.employee_id)
+      OR NEW.status<>'active' AND equipment_row.status='assigned' THEN
+      RAISE EXCEPTION 'labor equipment assignment is invalid' USING ERRCODE='23514';
+    END IF;
+  END IF;
+  IF NEW.status='completed' THEN
+    IF NEW.exception_seconds>0 AND (
+      NEW.exception_approved_by_user_id IS DISTINCT FROM NEW.completed_by_user_id
+      OR NOT public.labor_user_has_supervise_permission(
+        NEW.tenant_id,NEW.exception_approved_by_user_id)) THEN
+      RAISE EXCEPTION 'labor exception requires current supervisor approval'
+        USING ERRCODE='23514';
+    END IF;
+    IF NEW.activity_kind IN('receiving','putaway','replenishment','picking','packing','shipping',
+        'cycle_count','inventory_relocation','cross_dock','yard','customer_return','vendor_return',
+        'value_added_work') AND NEW.completed_quantity IS NULL THEN
+      RAISE EXCEPTION 'completed direct labor requires quantity' USING ERRCODE='23514';
+    END IF;
+    IF NEW.activity_kind IN('break','meeting','training','maintenance','delay','other_indirect')
+      AND NEW.completed_quantity IS NOT NULL THEN
+      RAISE EXCEPTION 'completed indirect labor cannot carry quantity' USING ERRCODE='23514';
+    END IF;
+    IF NEW.labor_standard_id IS NULL AND
+      (NEW.expected_seconds IS NOT NULL OR NEW.efficiency_basis_points IS NOT NULL) THEN
+      RAISE EXCEPTION 'unstandardized labor cannot report standard performance'
+        USING ERRCODE='23514';
+    END IF;
+    IF NEW.labor_standard_id IS NOT NULL AND
+      (NEW.completed_quantity IS NULL OR NEW.expected_seconds IS NULL
+       OR NEW.efficiency_basis_points IS NULL
+       OR NEW.expected_seconds IS DISTINCT FROM NEW.standard_setup_seconds+
+         NEW.standard_seconds_per_unit*NEW.completed_quantity
+       OR NEW.efficiency_basis_points IS DISTINCT FROM LEAST(1000000,
+         NEW.expected_seconds*10000/NEW.actual_seconds)) THEN
+      RAISE EXCEPTION 'labor performance does not reconcile with frozen standard'
+        USING ERRCODE='23514';
+    END IF;
+    IF NEW.activity_kind IN('receiving','putaway','replenishment','picking','packing','shipping',
+        'cycle_count','inventory_relocation','cross_dock','yard','customer_return','vendor_return',
+        'value_added_work') AND (
+      NEW.completed_quantity>NEW.reference_quantity OR
+      (SELECT COALESCE(SUM(activity.completed_quantity),0)
+       FROM public.labor_activities activity
+       WHERE activity.tenant_id=NEW.tenant_id
+         AND activity.facility_id=NEW.facility_id
+         AND activity.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id
+         AND activity.activity_kind=NEW.activity_kind
+         AND activity.quantity_basis=NEW.quantity_basis
+         AND activity.reference_type=NEW.reference_type
+         AND activity.reference_id=NEW.reference_id
+         AND activity.status='completed')>NEW.reference_quantity) THEN
+      RAISE EXCEPTION 'reported labor quantity exceeds canonical work evidence'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.require_active_labor_reference_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_tenant_id bigint; checked_reference_id bigint; reference_invalid boolean;
+BEGIN
+  checked_tenant_id:=CASE WHEN TG_OP='DELETE' THEN OLD.tenant_id ELSE NEW.tenant_id END;
+  checked_reference_id:=CASE WHEN TG_OP='DELETE' THEN OLD.id ELSE NEW.id END;
+  reference_invalid:=TG_OP='DELETE';
+
+  IF TG_TABLE_NAME='work_tasks' THEN
+    IF TG_OP<>'DELETE' THEN
+      reference_invalid:=NEW.deleted IS NOT NULL OR NEW.status NOT IN('assigned','in_progress')
+        OR NEW.assigned_user_id IS NULL OR NEW.lease_expires_at<=statement_timestamp();
+    END IF;
+    IF EXISTS(SELECT 1 FROM public.labor_activities activity
+      JOIN public.employees employee ON employee.tenant_id=activity.tenant_id
+        AND employee.id=activity.employee_id
+      WHERE activity.tenant_id=checked_tenant_id AND activity.reference_type='work_task'
+        AND activity.reference_id=checked_reference_id AND activity.status='active'
+        AND (reference_invalid OR TG_OP<>'DELETE'
+          AND NEW.assigned_user_id IS DISTINCT FROM employee.user_id)) THEN
+      RAISE EXCEPTION 'work task cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='pick_tasks' THEN
+    IF TG_OP<>'DELETE' THEN
+      reference_invalid:=NEW.status<>'in_progress' OR NEW.assigned_user_id IS NULL
+        OR NEW.lease_expires_at<=statement_timestamp();
+    END IF;
+    IF EXISTS(SELECT 1 FROM public.labor_activities activity
+      JOIN public.employees employee ON employee.tenant_id=activity.tenant_id
+        AND employee.id=activity.employee_id
+      WHERE activity.tenant_id=checked_tenant_id AND activity.reference_type='pick_task'
+        AND activity.reference_id=checked_reference_id AND activity.status='active'
+        AND (reference_invalid OR TG_OP<>'DELETE'
+          AND NEW.assigned_user_id IS DISTINCT FROM employee.user_id)) THEN
+      RAISE EXCEPTION 'pick task cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='loads' THEN
+    IF TG_OP<>'DELETE' THEN
+      reference_invalid:=NEW.deleted IS NOT NULL OR NEW.status NOT IN('arrived','receiving');
+    END IF;
+    IF reference_invalid AND (EXISTS(SELECT 1 FROM public.labor_activities activity
+        WHERE activity.tenant_id=checked_tenant_id
+          AND activity.reference_type='inbound_load'
+          AND activity.reference_id=checked_reference_id AND activity.status='active')
+      OR EXISTS(SELECT 1 FROM public.labor_activities activity
+        JOIN public.customer_returns customer_return
+          ON customer_return.tenant_id=activity.tenant_id
+          AND customer_return.id=activity.reference_id
+        JOIN public.inbound_asns asn ON asn.tenant_id=customer_return.tenant_id
+          AND asn.id=customer_return.inbound_asn_id
+        WHERE activity.tenant_id=checked_tenant_id
+          AND activity.reference_type='customer_return' AND asn.load_id=checked_reference_id
+          AND activity.status='active')) THEN
+      RAISE EXCEPTION 'inbound load cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='inbound_asns' THEN
+    IF TG_OP<>'DELETE' THEN reference_invalid:=NEW.status<>'planned'; END IF;
+    IF reference_invalid AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      JOIN public.customer_returns customer_return
+        ON customer_return.tenant_id=activity.tenant_id
+        AND customer_return.id=activity.reference_id
+      WHERE activity.tenant_id=checked_tenant_id
+        AND activity.reference_type='customer_return'
+        AND customer_return.inbound_asn_id=checked_reference_id
+        AND activity.status='active') THEN
+      RAISE EXCEPTION 'customer return ASN cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='packing_sessions' THEN
+    IF TG_OP<>'DELETE' THEN reference_invalid:=NEW.state<>'open'; END IF;
+    IF reference_invalid AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=checked_tenant_id
+        AND activity.reference_type='packing_session'
+        AND activity.reference_id=checked_reference_id AND activity.status='active') THEN
+      RAISE EXCEPTION 'packing session cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='shipments' THEN
+    IF TG_OP<>'DELETE' THEN
+      reference_invalid:=NEW.state NOT IN('awaiting manifest','manifested','partially departed');
+    END IF;
+    IF reference_invalid AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=checked_tenant_id AND activity.reference_type='shipment'
+        AND activity.reference_id=checked_reference_id AND activity.status='active') THEN
+      RAISE EXCEPTION 'shipment cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='yard_visits' THEN
+    IF TG_OP<>'DELETE' THEN reference_invalid:=NEW.status NOT IN('at_door','loading','unloading'); END IF;
+    IF reference_invalid AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=checked_tenant_id AND activity.reference_type='yard_visit'
+        AND activity.reference_id=checked_reference_id AND activity.status='active') THEN
+      RAISE EXCEPTION 'yard visit cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='vendor_returns' THEN
+    IF TG_OP<>'DELETE' THEN reference_invalid:=NEW.status<>'released'; END IF;
+    IF reference_invalid AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=checked_tenant_id AND activity.reference_type='vendor_return'
+        AND activity.reference_id=checked_reference_id AND activity.status='active') THEN
+      RAISE EXCEPTION 'vendor return cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  ELSIF TG_TABLE_NAME='value_added_work_orders' THEN
+    IF TG_OP<>'DELETE' THEN reference_invalid:=NEW.status<>'released'; END IF;
+    IF reference_invalid AND EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=checked_tenant_id
+        AND activity.reference_type='value_added_work_order'
+        AND activity.reference_id=checked_reference_id AND activity.status='active') THEN
+      RAISE EXCEPTION 'value-added work cannot detach active labor' USING ERRCODE='55000';
+    END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.require_labor_dependency_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_tenant_id bigint; checked_employee_id bigint; checked_facility_id bigint;
+BEGIN
+  IF TG_TABLE_NAME='employees' THEN
+    IF NEW.deleted IS NULL AND NEW.terminated IS NULL THEN RETURN NULL; END IF;
+    IF NEW.user_id IS NOT NULL THEN
+      RAISE EXCEPTION 'employee identity must be unlinked before offboarding'
+        USING ERRCODE='55000';
+    END IF;
+    checked_tenant_id:=NEW.tenant_id;
+    checked_employee_id:=NEW.id;
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_timeline',
+      checked_tenant_id,checked_employee_id),0));
+  ELSIF TG_TABLE_NAME='employee_facilities' THEN
+    IF TG_OP='UPDATE' AND NEW.deleted IS NULL THEN RETURN NULL; END IF;
+    checked_tenant_id:=CASE WHEN TG_OP='DELETE' THEN OLD.tenant_id ELSE NEW.tenant_id END;
+    checked_employee_id:=CASE WHEN TG_OP='DELETE' THEN OLD.employee_id ELSE NEW.employee_id END;
+    checked_facility_id:=CASE WHEN TG_OP='DELETE' THEN OLD.facility_id ELSE NEW.facility_id END;
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_timeline',
+      checked_tenant_id,checked_employee_id),0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_facility',
+      checked_tenant_id,checked_facility_id),0));
+  ELSE
+    IF NEW.deleted IS NULL THEN RETURN NULL; END IF;
+    checked_tenant_id:=NEW.tenant_id;
+    checked_facility_id:=NEW.id;
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_facility',
+      checked_tenant_id,checked_facility_id),0));
+  END IF;
+
+  IF EXISTS(SELECT 1 FROM public.attendance_intervals attendance
+      WHERE attendance.tenant_id=checked_tenant_id AND attendance.status='open'
+        AND (checked_employee_id IS NULL OR attendance.employee_id=checked_employee_id)
+        AND (checked_facility_id IS NULL OR attendance.facility_id=checked_facility_id))
+    OR EXISTS(SELECT 1 FROM public.labor_activities activity
+      WHERE activity.tenant_id=checked_tenant_id AND activity.status='active'
+        AND (checked_employee_id IS NULL OR activity.employee_id=checked_employee_id)
+        AND (checked_facility_id IS NULL OR activity.facility_id=checked_facility_id)) THEN
+    RAISE EXCEPTION 'employee or facility cannot be retired while labor remains open'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.labor_user_has_supervise_permission(
+  checked_tenant_id bigint,checked_user_id bigint) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  WITH RECURSIVE granted_roles AS (
+    SELECT role.id,role.parent_id
+    FROM public.user_roles user_role
+    JOIN public.roles role ON role.tenant_id=user_role.tenant_id
+      AND role.id=user_role.role_id AND role.deleted IS NULL
+    WHERE user_role.tenant_id=checked_tenant_id AND user_role.user_id=checked_user_id
+      AND user_role.deleted IS NULL
+    UNION
+    SELECT parent.id,parent.parent_id
+    FROM granted_roles child
+    JOIN public.roles parent ON parent.tenant_id=checked_tenant_id
+      AND parent.id=child.parent_id AND parent.deleted IS NULL
+  )
+  SELECT EXISTS(
+    SELECT 1 FROM granted_roles role
+    JOIN public.role_permissions role_permission
+      ON role_permission.tenant_id=checked_tenant_id
+      AND role_permission.role_id=role.id AND role_permission.deleted IS NULL
+    JOIN public.permissions permission
+      ON permission.tenant_id=role_permission.tenant_id
+      AND permission.id=role_permission.permission_id AND permission.deleted IS NULL
+    WHERE upper(permission.name) IN('LABOR_SUPERVISE','ADMIN')
+  )
+$$;
+
+CREATE FUNCTION public.reject_labor_adjustment_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'labor adjustments are immutable' USING ERRCODE='23514';
+END $$;
+
+CREATE FUNCTION public.validate_attendance_adjustment_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE target record; latest record; has_latest boolean;
+  current_revision bigint; current_clocked_in_at timestamptz;
+  current_clocked_out_at timestamptz; current_paid_seconds bigint;
+BEGIN
+  SELECT attendance.* INTO target FROM public.attendance_intervals attendance
+  WHERE attendance.tenant_id=NEW.tenant_id AND attendance.id=NEW.attendance_interval_id
+  FOR SHARE;
+  IF NOT FOUND OR target.status<>'closed' THEN
+    RAISE EXCEPTION 'attendance correction requires a closed interval' USING ERRCODE='23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_timeline',
+    NEW.tenant_id,target.employee_id),0));
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','attendance_adjustment',
+    NEW.tenant_id,NEW.attendance_interval_id),0));
+
+  SELECT adjustment.* INTO latest FROM public.attendance_adjustments adjustment
+  WHERE adjustment.tenant_id=NEW.tenant_id
+    AND adjustment.attendance_interval_id=NEW.attendance_interval_id
+  ORDER BY adjustment.resulting_revision DESC,adjustment.id DESC LIMIT 1 FOR SHARE;
+  has_latest:=FOUND;
+  IF has_latest THEN
+    current_revision:=latest.resulting_revision;
+    current_clocked_in_at:=latest.corrected_clocked_in_at;
+    current_clocked_out_at:=latest.corrected_clocked_out_at;
+    current_paid_seconds:=latest.corrected_paid_seconds;
+  ELSE
+    current_revision:=target.revision;
+    current_clocked_in_at:=target.clocked_in_at;
+    current_clocked_out_at:=target.clocked_out_at;
+    current_paid_seconds:=target.paid_seconds;
+  END IF;
+
+  IF NEW.expected_revision<>current_revision
+    OR NEW.resulting_revision<>current_revision+1
+    OR NEW.supersedes_adjustment_id IS DISTINCT FROM
+      (CASE WHEN has_latest THEN latest.id ELSE NULL END)
+    OR NEW.before_clocked_in_at IS DISTINCT FROM current_clocked_in_at
+    OR NEW.before_clocked_out_at IS DISTINCT FROM current_clocked_out_at
+    OR NEW.before_paid_seconds IS DISTINCT FROM current_paid_seconds THEN
+    RAISE EXCEPTION 'attendance correction revision or before evidence is stale'
+      USING ERRCODE='40001';
+  END IF;
+  IF NEW.corrected_paid_seconds IS DISTINCT FROM trunc(EXTRACT(EPOCH FROM
+      NEW.corrected_clocked_out_at-NEW.corrected_clocked_in_at))::bigint
+    OR NEW.corrected_paid_seconds<=0 THEN
+    RAISE EXCEPTION 'attendance correction duration does not reconcile'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.adjusted_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.adjusted_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NEW.corrected_clocked_out_at>NEW.adjusted_at+INTERVAL '1 minute'
+    OR NOT public.labor_user_has_supervise_permission(
+      NEW.tenant_id,NEW.adjusted_by_user_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=NEW.tenant_id
+        AND membership.user_id=NEW.adjusted_by_user_id AND membership.deleted IS NULL) THEN
+    RAISE EXCEPTION 'attendance correction attribution is invalid' USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.employees employee
+      WHERE employee.tenant_id=NEW.tenant_id AND employee.id=target.employee_id
+        AND employee.hired<=NEW.corrected_clocked_in_at
+        AND (employee.terminated IS NULL
+          OR employee.terminated>=NEW.corrected_clocked_out_at)) THEN
+    RAISE EXCEPTION 'attendance correction falls outside employment' USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.attendance_intervals other
+      LEFT JOIN LATERAL (
+        SELECT correction.corrected_clocked_in_at,correction.corrected_clocked_out_at
+        FROM public.attendance_adjustments correction
+        WHERE correction.tenant_id=other.tenant_id
+          AND correction.attendance_interval_id=other.id
+        ORDER BY correction.resulting_revision DESC,correction.id DESC LIMIT 1
+      ) effective ON true
+      WHERE other.tenant_id=NEW.tenant_id AND other.employee_id=target.employee_id
+        AND other.id<>NEW.attendance_interval_id
+        AND COALESCE(effective.corrected_clocked_in_at,other.clocked_in_at)
+          <NEW.corrected_clocked_out_at
+        AND NEW.corrected_clocked_in_at<COALESCE(
+          effective.corrected_clocked_out_at,other.clocked_out_at,'infinity'::timestamptz)) THEN
+    RAISE EXCEPTION 'corrected attendance intervals cannot overlap' USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.labor_activities activity
+      LEFT JOIN LATERAL (
+        SELECT correction.corrected_started_at,correction.corrected_completed_at
+        FROM public.labor_activity_adjustments correction
+        WHERE correction.tenant_id=activity.tenant_id
+          AND correction.labor_activity_id=activity.id
+        ORDER BY correction.resulting_revision DESC,correction.id DESC LIMIT 1
+      ) effective ON true
+      WHERE activity.tenant_id=NEW.tenant_id
+        AND activity.attendance_interval_id=NEW.attendance_interval_id
+        AND (COALESCE(effective.corrected_started_at,activity.started_at)
+              <NEW.corrected_clocked_in_at
+          OR COALESCE(effective.corrected_completed_at,activity.completed_at)
+              >NEW.corrected_clocked_out_at)) THEN
+    RAISE EXCEPTION 'attendance correction cannot exclude recorded labor'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_labor_activity_adjustment_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE target record; latest record; has_latest boolean; current_revision bigint;
+  current_started_at timestamptz; current_completed_at timestamptz;
+  current_actual_seconds bigint;
+  current_quantity bigint; current_exception_seconds bigint;
+  current_exception_reason text; current_exception_note text;
+  current_exception_approved_by_user_id bigint; current_expected_seconds bigint;
+  current_efficiency_basis_points bigint; total_effective_quantity bigint;
+BEGIN
+  SELECT activity.* INTO target FROM public.labor_activities activity
+  WHERE activity.tenant_id=NEW.tenant_id AND activity.id=NEW.labor_activity_id FOR SHARE;
+  IF NOT FOUND OR target.status<>'completed' THEN
+    RAISE EXCEPTION 'labor correction requires a completed activity' USING ERRCODE='23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_timeline',
+    NEW.tenant_id,target.employee_id),0));
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_activity_adjustment',
+    NEW.tenant_id,NEW.labor_activity_id),0));
+  IF target.reference_type IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','labor_reference',
+      NEW.tenant_id,target.reference_type,target.reference_id),0));
+  END IF;
+
+  SELECT adjustment.* INTO latest FROM public.labor_activity_adjustments adjustment
+  WHERE adjustment.tenant_id=NEW.tenant_id
+    AND adjustment.labor_activity_id=NEW.labor_activity_id
+  ORDER BY adjustment.resulting_revision DESC,adjustment.id DESC LIMIT 1 FOR SHARE;
+  has_latest:=FOUND;
+  IF has_latest THEN
+    current_revision:=latest.resulting_revision;
+    current_started_at:=latest.corrected_started_at;
+    current_completed_at:=latest.corrected_completed_at;
+    current_actual_seconds:=latest.corrected_actual_seconds;
+    current_quantity:=latest.corrected_quantity;
+    current_exception_seconds:=latest.corrected_exception_seconds;
+    current_exception_reason:=latest.corrected_exception_reason;
+    current_exception_note:=latest.corrected_exception_note;
+    current_exception_approved_by_user_id:=latest.corrected_exception_approved_by_user_id;
+    current_expected_seconds:=latest.corrected_expected_seconds;
+    current_efficiency_basis_points:=latest.corrected_efficiency_basis_points;
+  ELSE
+    current_revision:=target.revision;
+    current_started_at:=target.started_at;
+    current_completed_at:=target.completed_at;
+    current_actual_seconds:=target.actual_seconds;
+    current_quantity:=target.completed_quantity;
+    current_exception_seconds:=target.exception_seconds;
+    current_exception_reason:=target.exception_reason;
+    current_exception_note:=target.exception_note;
+    current_exception_approved_by_user_id:=target.exception_approved_by_user_id;
+    current_expected_seconds:=target.expected_seconds;
+    current_efficiency_basis_points:=target.efficiency_basis_points;
+  END IF;
+
+  IF NEW.expected_revision<>current_revision
+    OR NEW.resulting_revision<>current_revision+1
+    OR NEW.supersedes_adjustment_id IS DISTINCT FROM
+      (CASE WHEN has_latest THEN latest.id ELSE NULL END)
+    OR NEW.before_started_at IS DISTINCT FROM current_started_at
+    OR NEW.before_completed_at IS DISTINCT FROM current_completed_at
+    OR NEW.before_actual_seconds IS DISTINCT FROM current_actual_seconds
+    OR NEW.before_quantity IS DISTINCT FROM current_quantity
+    OR NEW.before_exception_seconds IS DISTINCT FROM current_exception_seconds
+    OR NEW.before_exception_reason IS DISTINCT FROM current_exception_reason
+    OR NEW.before_exception_note IS DISTINCT FROM current_exception_note
+    OR NEW.before_exception_approved_by_user_id IS DISTINCT FROM
+      current_exception_approved_by_user_id
+    OR NEW.before_expected_seconds IS DISTINCT FROM current_expected_seconds
+    OR NEW.before_efficiency_basis_points IS DISTINCT FROM current_efficiency_basis_points THEN
+    RAISE EXCEPTION 'labor correction revision or before evidence is stale'
+      USING ERRCODE='40001';
+  END IF;
+  IF NEW.corrected_actual_seconds IS DISTINCT FROM trunc(EXTRACT(EPOCH FROM
+      NEW.corrected_completed_at-NEW.corrected_started_at))::bigint
+    OR NEW.corrected_actual_seconds<=0 THEN
+    RAISE EXCEPTION 'corrected labor duration does not reconcile' USING ERRCODE='23514';
+  END IF;
+  IF target.activity_kind IN('receiving','putaway','replenishment','picking','packing','shipping',
+      'cycle_count','inventory_relocation','cross_dock','yard','customer_return','vendor_return',
+      'value_added_work') AND NEW.corrected_quantity IS NULL
+    OR target.activity_kind IN('break','meeting','training','maintenance','delay','other_indirect')
+      AND NEW.corrected_quantity IS NOT NULL THEN
+    RAISE EXCEPTION 'corrected labor quantity does not match activity kind'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.corrected_exception_seconds>NEW.corrected_actual_seconds
+    OR NEW.corrected_exception_seconds=0 AND (
+      NEW.corrected_exception_reason IS NOT NULL OR NEW.corrected_exception_note IS NOT NULL
+      OR NEW.corrected_exception_approved_by_user_id IS NOT NULL)
+    OR NEW.corrected_exception_seconds>0 AND (
+      NEW.corrected_exception_reason IS NULL OR NEW.corrected_exception_note IS NULL
+      OR NEW.corrected_exception_approved_by_user_id<>NEW.adjusted_by_user_id) THEN
+    RAISE EXCEPTION 'corrected labor exception evidence is invalid' USING ERRCODE='23514';
+  END IF;
+  IF target.labor_standard_id IS NULL AND (
+      NEW.corrected_expected_seconds IS NOT NULL
+      OR NEW.corrected_efficiency_basis_points IS NOT NULL)
+    OR target.labor_standard_id IS NOT NULL AND (
+      NEW.corrected_expected_seconds IS DISTINCT FROM
+        target.standard_setup_seconds+target.standard_seconds_per_unit*NEW.corrected_quantity
+      OR NEW.corrected_efficiency_basis_points IS DISTINCT FROM LEAST(1000000,
+        NEW.corrected_expected_seconds*10000/NEW.corrected_actual_seconds)) THEN
+    RAISE EXCEPTION 'corrected labor performance does not reconcile with frozen standard'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.adjusted_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.adjusted_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NEW.corrected_completed_at>NEW.adjusted_at+INTERVAL '1 minute'
+    OR NOT public.labor_user_has_supervise_permission(
+      NEW.tenant_id,NEW.adjusted_by_user_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=NEW.tenant_id
+        AND membership.user_id=NEW.adjusted_by_user_id AND membership.deleted IS NULL) THEN
+    RAISE EXCEPTION 'labor correction attribution is invalid' USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.attendance_intervals attendance
+      LEFT JOIN LATERAL (
+        SELECT correction.corrected_clocked_in_at,correction.corrected_clocked_out_at
+        FROM public.attendance_adjustments correction
+        WHERE correction.tenant_id=attendance.tenant_id
+          AND correction.attendance_interval_id=attendance.id
+        ORDER BY correction.resulting_revision DESC,correction.id DESC LIMIT 1
+      ) effective ON true
+      WHERE attendance.tenant_id=NEW.tenant_id
+        AND attendance.id=target.attendance_interval_id
+        AND NEW.corrected_started_at>=COALESCE(
+          effective.corrected_clocked_in_at,attendance.clocked_in_at)
+        AND NEW.corrected_completed_at<=COALESCE(
+          effective.corrected_clocked_out_at,attendance.clocked_out_at)) THEN
+    RAISE EXCEPTION 'corrected labor must remain within effective attendance'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.labor_activities other
+      LEFT JOIN LATERAL (
+        SELECT correction.corrected_started_at,correction.corrected_completed_at
+        FROM public.labor_activity_adjustments correction
+        WHERE correction.tenant_id=other.tenant_id
+          AND correction.labor_activity_id=other.id
+        ORDER BY correction.resulting_revision DESC,correction.id DESC LIMIT 1
+      ) effective ON true
+      WHERE other.tenant_id=NEW.tenant_id AND other.employee_id=target.employee_id
+        AND other.id<>NEW.labor_activity_id
+        AND COALESCE(effective.corrected_started_at,other.started_at)<NEW.corrected_completed_at
+        AND NEW.corrected_started_at<COALESCE(
+          effective.corrected_completed_at,other.completed_at,'infinity'::timestamptz)) THEN
+    RAISE EXCEPTION 'corrected labor activities cannot overlap' USING ERRCODE='23514';
+  END IF;
+  IF target.reference_type IS NOT NULL THEN
+    SELECT COALESCE(SUM(CASE WHEN activity.id=NEW.labor_activity_id
+          THEN NEW.corrected_quantity
+          ELSE COALESCE(effective.corrected_quantity,activity.completed_quantity) END),0)::bigint
+      INTO total_effective_quantity
+    FROM public.labor_activities activity
+    LEFT JOIN LATERAL (
+      SELECT correction.corrected_quantity
+      FROM public.labor_activity_adjustments correction
+      WHERE correction.tenant_id=activity.tenant_id
+        AND correction.labor_activity_id=activity.id
+      ORDER BY correction.resulting_revision DESC,correction.id DESC LIMIT 1
+    ) effective ON true
+    WHERE activity.tenant_id=target.tenant_id AND activity.facility_id=target.facility_id
+      AND activity.inventory_owner_id IS NOT DISTINCT FROM target.inventory_owner_id
+      AND activity.activity_kind=target.activity_kind
+      AND activity.quantity_basis=target.quantity_basis
+      AND activity.reference_type=target.reference_type AND activity.reference_id=target.reference_id
+      AND activity.status='completed';
+    IF NEW.corrected_quantity>target.reference_quantity
+      OR total_effective_quantity>target.reference_quantity THEN
+      RAISE EXCEPTION 'corrected labor quantity exceeds canonical work evidence'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER labor_standards_validate BEFORE INSERT ON public.labor_standards
+FOR EACH ROW EXECUTE FUNCTION public.validate_labor_standard_insert();
+CREATE TRIGGER employee_certifications_validate BEFORE INSERT ON public.employee_certifications
+FOR EACH ROW EXECUTE FUNCTION public.validate_employee_certification_insert();
+CREATE TRIGGER labor_standards_immutable BEFORE UPDATE OR DELETE ON public.labor_standards
+FOR EACH ROW EXECUTE FUNCTION public.guard_labor_standard_mutation();
+CREATE TRIGGER labor_skills_guard BEFORE UPDATE OR DELETE ON public.labor_skills
+FOR EACH ROW EXECUTE FUNCTION public.guard_labor_skill_mutation();
+CREATE TRIGGER equipment_classes_guard BEFORE UPDATE OR DELETE ON public.equipment_classes
+FOR EACH ROW EXECUTE FUNCTION public.guard_equipment_class_mutation();
+CREATE TRIGGER equipment_assets_guard BEFORE INSERT OR UPDATE OR DELETE ON public.equipment_assets
+FOR EACH ROW EXECUTE FUNCTION public.guard_equipment_asset_mutation();
+CREATE TRIGGER employee_certifications_guard BEFORE UPDATE OR DELETE ON public.employee_certifications
+FOR EACH ROW EXECUTE FUNCTION public.guard_employee_certification_mutation();
+CREATE TRIGGER attendance_intervals_guard BEFORE INSERT OR UPDATE OR DELETE ON public.attendance_intervals
+FOR EACH ROW EXECUTE FUNCTION public.guard_attendance_mutation();
+CREATE TRIGGER labor_activities_guard BEFORE INSERT OR UPDATE OR DELETE ON public.labor_activities
+FOR EACH ROW EXECUTE FUNCTION public.guard_labor_activity_mutation();
+CREATE TRIGGER attendance_adjustments_validate BEFORE INSERT ON public.attendance_adjustments
+FOR EACH ROW EXECUTE FUNCTION public.validate_attendance_adjustment_insert();
+CREATE TRIGGER attendance_adjustments_immutable BEFORE UPDATE OR DELETE
+ON public.attendance_adjustments FOR EACH ROW
+EXECUTE FUNCTION public.reject_labor_adjustment_mutation();
+CREATE TRIGGER labor_activity_adjustments_validate BEFORE INSERT
+ON public.labor_activity_adjustments FOR EACH ROW
+EXECUTE FUNCTION public.validate_labor_activity_adjustment_insert();
+CREATE TRIGGER labor_activity_adjustments_immutable BEFORE UPDATE OR DELETE
+ON public.labor_activity_adjustments FOR EACH ROW
+EXECUTE FUNCTION public.reject_labor_adjustment_mutation();
+CREATE CONSTRAINT TRIGGER attendance_intervals_require_integrity
+AFTER INSERT OR UPDATE ON public.attendance_intervals DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_labor_integrity();
+CREATE CONSTRAINT TRIGGER labor_activities_require_integrity
+AFTER INSERT OR UPDATE ON public.labor_activities DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_labor_integrity();
+CREATE CONSTRAINT TRIGGER equipment_assets_require_integrity
+AFTER INSERT OR UPDATE ON public.equipment_assets DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_labor_integrity();
+CREATE CONSTRAINT TRIGGER employees_preserve_active_labor
+AFTER UPDATE OF deleted,terminated ON public.employees DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_labor_dependency_integrity();
+CREATE CONSTRAINT TRIGGER employee_facilities_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.employee_facilities DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_labor_dependency_integrity();
+CREATE CONSTRAINT TRIGGER facilities_preserve_active_labor
+AFTER UPDATE OF deleted ON public.facilities DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_labor_dependency_integrity();
+CREATE CONSTRAINT TRIGGER work_tasks_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.work_tasks DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER pick_tasks_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.pick_tasks DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER loads_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.loads DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER inbound_asns_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.inbound_asns DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER packing_sessions_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.packing_sessions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER shipments_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.shipments DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER yard_visits_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.yard_visits DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER vendor_returns_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.vendor_returns DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+CREATE CONSTRAINT TRIGGER value_added_work_preserve_active_labor
+AFTER UPDATE OR DELETE ON public.value_added_work_orders DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_labor_reference_integrity();
+
+DO $$ DECLARE table_name text; BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'labor_skills','employee_certifications','equipment_classes','equipment_assets',
+    'labor_standards','attendance_intervals','labor_activities',
+    'attendance_adjustments','labor_activity_adjustments'
+  ] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',table_name);
+    EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',table_name);
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I USING (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint) WITH CHECK (tenant_id=NULLIF(current_setting(''wareboxes.tenant_id'',true),'''')::bigint)',
+      table_name||'_tenant_isolation',table_name);
+  END LOOP;
+END $$;
+
+GRANT SELECT,INSERT ON public.labor_skills TO wareboxes_app;
+GRANT UPDATE(name,certification_required,active,revision,configured_by_user_id,configured_at)
+  ON public.labor_skills TO wareboxes_app;
+GRANT SELECT,INSERT ON public.employee_certifications TO wareboxes_app;
+GRANT UPDATE(revision,revoked_by_user_id,revoked_at,revocation_note)
+  ON public.employee_certifications TO wareboxes_app;
+GRANT SELECT,INSERT ON public.equipment_classes TO wareboxes_app;
+GRANT UPDATE(name,required_skill_id,active,revision,configured_by_user_id,configured_at)
+  ON public.equipment_classes TO wareboxes_app;
+GRANT SELECT,INSERT ON public.equipment_assets TO wareboxes_app;
+GRANT UPDATE(status,assigned_employee_id,revision,status_note,status_changed_by_user_id,status_changed_at)
+  ON public.equipment_assets TO wareboxes_app;
+GRANT SELECT,INSERT ON public.labor_standards TO wareboxes_app;
+GRANT UPDATE(effective_until,retired_by_user_id,retired_at)
+  ON public.labor_standards TO wareboxes_app;
+GRANT SELECT,INSERT ON public.attendance_intervals TO wareboxes_app;
+GRANT UPDATE(status,revision,clocked_out_at,paid_seconds,clock_out_note,clocked_out_by_user_id)
+  ON public.attendance_intervals TO wareboxes_app;
+GRANT SELECT,INSERT ON public.labor_activities TO wareboxes_app;
+GRANT UPDATE(status,revision,completed_at,actual_seconds,exception_seconds,completed_quantity,
+  exception_reason,exception_note,exception_approved_by_user_id,
+  expected_seconds,efficiency_basis_points,completed_by_user_id,cancelled_by_user_id,note)
+  ON public.labor_activities TO wareboxes_app;
+GRANT SELECT,INSERT ON public.attendance_adjustments TO wareboxes_app;
+GRANT SELECT,INSERT ON public.labor_activity_adjustments TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.labor_skills_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.employee_certifications_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.equipment_classes_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.equipment_assets_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.labor_standards_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.attendance_intervals_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.labor_activities_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.attendance_adjustments_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.labor_activity_adjustments_id_seq TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.resolve_labor_reference_quantity(bigint,text,text,bigint)
+  TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.resolve_labor_reference_quantity(bigint,text,text,bigint)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_labor_standard_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_employee_certification_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_labor_standard_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_employee_certification_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_labor_skill_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_equipment_class_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_equipment_asset_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_attendance_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_labor_activity_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_labor_integrity() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_labor_dependency_integrity() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_active_labor_reference_integrity() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.labor_user_has_supervise_permission(bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_labor_adjustment_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_attendance_adjustment_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_labor_activity_adjustment_insert() FROM PUBLIC;
+
+-- M4 advisory slotting: versioned configuration, immutable run evidence, and
+-- supervisor decisions that create typed relocation work without moving stock.
+CREATE TABLE public.slotting_profiles (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  mode text NOT NULL,
+  demand_lookback_days bigint NOT NULL,
+  demand_weight bigint NOT NULL,
+  travel_weight bigint NOT NULL,
+  activity_weight bigint NOT NULL,
+  minimum_demand_quantity bigint NOT NULL,
+  max_recommendations bigint NOT NULL,
+  default_task_priority bigint NOT NULL,
+  revision bigint NOT NULL,
+  supersedes_slotting_profile_id bigint,
+  effective_from timestamptz NOT NULL,
+  effective_to timestamptz,
+  configured_by_user_id bigint NOT NULL,
+  configured_at timestamptz NOT NULL,
+  UNIQUE (tenant_id,id),
+  UNIQUE (tenant_id,inventory_owner_id,facility_id,id),
+  UNIQUE (tenant_id,inventory_owner_id,facility_id,revision),
+  CHECK (mode IN ('enabled','disabled')),
+  CHECK (demand_lookback_days BETWEEN 1 AND 365),
+  CHECK (demand_weight BETWEEN 1 AND 10000),
+  CHECK (travel_weight BETWEEN 1 AND 10000),
+  CHECK (activity_weight BETWEEN 1 AND 10000),
+  CHECK (minimum_demand_quantity>0),
+  CHECK (max_recommendations BETWEEN 1 AND 1000),
+  CHECK (default_task_priority BETWEEN 0 AND 65535),
+  CHECK (revision>0 AND (
+    revision=1 AND supersedes_slotting_profile_id IS NULL
+    OR revision>1 AND supersedes_slotting_profile_id IS NOT NULL)),
+  CHECK (configured_at=effective_from),
+  CHECK (effective_to IS NULL OR effective_to>effective_from),
+  FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+  FOREIGN KEY (tenant_id,inventory_owner_id)
+    REFERENCES public.inventory_owners(tenant_id,id),
+  FOREIGN KEY (tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY (tenant_id,configured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,supersedes_slotting_profile_id)
+    REFERENCES public.slotting_profiles(tenant_id,inventory_owner_id,facility_id,id)
+);
+
+CREATE UNIQUE INDEX slotting_profiles_one_active_scope_idx
+ON public.slotting_profiles(tenant_id,inventory_owner_id,facility_id)
+WHERE effective_to IS NULL;
+CREATE INDEX slotting_profiles_page_idx
+ON public.slotting_profiles(tenant_id,configured_at DESC,id DESC);
+CREATE INDEX slotting_profiles_scope_history_idx
+ON public.slotting_profiles(
+  tenant_id,inventory_owner_id,facility_id,revision DESC,id DESC);
+
+CREATE TABLE public.slotting_runs (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  slotting_profile_id bigint NOT NULL,
+  profile_revision bigint NOT NULL,
+  demand_window_started_at timestamptz NOT NULL,
+  input_snapshot_at timestamptz NOT NULL,
+  configuration_snapshot jsonb NOT NULL,
+  candidate_count bigint NOT NULL,
+  recommendation_count bigint NOT NULL,
+  generated_by_user_id bigint NOT NULL,
+  generated_at timestamptz NOT NULL,
+  UNIQUE (tenant_id,id),
+  UNIQUE (tenant_id,inventory_owner_id,facility_id,id),
+  CHECK (profile_revision>0),
+  CHECK (demand_window_started_at<input_snapshot_at),
+  CHECK (input_snapshot_at=generated_at),
+  CHECK (jsonb_typeof(configuration_snapshot)='object'),
+  CHECK (candidate_count>=0 AND recommendation_count>=0
+    AND recommendation_count<=candidate_count AND recommendation_count<=1000),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,slotting_profile_id)
+    REFERENCES public.slotting_profiles(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY (tenant_id,generated_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE INDEX slotting_runs_scope_page_idx
+ON public.slotting_runs(
+  tenant_id,inventory_owner_id,facility_id,generated_at DESC,id DESC);
+
+CREATE TABLE public.slotting_recommendations (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  slotting_run_id bigint NOT NULL,
+  source_inventory_balance_id bigint NOT NULL,
+  item_id bigint NOT NULL,
+  item_description text,
+  uom text NOT NULL,
+  source_location_id bigint NOT NULL,
+  source_location_label text NOT NULL,
+  source_zone_code text NOT NULL,
+  destination_location_id bigint NOT NULL,
+  destination_location_label text NOT NULL,
+  destination_zone_code text NOT NULL,
+  item_storage_policy_id bigint NOT NULL,
+  item_storage_policy_revision bigint NOT NULL,
+  recommended_quantity bigint NOT NULL,
+  reason text NOT NULL,
+  demand_score bigint NOT NULL,
+  travel_score bigint NOT NULL,
+  activity_score bigint NOT NULL,
+  total_score bigint NOT NULL,
+  outstanding_demand_quantity bigint NOT NULL,
+  historical_pick_quantity bigint NOT NULL,
+  historical_pick_count bigint NOT NULL,
+  source_travel_sequence bigint NOT NULL,
+  destination_travel_sequence bigint NOT NULL,
+  source_on_hand bigint NOT NULL,
+  source_movable_quantity bigint NOT NULL,
+  destination_on_hand bigint NOT NULL,
+  destination_inbound_planned_quantity bigint NOT NULL,
+  destination_capacity bigint,
+  status text NOT NULL,
+  revision bigint NOT NULL,
+  decided_by_user_id bigint,
+  decided_at timestamptz,
+  dismissal_reason text,
+  dismissal_note text,
+  inventory_relocation_task_id bigint,
+  created_at timestamptz NOT NULL,
+  UNIQUE (tenant_id,id),
+  CHECK (source_location_id<>destination_location_id),
+  CHECK (uom=btrim(uom) AND uom<>'' AND char_length(uom)<=32),
+  CHECK (source_location_label=btrim(source_location_label)
+    AND source_location_label<>'' AND char_length(source_location_label)<=200),
+  CHECK (destination_location_label=btrim(destination_location_label)
+    AND destination_location_label<>'' AND char_length(destination_location_label)<=200),
+  CHECK (source_zone_code=upper(btrim(source_zone_code)) AND source_zone_code<>''),
+  CHECK (destination_zone_code=upper(btrim(destination_zone_code))
+    AND destination_zone_code<>''),
+  CHECK (item_storage_policy_revision>0),
+  CHECK (recommended_quantity>0),
+  CHECK (reason IN ('forward_pick_demand','travel_reduction','capacity_rebalance')),
+  CHECK (demand_score>=0 AND travel_score>0 AND activity_score>=0
+    AND total_score=demand_score+travel_score+activity_score),
+  CHECK (outstanding_demand_quantity>=0 AND historical_pick_quantity>=0
+    AND historical_pick_count>=0),
+  CHECK (source_travel_sequence>destination_travel_sequence
+    AND destination_travel_sequence>=0),
+  CHECK (source_on_hand>0 AND source_movable_quantity>0
+    AND source_movable_quantity<=source_on_hand
+    AND recommended_quantity<=source_movable_quantity),
+  CHECK (destination_on_hand>=0 AND destination_inbound_planned_quantity>=0 AND (
+    destination_capacity IS NULL OR destination_capacity>0
+      AND destination_on_hand+destination_inbound_planned_quantity
+        +recommended_quantity<=destination_capacity)),
+  CHECK (status IN ('pending','accepted','dismissed')),
+  CHECK (revision>0),
+  CHECK (dismissal_reason IS NULL OR dismissal_reason IN (
+    'capacity_changed','operational_constraint','item_strategy','stale_evidence',
+    'duplicate_work','other')),
+  CHECK (dismissal_note IS NULL OR dismissal_note=btrim(dismissal_note)
+    AND dismissal_note<>'' AND char_length(dismissal_note)<=500),
+  CHECK (dismissal_reason<>'other' OR dismissal_note IS NOT NULL),
+  CHECK (
+    status='pending' AND revision=1 AND decided_by_user_id IS NULL
+      AND decided_at IS NULL AND dismissal_reason IS NULL AND dismissal_note IS NULL
+      AND inventory_relocation_task_id IS NULL
+    OR status='accepted' AND revision=2 AND decided_by_user_id IS NOT NULL
+      AND decided_at IS NOT NULL AND dismissal_reason IS NULL AND dismissal_note IS NULL
+      AND inventory_relocation_task_id IS NOT NULL
+    OR status='dismissed' AND revision=2 AND decided_by_user_id IS NOT NULL
+      AND decided_at IS NOT NULL AND dismissal_reason IS NOT NULL
+      AND inventory_relocation_task_id IS NULL),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,slotting_run_id)
+    REFERENCES public.slotting_runs(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY (tenant_id,source_inventory_balance_id)
+    REFERENCES public.inventory_balances(tenant_id,id),
+  FOREIGN KEY (tenant_id,item_id) REFERENCES public.items(tenant_id,id),
+  FOREIGN KEY (tenant_id,facility_id,source_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,facility_id,destination_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,item_storage_policy_id)
+    REFERENCES public.item_storage_policies(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY (tenant_id,decided_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY (tenant_id,inventory_relocation_task_id)
+    REFERENCES public.work_tasks(tenant_id,id)
+);
+
+CREATE UNIQUE INDEX slotting_recommendations_one_pending_source_idx
+ON public.slotting_recommendations(tenant_id,source_inventory_balance_id)
+WHERE status='pending';
+CREATE INDEX slotting_recommendations_page_idx
+ON public.slotting_recommendations(tenant_id,total_score DESC,id DESC);
+CREATE INDEX slotting_recommendations_scope_page_idx
+ON public.slotting_recommendations(
+  tenant_id,inventory_owner_id,facility_id,status,total_score DESC,id DESC);
+CREATE INDEX slotting_recommendations_run_idx
+ON public.slotting_recommendations(tenant_id,slotting_run_id,total_score DESC,id DESC);
+
+CREATE FUNCTION public.slotting_user_has_supervisor_permission(
+  checked_tenant_id bigint,checked_user_id bigint) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  WITH RECURSIVE granted_roles AS (
+    SELECT role.id,role.parent_id
+    FROM public.user_roles user_role
+    JOIN public.roles role ON role.tenant_id=user_role.tenant_id
+      AND role.id=user_role.role_id AND role.deleted IS NULL
+    WHERE user_role.tenant_id=checked_tenant_id AND user_role.user_id=checked_user_id
+      AND user_role.deleted IS NULL
+    UNION
+    SELECT parent.id,parent.parent_id
+    FROM granted_roles child
+    JOIN public.roles parent ON parent.tenant_id=checked_tenant_id
+      AND parent.id=child.parent_id AND parent.deleted IS NULL
+  )
+  SELECT EXISTS(
+    SELECT 1 FROM granted_roles role
+    JOIN public.role_permissions role_permission
+      ON role_permission.tenant_id=checked_tenant_id
+      AND role_permission.role_id=role.id AND role_permission.deleted IS NULL
+    JOIN public.permissions permission
+      ON permission.tenant_id=role_permission.tenant_id
+      AND permission.id=role_permission.permission_id AND permission.deleted IS NULL
+    WHERE upper(permission.name) IN('WMS_SUPERVISOR','ADMIN')
+  )
+$$;
+
+CREATE FUNCTION public.slotting_destination_planned_quantity(
+  checked_tenant_id bigint,checked_inventory_owner_id bigint,
+  checked_facility_id bigint,checked_location_id bigint,
+  checked_item_id bigint,checked_uom text) RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  SELECT COALESCE(sum(inbound.quantity),0)::bigint FROM (
+    SELECT putaway.planned_quantity AS quantity
+    FROM public.putaway_tasks putaway
+    JOIN public.inventory_balances source
+      ON source.tenant_id=putaway.tenant_id
+      AND source.id=putaway.source_inventory_balance_id
+    WHERE putaway.tenant_id=checked_tenant_id
+      AND putaway.inventory_owner_id=checked_inventory_owner_id
+      AND putaway.facility_id=checked_facility_id
+      AND putaway.destination_location_id=checked_location_id
+      AND putaway.item_id=checked_item_id AND source.uom=checked_uom
+      AND putaway.closed_at IS NULL
+    UNION ALL
+    SELECT relocation.planned_quantity
+    FROM public.inventory_relocation_tasks relocation
+    WHERE relocation.tenant_id=checked_tenant_id
+      AND relocation.inventory_owner_id=checked_inventory_owner_id
+      AND relocation.facility_id=checked_facility_id
+      AND relocation.destination_location_id=checked_location_id
+      AND relocation.item_id=checked_item_id AND relocation.uom=checked_uom
+      AND relocation.workflow='loose_balance' AND relocation.closed_at IS NULL
+    UNION ALL
+    SELECT replenishment.planned_qty
+    FROM public.replenishment_tasks replenishment
+    WHERE replenishment.tenant_id=checked_tenant_id
+      AND replenishment.inventory_owner_id=checked_inventory_owner_id
+      AND replenishment.facility_id=checked_facility_id
+      AND replenishment.destination_location_id=checked_location_id
+      AND replenishment.item_id=checked_item_id AND replenishment.uom=checked_uom
+      AND replenishment.closed_at IS NULL
+    UNION ALL
+    SELECT cross_dock.planned_quantity
+    FROM public.cross_dock_tasks cross_dock
+    WHERE cross_dock.tenant_id=checked_tenant_id
+      AND cross_dock.inventory_owner_id=checked_inventory_owner_id
+      AND cross_dock.facility_id=checked_facility_id
+      AND cross_dock.destination_location_id=checked_location_id
+      AND cross_dock.item_id=checked_item_id AND cross_dock.uom=checked_uom
+      AND cross_dock.closed_at IS NULL
+    UNION ALL
+    SELECT content.planned_quantity
+    FROM public.license_plate_putaway_tasks task
+    JOIN public.license_plate_putaway_task_contents content
+      ON content.tenant_id=task.tenant_id AND content.task_id=task.task_id
+    WHERE task.tenant_id=checked_tenant_id
+      AND task.inventory_owner_id=checked_inventory_owner_id
+      AND task.facility_id=checked_facility_id
+      AND task.destination_location_id=checked_location_id
+      AND content.item_id=checked_item_id AND content.uom=checked_uom
+      AND task.closed_at IS NULL
+  ) inbound
+$$;
+
+CREATE FUNCTION public.validate_slotting_profile_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE predecessor public.slotting_profiles%ROWTYPE;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','slotting_profile',
+    NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id),0));
+  IF NOT EXISTS(SELECT 1 FROM public.inventory_owner_facilities assignment
+      JOIN public.inventory_owners owner ON owner.tenant_id=assignment.tenant_id
+        AND owner.id=assignment.inventory_owner_id AND owner.deleted IS NULL
+      JOIN public.facilities facility ON facility.tenant_id=assignment.tenant_id
+        AND facility.id=assignment.facility_id AND facility.deleted IS NULL
+      WHERE assignment.tenant_id=NEW.tenant_id
+        AND assignment.inventory_owner_id=NEW.inventory_owner_id
+        AND assignment.facility_id=NEW.facility_id AND assignment.deleted IS NULL)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=NEW.tenant_id
+        AND membership.user_id=NEW.configured_by_user_id AND membership.deleted IS NULL)
+    OR NEW.configured_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.configured_by_user_id) THEN
+    RAISE EXCEPTION 'slotting profile requires active scope and membership'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.supersedes_slotting_profile_id IS NULL THEN
+    IF NEW.revision<>1 OR EXISTS(SELECT 1 FROM public.slotting_profiles existing
+      WHERE existing.tenant_id=NEW.tenant_id
+        AND existing.inventory_owner_id=NEW.inventory_owner_id
+        AND existing.facility_id=NEW.facility_id) THEN
+      RAISE EXCEPTION 'initial slotting profile revision is invalid' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  SELECT * INTO predecessor FROM public.slotting_profiles profile
+  WHERE profile.tenant_id=NEW.tenant_id
+    AND profile.inventory_owner_id=NEW.inventory_owner_id
+    AND profile.facility_id=NEW.facility_id
+    AND profile.id=NEW.supersedes_slotting_profile_id FOR SHARE;
+  IF NOT FOUND OR predecessor.revision+1<>NEW.revision
+    OR predecessor.effective_to IS NULL
+    OR predecessor.effective_to<>NEW.effective_from
+    OR EXISTS(SELECT 1 FROM public.slotting_profiles newer
+      WHERE newer.tenant_id=NEW.tenant_id
+        AND newer.inventory_owner_id=NEW.inventory_owner_id
+        AND newer.facility_id=NEW.facility_id AND newer.revision>=NEW.revision) THEN
+    RAISE EXCEPTION 'slotting profile successor does not match closed predecessor'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_slotting_profile_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'slotting profiles are immutable' USING ERRCODE='23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':','slotting_profile',
+    OLD.tenant_id,OLD.inventory_owner_id,OLD.facility_id),0));
+  IF NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint IS NULL
+    OR NOT public.slotting_user_has_supervisor_permission(OLD.tenant_id,
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint)
+    OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+    OR NEW.mode<>OLD.mode OR NEW.demand_lookback_days<>OLD.demand_lookback_days
+    OR NEW.demand_weight<>OLD.demand_weight OR NEW.travel_weight<>OLD.travel_weight
+    OR NEW.activity_weight<>OLD.activity_weight
+    OR NEW.minimum_demand_quantity<>OLD.minimum_demand_quantity
+    OR NEW.max_recommendations<>OLD.max_recommendations
+    OR NEW.default_task_priority<>OLD.default_task_priority OR NEW.revision<>OLD.revision
+    OR NEW.supersedes_slotting_profile_id IS DISTINCT FROM OLD.supersedes_slotting_profile_id
+    OR NEW.effective_from<>OLD.effective_from
+    OR NEW.configured_by_user_id<>OLD.configured_by_user_id
+    OR NEW.configured_at<>OLD.configured_at OR OLD.effective_to IS NOT NULL
+    OR NEW.effective_to IS NULL OR NEW.effective_to<=OLD.effective_from THEN
+    RAISE EXCEPTION 'only active slotting profile closure is allowed' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_slotting_profile_successor() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.effective_to IS NOT NULL AND OLD.effective_to IS NULL
+    AND NOT EXISTS(SELECT 1 FROM public.slotting_profiles successor
+      WHERE successor.tenant_id=NEW.tenant_id
+        AND successor.inventory_owner_id=NEW.inventory_owner_id
+        AND successor.facility_id=NEW.facility_id
+        AND successor.supersedes_slotting_profile_id=NEW.id
+        AND successor.revision=NEW.revision+1
+        AND successor.effective_from=NEW.effective_to
+        AND successor.effective_to IS NULL) THEN
+    RAISE EXCEPTION 'slotting profile closure requires an active successor'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.reject_slotting_run_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'slotting runs are immutable' USING ERRCODE='23514';
+END $$;
+
+CREATE FUNCTION public.validate_slotting_run_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE profile public.slotting_profiles%ROWTYPE;
+BEGIN
+  SELECT * INTO profile FROM public.slotting_profiles configured
+  WHERE configured.tenant_id=NEW.tenant_id
+    AND configured.inventory_owner_id=NEW.inventory_owner_id
+    AND configured.facility_id=NEW.facility_id
+    AND configured.id=NEW.slotting_profile_id FOR SHARE;
+  IF NOT FOUND OR profile.revision<>NEW.profile_revision OR profile.mode<>'enabled'
+    OR profile.effective_to IS NOT NULL
+    OR NEW.demand_window_started_at IS DISTINCT FROM NEW.generated_at
+      -make_interval(days=>profile.demand_lookback_days::integer)
+    OR NEW.recommendation_count>profile.max_recommendations
+    OR (SELECT count(*) FROM jsonb_object_keys(NEW.configuration_snapshot))<>8
+    OR jsonb_typeof(NEW.configuration_snapshot->'definition')<>'object'
+    OR (SELECT count(*) FROM jsonb_object_keys(
+      NEW.configuration_snapshot->'definition'))<>11
+    OR NEW.configuration_snapshot->>'slotting_profile_id' IS DISTINCT FROM profile.id::text
+    OR (NEW.configuration_snapshot->>'revision')::bigint IS DISTINCT FROM profile.revision
+    OR (NEW.configuration_snapshot->>'configured_by')::bigint
+      IS DISTINCT FROM profile.configured_by_user_id
+    OR (NEW.configuration_snapshot->>'configured_at')::timestamptz
+      IS DISTINCT FROM profile.configured_at
+    OR (NEW.configuration_snapshot->>'effective_from')::timestamptz
+      IS DISTINCT FROM profile.effective_from
+    OR (NEW.configuration_snapshot->>'supersedes_slotting_profile_id')::bigint
+      IS DISTINCT FROM profile.supersedes_slotting_profile_id
+    OR (NEW.configuration_snapshot->>'effective_to')::timestamptz
+      IS DISTINCT FROM profile.effective_to
+    OR (NEW.configuration_snapshot->'definition'->>'tenant_id')::bigint
+      IS DISTINCT FROM profile.tenant_id
+    OR (NEW.configuration_snapshot->'definition'->>'inventory_owner_id')::bigint
+      IS DISTINCT FROM profile.inventory_owner_id
+    OR (NEW.configuration_snapshot->'definition'->>'facility_id')::bigint
+      IS DISTINCT FROM profile.facility_id
+    OR NEW.configuration_snapshot->'definition'->>'mode' IS DISTINCT FROM profile.mode
+    OR (NEW.configuration_snapshot->'definition'->>'demand_lookback_days')::bigint
+      IS DISTINCT FROM profile.demand_lookback_days
+    OR (NEW.configuration_snapshot->'definition'->>'demand_weight')::bigint
+      IS DISTINCT FROM profile.demand_weight
+    OR (NEW.configuration_snapshot->'definition'->>'travel_weight')::bigint
+      IS DISTINCT FROM profile.travel_weight
+    OR (NEW.configuration_snapshot->'definition'->>'activity_weight')::bigint
+      IS DISTINCT FROM profile.activity_weight
+    OR (NEW.configuration_snapshot->'definition'->>'minimum_demand_quantity')::bigint
+      IS DISTINCT FROM profile.minimum_demand_quantity
+    OR (NEW.configuration_snapshot->'definition'->>'max_recommendations')::bigint
+      IS DISTINCT FROM profile.max_recommendations
+    OR (NEW.configuration_snapshot->'definition'->>'default_task_priority')::bigint
+      IS DISTINCT FROM profile.default_task_priority
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=NEW.tenant_id
+        AND membership.user_id=NEW.generated_by_user_id AND membership.deleted IS NULL)
+    OR NEW.generated_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.generated_by_user_id) THEN
+    RAISE EXCEPTION 'slotting run configuration snapshot is invalid' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_slotting_recommendation_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE run_row public.slotting_runs%ROWTYPE; demand_weight bigint;
+  travel_weight bigint; activity_weight bigint; current_outstanding bigint;
+  current_historical_quantity bigint; current_historical_count bigint;
+  current_destination_on_hand bigint; current_destination_planned bigint;
+  current_destination_capacity bigint; expected_quantity bigint; expected_reason text;
+BEGIN
+  SELECT * INTO run_row FROM public.slotting_runs run
+  WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.slotting_run_id FOR SHARE;
+  IF NOT FOUND OR run_row.inventory_owner_id<>NEW.inventory_owner_id
+    OR run_row.facility_id<>NEW.facility_id OR NEW.created_at<>run_row.generated_at
+    OR run_row.generated_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,run_row.generated_by_user_id) THEN
+    RAISE EXCEPTION 'slotting recommendation run scope is invalid' USING ERRCODE='23514';
+  END IF;
+  demand_weight:=(run_row.configuration_snapshot->'definition'->>'demand_weight')::bigint;
+  travel_weight:=(run_row.configuration_snapshot->'definition'->>'travel_weight')::bigint;
+  activity_weight:=(run_row.configuration_snapshot->'definition'->>'activity_weight')::bigint;
+
+  SELECT COALESCE(sum(reservation.qty),0)::bigint INTO current_outstanding
+  FROM public.inventory_reservations reservation
+  WHERE reservation.tenant_id=NEW.tenant_id
+    AND reservation.inventory_owner_id=NEW.inventory_owner_id
+    AND reservation.facility_id=NEW.facility_id AND reservation.item_id=NEW.item_id
+    AND reservation.uom=NEW.uom AND reservation.status='active'
+    AND reservation.deleted IS NULL;
+  SELECT COALESCE(sum(pick.picked_qty),0)::bigint,count(*)::bigint
+    INTO current_historical_quantity,current_historical_count
+  FROM public.pick_confirmations pick
+  WHERE pick.tenant_id=NEW.tenant_id
+    AND pick.inventory_owner_id=NEW.inventory_owner_id
+    AND pick.facility_id=NEW.facility_id AND pick.item_id=NEW.item_id
+    AND pick.uom=NEW.uom AND pick.confirmed_at>=run_row.demand_window_started_at
+    AND pick.confirmed_at<=run_row.input_snapshot_at;
+  SELECT COALESCE(sum(balance.qty_on_hand),0)::bigint INTO current_destination_on_hand
+  FROM public.inventory_balances balance
+  WHERE balance.tenant_id=NEW.tenant_id
+    AND balance.inventory_owner_id=NEW.inventory_owner_id
+    AND balance.facility_id=NEW.facility_id
+    AND balance.location_id=NEW.destination_location_id
+    AND balance.item_id=NEW.item_id AND balance.uom=NEW.uom AND balance.deleted IS NULL;
+  current_destination_planned:=public.slotting_destination_planned_quantity(
+    NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,
+    NEW.destination_location_id,NEW.item_id,NEW.uom);
+  SELECT policy.max_quantity_per_location INTO current_destination_capacity
+  FROM public.item_storage_policies policy
+  JOIN public.item_storage_policy_zone_purposes allowed
+    ON allowed.tenant_id=policy.tenant_id
+    AND allowed.item_storage_policy_id=policy.id AND allowed.purpose='pick'
+  WHERE policy.tenant_id=NEW.tenant_id AND policy.id=NEW.item_storage_policy_id
+    AND policy.inventory_owner_id=NEW.inventory_owner_id
+    AND policy.facility_id=NEW.facility_id AND policy.item_id=NEW.item_id
+    AND policy.uom=NEW.uom AND policy.revision=NEW.item_storage_policy_revision
+    AND policy.effective_to IS NULL;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'slotting recommendation policy evidence is invalid'
+      USING ERRCODE='23514';
+  END IF;
+  expected_quantity:=LEAST(NEW.source_movable_quantity,
+    current_outstanding+current_historical_quantity,
+    CASE WHEN current_destination_capacity IS NULL THEN NEW.source_movable_quantity
+      ELSE current_destination_capacity-current_destination_on_hand
+        -current_destination_planned END);
+  expected_reason:=CASE WHEN current_outstanding>0 THEN 'forward_pick_demand'
+    WHEN current_destination_capacity IS NOT NULL THEN 'capacity_rebalance'
+    ELSE 'travel_reduction' END;
+
+  IF NEW.demand_score<>(NEW.outstanding_demand_quantity+NEW.historical_pick_quantity)*demand_weight
+    OR NEW.travel_score<>(NEW.source_travel_sequence-NEW.destination_travel_sequence)
+      *NEW.recommended_quantity*travel_weight
+    OR NEW.activity_score<>NEW.historical_pick_count*activity_weight
+    OR NEW.outstanding_demand_quantity<>current_outstanding
+    OR NEW.historical_pick_quantity<>current_historical_quantity
+    OR NEW.historical_pick_count<>current_historical_count
+    OR NEW.destination_on_hand<>current_destination_on_hand
+    OR NEW.destination_inbound_planned_quantity<>current_destination_planned
+    OR NEW.destination_capacity IS DISTINCT FROM current_destination_capacity
+    OR NEW.recommended_quantity<>expected_quantity OR NEW.reason<>expected_reason
+    OR current_outstanding+current_historical_quantity<
+      (run_row.configuration_snapshot->'definition'->>'minimum_demand_quantity')::bigint
+    OR NOT EXISTS(SELECT 1 FROM public.inventory_balances balance
+      JOIN public.items item ON item.tenant_id=balance.tenant_id
+        AND item.id=balance.item_id AND item.deleted IS NULL
+      WHERE balance.tenant_id=NEW.tenant_id AND balance.id=NEW.source_inventory_balance_id
+        AND balance.inventory_owner_id=NEW.inventory_owner_id
+        AND balance.facility_id=NEW.facility_id AND balance.item_id=NEW.item_id
+        AND balance.uom=NEW.uom AND balance.location_id=NEW.source_location_id
+        AND balance.deleted IS NULL AND balance.license_plate_id IS NULL
+        AND balance.status='available' AND balance.qty_on_hand=NEW.source_on_hand
+        AND balance.qty_on_hand-balance.qty_reserved-balance.qty_held
+          =NEW.source_movable_quantity
+        AND item.description IS NOT DISTINCT FROM NEW.item_description)
+    OR EXISTS(SELECT 1 FROM public.inventory_relocation_tasks movement
+      WHERE movement.tenant_id=NEW.tenant_id
+        AND movement.source_inventory_balance_id=NEW.source_inventory_balance_id
+        AND movement.closed_at IS NULL)
+    OR EXISTS(SELECT 1 FROM public.putaway_tasks movement
+      WHERE movement.tenant_id=NEW.tenant_id
+        AND movement.source_inventory_balance_id=NEW.source_inventory_balance_id
+        AND movement.closed_at IS NULL)
+    OR EXISTS(SELECT 1 FROM public.inventory_balances source
+      JOIN public.item_batches incoming_batch
+        ON incoming_batch.tenant_id=source.tenant_id
+        AND incoming_batch.id=source.item_batch_id AND incoming_batch.deleted IS NULL
+      JOIN public.inventory_balances conflict_balance
+        ON conflict_balance.tenant_id=source.tenant_id
+        AND conflict_balance.inventory_owner_id=source.inventory_owner_id
+        AND conflict_balance.location_id=NEW.destination_location_id
+        AND conflict_balance.item_id=source.item_id
+        AND conflict_balance.item_batch_id<>source.item_batch_id
+        AND conflict_balance.deleted IS NULL AND conflict_balance.qty_on_hand>0
+      JOIN public.item_batches existing_batch
+        ON existing_batch.tenant_id=conflict_balance.tenant_id
+        AND existing_batch.id=conflict_balance.item_batch_id
+      WHERE source.tenant_id=NEW.tenant_id
+        AND source.id=NEW.source_inventory_balance_id
+        AND (existing_batch.lot IS DISTINCT FROM incoming_batch.lot
+          OR existing_batch.expiration IS DISTINCT FROM incoming_batch.expiration))
+    OR NOT EXISTS(SELECT 1 FROM public.storage_zone_locations member
+      JOIN public.storage_zones zone ON zone.tenant_id=member.tenant_id
+        AND zone.facility_id=member.facility_id AND zone.id=member.storage_zone_id
+        AND zone.effective_to IS NULL
+      JOIN public.locations location ON location.tenant_id=member.tenant_id
+        AND location.facility_id=member.facility_id AND location.id=member.location_id
+        AND location.deleted IS NULL AND location.active
+      WHERE member.tenant_id=NEW.tenant_id AND member.facility_id=NEW.facility_id
+        AND member.location_id=NEW.source_location_id
+        AND zone.code=NEW.source_zone_code
+        AND zone.travel_sequence=NEW.source_travel_sequence
+        AND COALESCE(NULLIF(location.name,''),location.barcode,
+          'Location #'||location.id::text)=NEW.source_location_label)
+    OR NOT EXISTS(SELECT 1 FROM public.storage_zone_locations member
+      JOIN public.storage_zones zone ON zone.tenant_id=member.tenant_id
+        AND zone.facility_id=member.facility_id AND zone.id=member.storage_zone_id
+        AND zone.effective_to IS NULL AND zone.purpose='pick'
+      JOIN public.locations location ON location.tenant_id=member.tenant_id
+        AND location.facility_id=member.facility_id AND location.id=member.location_id
+        AND location.deleted IS NULL AND location.active AND location.pickable
+        AND NOT location.receivable AND NULLIF(btrim(location.barcode),'') IS NOT NULL
+      WHERE member.tenant_id=NEW.tenant_id AND member.facility_id=NEW.facility_id
+        AND member.location_id=NEW.destination_location_id
+        AND zone.code=NEW.destination_zone_code
+        AND zone.travel_sequence=NEW.destination_travel_sequence
+        AND COALESCE(NULLIF(location.name,''),location.barcode,
+          'Location #'||location.id::text)=NEW.destination_location_label) THEN
+    RAISE EXCEPTION 'slotting recommendation evidence is invalid' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_slotting_recommendation_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'slotting recommendations are immutable' USING ERRCODE='23514';
+  END IF;
+  IF NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.inventory_owner_id<>OLD.inventory_owner_id OR NEW.facility_id<>OLD.facility_id
+    OR NEW.slotting_run_id<>OLD.slotting_run_id
+    OR NEW.source_inventory_balance_id<>OLD.source_inventory_balance_id
+    OR NEW.item_id<>OLD.item_id OR NEW.item_description IS DISTINCT FROM OLD.item_description
+    OR NEW.uom<>OLD.uom OR NEW.source_location_id<>OLD.source_location_id
+    OR NEW.source_location_label<>OLD.source_location_label
+    OR NEW.source_zone_code<>OLD.source_zone_code
+    OR NEW.destination_location_id<>OLD.destination_location_id
+    OR NEW.destination_location_label<>OLD.destination_location_label
+    OR NEW.destination_zone_code<>OLD.destination_zone_code
+    OR NEW.item_storage_policy_id<>OLD.item_storage_policy_id
+    OR NEW.item_storage_policy_revision<>OLD.item_storage_policy_revision
+    OR NEW.recommended_quantity<>OLD.recommended_quantity OR NEW.reason<>OLD.reason
+    OR NEW.demand_score<>OLD.demand_score OR NEW.travel_score<>OLD.travel_score
+    OR NEW.activity_score<>OLD.activity_score OR NEW.total_score<>OLD.total_score
+    OR NEW.outstanding_demand_quantity<>OLD.outstanding_demand_quantity
+    OR NEW.historical_pick_quantity<>OLD.historical_pick_quantity
+    OR NEW.historical_pick_count<>OLD.historical_pick_count
+    OR NEW.source_travel_sequence<>OLD.source_travel_sequence
+    OR NEW.destination_travel_sequence<>OLD.destination_travel_sequence
+    OR NEW.source_on_hand<>OLD.source_on_hand
+    OR NEW.source_movable_quantity<>OLD.source_movable_quantity
+    OR NEW.destination_on_hand<>OLD.destination_on_hand
+    OR NEW.destination_inbound_planned_quantity<>OLD.destination_inbound_planned_quantity
+    OR NEW.destination_capacity IS DISTINCT FROM OLD.destination_capacity
+    OR NEW.created_at<>OLD.created_at OR OLD.status<>'pending' OR OLD.revision<>1
+    OR NEW.revision<>2 OR NEW.status NOT IN ('accepted','dismissed')
+    OR NEW.decided_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.decided_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NEW.decided_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.decided_by_user_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=NEW.tenant_id
+        AND membership.user_id=NEW.decided_by_user_id AND membership.deleted IS NULL) THEN
+    RAISE EXCEPTION 'invalid slotting recommendation decision' USING ERRCODE='23514';
+  END IF;
+  IF NEW.status='accepted' AND NOT EXISTS(
+    SELECT 1 FROM public.work_tasks task
+    JOIN public.inventory_relocation_tasks relocation
+      ON relocation.tenant_id=task.tenant_id AND relocation.task_id=task.id
+    WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.inventory_relocation_task_id
+      AND task.task_type='inventory_relocation' AND task.created_by=NEW.decided_by_user_id
+      AND task.inventory_owner_id=NEW.inventory_owner_id
+      AND task.facility_id=NEW.facility_id
+      AND relocation.workflow='loose_balance'
+      AND relocation.source_inventory_balance_id=NEW.source_inventory_balance_id
+      AND relocation.destination_location_id=NEW.destination_location_id
+      AND relocation.planned_quantity=NEW.recommended_quantity) THEN
+    RAISE EXCEPTION 'accepted slotting recommendation requires exact relocation work'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_slotting_run_recommendation_count() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_tenant_id bigint; checked_run_id bigint;
+BEGIN
+  checked_tenant_id:=NEW.tenant_id;
+  IF TG_TABLE_NAME='slotting_runs' THEN
+    checked_run_id:=NEW.id;
+  ELSE
+    checked_run_id:=NEW.slotting_run_id;
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.slotting_runs run
+    WHERE run.tenant_id=checked_tenant_id AND run.id=checked_run_id
+      AND run.recommendation_count=(SELECT count(*)
+        FROM public.slotting_recommendations recommendation
+        WHERE recommendation.tenant_id=checked_tenant_id
+          AND recommendation.slotting_run_id=checked_run_id)) THEN
+    RAISE EXCEPTION 'slotting run recommendation count does not reconcile'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER slotting_profiles_validate BEFORE INSERT ON public.slotting_profiles
+FOR EACH ROW EXECUTE FUNCTION public.validate_slotting_profile_insert();
+CREATE TRIGGER slotting_profiles_guard BEFORE UPDATE OR DELETE ON public.slotting_profiles
+FOR EACH ROW EXECUTE FUNCTION public.guard_slotting_profile_mutation();
+CREATE CONSTRAINT TRIGGER slotting_profiles_require_successor
+AFTER UPDATE OF effective_to ON public.slotting_profiles DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_slotting_profile_successor();
+CREATE TRIGGER slotting_runs_validate BEFORE INSERT ON public.slotting_runs
+FOR EACH ROW EXECUTE FUNCTION public.validate_slotting_run_insert();
+CREATE TRIGGER slotting_runs_immutable BEFORE UPDATE OR DELETE ON public.slotting_runs
+FOR EACH ROW EXECUTE FUNCTION public.reject_slotting_run_mutation();
+CREATE TRIGGER slotting_recommendations_validate
+BEFORE INSERT ON public.slotting_recommendations
+FOR EACH ROW EXECUTE FUNCTION public.validate_slotting_recommendation_insert();
+CREATE TRIGGER slotting_recommendations_guard
+BEFORE UPDATE OR DELETE ON public.slotting_recommendations
+FOR EACH ROW EXECUTE FUNCTION public.guard_slotting_recommendation_mutation();
+CREATE CONSTRAINT TRIGGER slotting_runs_recommendation_count
+AFTER INSERT ON public.slotting_runs DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_slotting_run_recommendation_count();
+CREATE CONSTRAINT TRIGGER slotting_recommendations_run_count
+AFTER INSERT ON public.slotting_recommendations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_slotting_run_recommendation_count();
+
+ALTER TABLE public.slotting_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.slotting_profiles FORCE ROW LEVEL SECURITY;
+CREATE POLICY slotting_profiles_tenant_isolation ON public.slotting_profiles
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.slotting_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.slotting_runs FORCE ROW LEVEL SECURITY;
+CREATE POLICY slotting_runs_tenant_isolation ON public.slotting_runs
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.slotting_recommendations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.slotting_recommendations FORCE ROW LEVEL SECURITY;
+CREATE POLICY slotting_recommendations_tenant_isolation ON public.slotting_recommendations
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.slotting_profiles TO wareboxes_app;
+GRANT UPDATE(effective_to) ON public.slotting_profiles TO wareboxes_app;
+GRANT SELECT,INSERT ON public.slotting_runs TO wareboxes_app;
+GRANT SELECT,INSERT ON public.slotting_recommendations TO wareboxes_app;
+GRANT UPDATE(status,revision,decided_by_user_id,decided_at,dismissal_reason,
+  dismissal_note,inventory_relocation_task_id)
+  ON public.slotting_recommendations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.slotting_profiles_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.slotting_runs_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.slotting_recommendations_id_seq TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.slotting_destination_planned_quantity(
+  bigint,bigint,bigint,bigint,bigint,text) TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.slotting_user_has_supervisor_permission(bigint,bigint)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.slotting_destination_planned_quantity(
+  bigint,bigint,bigint,bigint,bigint,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_slotting_profile_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_slotting_profile_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_slotting_profile_successor() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_slotting_run_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_slotting_run_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_slotting_recommendation_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_slotting_recommendation_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_slotting_run_recommendation_count() FROM PUBLIC;

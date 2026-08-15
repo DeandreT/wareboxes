@@ -1,6 +1,6 @@
 .packing-workspace {
   display: grid;
-  min-width: 1050px;
+  min-width: 0;
   min-height: calc(100vh - 108px);
   grid-template-rows: auto minmax(0, 1fr);
   align-content: start;

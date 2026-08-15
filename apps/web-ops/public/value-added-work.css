@@ -1,0 +1,186 @@
+.vas-workspace {
+  min-height: calc(100vh - 7rem);
+}
+
+.vas-list,
+.vas-detail {
+  min-width: 0;
+}
+
+.vas-toolbar {
+  align-items: center;
+  display: grid;
+  gap: .5rem;
+  grid-template-columns: minmax(10rem, 1fr) repeat(3, minmax(8.5rem, auto)) auto auto auto;
+  padding: .72rem .85rem;
+}
+
+.vas-toolbar select,
+.vas-form-grid select,
+.vas-form-grid input,
+.vas-line-editor select,
+.vas-line-editor input,
+.vas-command-bar input,
+.vas-note textarea {
+  width: 100%;
+}
+
+.vas-table td:first-child strong,
+.vas-table td:first-child small,
+.vas-recipe td strong,
+.vas-recipe td small {
+  display: block;
+}
+
+.vas-table td:first-child small,
+.vas-recipe td small,
+.vas-draft-lines small,
+.vas-history small {
+  color: var(--muted-text, #687274);
+  font-size: .72rem;
+  margin-top: .12rem;
+}
+
+.vas-detail-content,
+.vas-create {
+  display: grid;
+  gap: .9rem;
+  padding: 1rem;
+}
+
+.vas-work-note {
+  background: var(--surface-subtle, #f5f7f6);
+  border-left: 3px solid var(--accent, #246c5a);
+  margin: 0;
+  padding: .7rem .8rem;
+}
+
+.vas-recipe,
+.vas-history,
+.vas-builder,
+.vas-command-bar {
+  border-top: 1px solid var(--border-color, #d9dfdc);
+  padding-top: .8rem;
+}
+
+.vas-recipe > header,
+.vas-history > header,
+.vas-builder > header {
+  align-items: baseline;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: .5rem;
+}
+
+.vas-recipe h3,
+.vas-history h3,
+.vas-builder h3 {
+  font-size: .88rem;
+  margin: 0;
+}
+
+.vas-history ol,
+.vas-draft-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vas-history li {
+  display: grid;
+  gap: .55rem;
+  grid-template-columns: .75rem 1fr;
+  padding: .35rem 0;
+}
+
+.vas-history li p {
+  margin: .15rem 0 0;
+}
+
+.history-marker {
+  background: var(--accent, #246c5a);
+  border-radius: 50%;
+  height: .5rem;
+  margin-top: .35rem;
+  width: .5rem;
+}
+
+.vas-command-bar {
+  display: grid;
+  gap: .65rem;
+}
+
+.vas-command-bar label,
+.vas-form-grid label,
+.vas-note {
+  display: grid;
+  font-size: .75rem;
+  font-weight: 650;
+  gap: .3rem;
+}
+
+.vas-command-bar > div,
+.command-recovery {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.vas-form-grid {
+  display: grid;
+  gap: .65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.vas-note textarea {
+  min-height: 4.5rem;
+  resize: vertical;
+}
+
+.vas-line-editor {
+  display: grid;
+  gap: .45rem;
+  grid-template-columns: minmax(13rem, 1fr) 5rem auto;
+}
+
+.vas-output-editor {
+  grid-template-columns: minmax(12rem, 1fr) 7rem 5rem auto;
+}
+
+.vas-draft-lines {
+  display: grid;
+  gap: .3rem;
+  margin-top: .5rem;
+}
+
+.vas-draft-lines li {
+  align-items: center;
+  background: var(--surface-subtle, #f5f7f6);
+  display: grid;
+  gap: .5rem;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding: .5rem .6rem;
+}
+
+.vas-draft-lines span,
+.vas-draft-lines strong,
+.vas-draft-lines small {
+  display: block;
+  min-width: 0;
+}
+
+.command-recovery .inline-command-error {
+  flex: 1 1 18rem;
+  margin: 0;
+}
+
+@media (max-width: 1100px) {
+  .vas-toolbar {
+    grid-template-columns: minmax(10rem, 1fr) repeat(2, minmax(8rem, auto)) auto auto;
+  }
+
+  .vas-toolbar label:nth-of-type(3) {
+    display: none;
+  }
+}

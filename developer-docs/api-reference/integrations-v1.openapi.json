@@ -1,0 +1,1573 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Wareboxes Integration API",
+    "description": "Version 1 partner integration surface for warehouse fulfillment workflows. Public operations are explicitly allowlisted; Wareboxes operator, RF, and administration endpoints are not part of this contract.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080",
+      "description": "Local development. Hosted environment URLs are supplied during integration onboarding."
+    }
+  ],
+  "paths": {
+    "/api/v1/integrations/order-intake/{source_key}/inventory-owners/{external_inventory_owner_key}/orders": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Submit a partner fulfillment order.",
+        "description": "Wareboxes durably retains the original payload before mapping partner owner, item, and UOM\nidentities. A `202` response therefore reports either `processed` or `quarantined`; callers\nmust inspect `status` instead of treating every accepted receipt as a created order.",
+        "operationId": "submitIntegrationOrder",
+        "parameters": [
+          {
+            "name": "source_key",
+            "in": "path",
+            "description": "Provisioned integration source identity. Item and UOM mappings are source-specific.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "example": "partner-api"
+          },
+          {
+            "name": "external_inventory_owner_key",
+            "in": "path",
+            "description": "Partner inventory-owner identity configured for this source. It is resolved within the authenticated tenant and owner scope.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "example": "NORTHSTAR"
+          },
+          {
+            "name": "x-wareboxes-tenant-id",
+            "in": "header",
+            "description": "Positive tenant context for the bearer credential. The request fails closed when the identity is not a member of this tenant.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            },
+            "example": 12
+          },
+          {
+            "name": "idempotency-key",
+            "in": "header",
+            "description": "Caller-generated identity for this submission. An exact retry returns the original outcome; reuse with a different payload or scope returns 409.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[!-~]{1,200}$"
+            },
+            "example": "partner-order-SO-1001-v1"
+          },
+          {
+            "name": "x-request-id",
+            "in": "header",
+            "description": "Optional caller correlation ID. Wareboxes echoes a valid value or assigns one.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "example": "partner-order-SO-1001-attempt-1"
+          }
+        ],
+        "requestBody": {
+          "description": "Partner order envelope. The path supplies the source and inventory-owner identities; internal Wareboxes IDs are not accepted in this payload.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationOrderEnvelopeRequest"
+              },
+              "example": {
+                "destination": {
+                  "city": "Reno",
+                  "company": "Northstar Retail",
+                  "country": "US",
+                  "email": "receiving@example.com",
+                  "line1": "125 Shipping Lane",
+                  "line2": "Dock 4",
+                  "phone": "+1 775 555 0100",
+                  "postal_code": "89502",
+                  "recipient_name": "Receiving Team",
+                  "region": "NV"
+                },
+                "lines": [
+                  {
+                    "external_item_key": "CLIENT-CASE",
+                    "external_uom": "CS",
+                    "line_key": "1",
+                    "quantity": 4
+                  }
+                ],
+                "order_key": "SO-1001",
+                "rush": false,
+                "ship_by": "2027-08-12T17:00:00Z"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The payload is durably retained. Inspect `status`: `processed` includes `order_id`; `quarantined` includes `error_code` and `error_message` for operator remediation.",
+            "headers": {
+              "x-request-id": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Request correlation ID."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationOrderIntakeResponse"
+                },
+                "examples": {
+                  "processed": {
+                    "summary": "Fulfillment demand created",
+                    "value": {
+                      "adapter_key": "wareboxes.fulfillment_order",
+                      "applied_mapping_count": 1,
+                      "attempt_count": 1,
+                      "attempted_at": "2026-08-11T19:30:00Z",
+                      "attempted_by": 7,
+                      "correction_id": null,
+                      "error_code": null,
+                      "error_message": null,
+                      "input_payload_sha256": "4cacc15b0023683e11cc4c371c585f8aefe1a12221edeb64290fbe35be4e4ccd",
+                      "inventory_owner_id": 42,
+                      "mapping_version": 2,
+                      "order_id": 9001,
+                      "order_revision": 1,
+                      "processed_at": "2026-08-11T19:30:00Z",
+                      "processing_attempt_id": 701,
+                      "processing_id": 601,
+                      "receipt_id": 501,
+                      "revision": 1,
+                      "status": "processed"
+                    }
+                  },
+                  "quarantined": {
+                    "summary": "Document retained for mapping remediation",
+                    "value": {
+                      "adapter_key": "wareboxes.fulfillment_order",
+                      "applied_mapping_count": 0,
+                      "attempt_count": 1,
+                      "attempted_at": "2026-08-11T19:30:00Z",
+                      "attempted_by": 7,
+                      "correction_id": null,
+                      "error_code": "item_mapping_not_found",
+                      "error_message": "no active item mapping for line 1 (CLIENT-CASE / CS)",
+                      "input_payload_sha256": "4cacc15b0023683e11cc4c371c585f8aefe1a12221edeb64290fbe35be4e4ccd",
+                      "inventory_owner_id": 42,
+                      "mapping_version": 2,
+                      "order_id": null,
+                      "order_revision": null,
+                      "processed_at": null,
+                      "processing_attempt_id": 702,
+                      "processing_id": 602,
+                      "receipt_id": 502,
+                      "revision": 1,
+                      "status": "quarantined"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A required header or path value is missing or invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The bearer credential is missing or invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The identity lacks tenant membership or the orders permission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active inventory-owner mapping is visible for the source, external owner key, and caller owner scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was reused with a different payload, content type, or scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request exceeds the deployment request-body limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json or a +json media type.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Wareboxes could not safely retain or process the submission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/integrations/x12-940/{source_key}/inventory-owners/{external_inventory_owner_key}/orders": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Submit an X12 940 Warehouse Shipping Order using the Wareboxes v1 profile.",
+        "operationId": "submitX12940Order",
+        "parameters": [
+          {
+            "name": "source_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "example": "partner-edi"
+          },
+          {
+            "name": "external_inventory_owner_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "example": "NORTHSTAR"
+          },
+          {
+            "name": "x-wareboxes-tenant-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            },
+            "example": 12
+          },
+          {
+            "name": "idempotency-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "example": "x12-isa-000000001-st-0001"
+          },
+          {
+            "name": "x-request-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128,
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "One X12 004010 940 transaction in an ISA/IEA interchange. The Wareboxes v1 profile accepts W0501=N, an N1/N3/N4 ship-to loop, optional N9*RU and G62*10, and LX/W01 lines with SK or VP item keys.",
+          "content": {
+            "application/edi-x12": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The raw interchange is retained and either processed or quarantined.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationOrderIntakeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A header or path value is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The bearer credential is missing or invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The identity lacks tenant membership or order permission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No visible active owner mapping exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency identity conflicts with a prior payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The interchange exceeds the deployment body limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/edi-x12.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The submission could not be retained safely.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/portal/documents/{document_id}/content": {
+      "get": {
+        "tags": [
+          "Visibility"
+        ],
+        "summary": "Download one immutable shipment document visible in the identity's scopes.",
+        "operationId": "downloadCustomerPortalDocument",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Shipment document identifier.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "x-wareboxes-tenant-id",
+            "in": "header",
+            "description": "Positive tenant context for the bearer credential.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Immutable shipment document bytes.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The identity lacks customer portal permission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The document is absent or outside the identity's owner/facility scopes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/portal/reports/inventory.csv": {
+      "get": {
+        "tags": [
+          "Visibility"
+        ],
+        "summary": "Export the currently visible inventory availability as CSV.",
+        "operationId": "exportCustomerPortalInventory",
+        "parameters": [
+          {
+            "name": "inventory_owner_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "facility_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "search",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "include_history",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "x-wareboxes-tenant-id",
+            "in": "header",
+            "description": "Positive tenant context for the bearer credential.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scope-safe inventory availability CSV.",
+            "content": {
+              "text/csv": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The identity lacks customer portal permission or requested scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/portal/workspace": {
+      "get": {
+        "tags": [
+          "Visibility"
+        ],
+        "summary": "Read the customer-facing inventory and fulfillment workspace.",
+        "operationId": "getCustomerPortalWorkspace",
+        "parameters": [
+          {
+            "name": "inventory_owner_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "facility_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "search",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "include_history",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "x-wareboxes-tenant-id",
+            "in": "header",
+            "description": "Positive tenant context for the bearer credential.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner- and facility-scoped customer visibility projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerPortalWorkspaceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The identity lacks customer portal permission or requested scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CustomerPortalDocumentResponse": {
+        "type": "object",
+        "required": [
+          "document_id",
+          "shipment_id",
+          "order_id",
+          "order_key",
+          "inventory_owner_id",
+          "facility_id",
+          "document_type",
+          "file_name",
+          "media_type",
+          "content_length",
+          "content_sha256",
+          "generated_at",
+          "download_path"
+        ],
+        "properties": {
+          "content_length": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "content_sha256": {
+            "type": "string"
+          },
+          "document_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "document_type": {
+            "$ref": "#/components/schemas/CustomerPortalDocumentType"
+          },
+          "download_path": {
+            "type": "string"
+          },
+          "facility_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "file_name": {
+            "type": "string"
+          },
+          "generated_at": {
+            "type": "string"
+          },
+          "inventory_owner_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "order_key": {
+            "type": "string"
+          },
+          "shipment_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CustomerPortalDocumentType": {
+        "type": "string",
+        "enum": [
+          "packing_slip",
+          "carton_label_set"
+        ]
+      },
+      "CustomerPortalInventoryResponse": {
+        "type": "object",
+        "required": [
+          "inventory_owner_id",
+          "inventory_owner_name",
+          "facility_id",
+          "facility_name",
+          "item_id",
+          "uom",
+          "status",
+          "on_hand",
+          "reserved",
+          "held",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expiration": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facility_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "facility_name": {
+            "type": "string"
+          },
+          "held": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inventory_owner_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inventory_owner_name": {
+            "type": "string"
+          },
+          "item_description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "item_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "on_hand": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "primary_sku": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reserved": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
+          "uom": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CustomerPortalOrderResponse": {
+        "type": "object",
+        "required": [
+          "order_id",
+          "order_key",
+          "inventory_owner_id",
+          "inventory_owner_name",
+          "status",
+          "rush",
+          "ordered_quantity",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "destination_city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destination_company": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destination_country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destination_region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facility_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "facility_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inventory_owner_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inventory_owner_name": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "order_key": {
+            "type": "string"
+          },
+          "ordered_quantity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rush": {
+            "type": "boolean"
+          },
+          "ship_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/CustomerPortalOrderStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CustomerPortalOrderStatus": {
+        "type": "string",
+        "enum": [
+          "open",
+          "held",
+          "processing",
+          "awaiting_packing",
+          "packing",
+          "awaiting_shipment",
+          "shipped",
+          "cancelled",
+          "void"
+        ]
+      },
+      "CustomerPortalShipmentResponse": {
+        "type": "object",
+        "required": [
+          "shipment_id",
+          "order_id",
+          "order_key",
+          "inventory_owner_id",
+          "inventory_owner_name",
+          "facility_id",
+          "facility_name",
+          "status",
+          "carton_count",
+          "shipped_quantity",
+          "tracking_numbers",
+          "created_at"
+        ],
+        "properties": {
+          "carrier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "carton_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "departed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facility_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "facility_name": {
+            "type": "string"
+          },
+          "inventory_owner_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inventory_owner_name": {
+            "type": "string"
+          },
+          "manifested_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "order_key": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shipment_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shipped_quantity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CustomerPortalShipmentStatus"
+          },
+          "tracking_numbers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CustomerPortalShipmentStatus": {
+        "type": "string",
+        "enum": [
+          "awaiting_manifest",
+          "manifested",
+          "partially_departed",
+          "departed",
+          "cancelled"
+        ]
+      },
+      "CustomerPortalWorkspaceResponse": {
+        "type": "object",
+        "required": [
+          "generated_at",
+          "inventory",
+          "orders",
+          "shipments",
+          "documents",
+          "inventory_report_path"
+        ],
+        "properties": {
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerPortalDocumentResponse"
+            }
+          },
+          "generated_at": {
+            "type": "string"
+          },
+          "inventory": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerPortalInventoryResponse"
+            }
+          },
+          "inventory_report_path": {
+            "type": "string"
+          },
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerPortalOrderResponse"
+            }
+          },
+          "shipments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerPortalShipmentResponse"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErrorReason": {
+        "type": "string",
+        "description": "Stable machine-readable reason for an API failure.",
+        "enum": [
+          "unauthorized",
+          "forbidden",
+          "not_found",
+          "validation_failed",
+          "invalid_request",
+          "conflict",
+          "invalid_state_transition",
+          "insufficient_inventory",
+          "idempotency_key_required",
+          "idempotency_key_reused",
+          "precondition_required",
+          "revision_conflict",
+          "invalid_cursor",
+          "method_not_allowed",
+          "payload_too_large",
+          "unsupported_media_type",
+          "rate_limited",
+          "internal_error"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Error response returned by every version 1 endpoint.",
+        "required": [
+          "reason",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "example": "idempotency key was already used with a different request"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ErrorReason"
+          },
+          "request_id": {
+            "type": "string",
+            "example": "partner-order-1001-attempt-1",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "violations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldViolation"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "FieldViolation": {
+        "type": "object",
+        "description": "Machine-addressable validation failure for one request field.",
+        "required": [
+          "field",
+          "reason"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Request field or logical input that failed validation.",
+            "example": "lines[0].quantity"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Stable validation explanation intended for an integration operator.",
+            "example": "must be a positive integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FulfillmentOrderDestination": {
+        "type": "object",
+        "description": "Shipping destination captured with a fulfillment order.",
+        "required": [
+          "recipient_name",
+          "line1",
+          "city",
+          "region",
+          "postal_code",
+          "country"
+        ],
+        "properties": {
+          "city": {
+            "type": "string",
+            "example": "Reno",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "company": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Northstar Retail",
+            "maxLength": 200
+          },
+          "country": {
+            "type": "string",
+            "example": "US",
+            "maxLength": 100,
+            "minLength": 1
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "receiving@example.com",
+            "maxLength": 254
+          },
+          "line1": {
+            "type": "string",
+            "example": "125 Shipping Lane",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "line2": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Dock 4",
+            "maxLength": 200
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "+1 775 555 0100",
+            "maxLength": 64
+          },
+          "postal_code": {
+            "type": "string",
+            "example": "89502",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "recipient_name": {
+            "type": "string",
+            "example": "Receiving Team",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "region": {
+            "type": "string",
+            "example": "NV",
+            "maxLength": 100,
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "IntegrationOrderEnvelopeLineRequest": {
+        "type": "object",
+        "required": [
+          "line_key",
+          "external_item_key",
+          "external_uom",
+          "quantity"
+        ],
+        "properties": {
+          "external_item_key": {
+            "type": "string",
+            "description": "Partner item or SKU identity resolved through the active source mapping.",
+            "example": "CLIENT-CASE",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "external_uom": {
+            "type": "string",
+            "description": "Partner UOM code resolved together with the external item key.",
+            "example": "CS",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "line_key": {
+            "type": "string",
+            "description": "Partner line identity, unique within the order.",
+            "example": "1",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Positive demand quantity expressed in `external_uom`.",
+            "example": 4,
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "IntegrationOrderEnvelopeRequest": {
+        "type": "object",
+        "description": "Partner-facing fulfillment order envelope retained before mapping and processing.",
+        "required": [
+          "order_key",
+          "destination",
+          "lines"
+        ],
+        "properties": {
+          "destination": {
+            "$ref": "#/components/schemas/FulfillmentOrderDestination"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationOrderEnvelopeLineRequest"
+            },
+            "description": "Demand lines. At least one line is required and line keys must be unique.",
+            "minItems": 1
+          },
+          "order_key": {
+            "type": "string",
+            "description": "Partner order identity. Reuse for a different order is rejected.",
+            "example": "SO-1001",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "rush": {
+            "type": "boolean",
+            "description": "Marks demand for warehouse prioritization; it does not bypass inventory policy.",
+            "default": false,
+            "example": false
+          },
+          "ship_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional RFC 3339 shipping deadline.",
+            "example": "2027-08-12T17:00:00Z"
+          }
+        },
+        "additionalProperties": false
+      },
+      "IntegrationOrderIntakeResponse": {
+        "type": "object",
+        "description": "Durable receipt and processing outcome returned by order intake.",
+        "required": [
+          "receipt_id",
+          "processing_id",
+          "processing_attempt_id",
+          "correction_id",
+          "input_payload_sha256",
+          "inventory_owner_id",
+          "adapter_key",
+          "mapping_version",
+          "status",
+          "revision",
+          "attempt_count",
+          "applied_mapping_count",
+          "order_id",
+          "order_revision",
+          "error_code",
+          "error_message",
+          "attempted_by",
+          "attempted_at",
+          "processed_at"
+        ],
+        "properties": {
+          "adapter_key": {
+            "type": "string",
+            "example": "wareboxes.fulfillment_order"
+          },
+          "applied_mapping_count": {
+            "type": "integer",
+            "format": "int32",
+            "example": 1,
+            "minimum": 0
+          },
+          "attempt_count": {
+            "type": "integer",
+            "format": "int32",
+            "example": 1,
+            "minimum": 1
+          },
+          "attempted_at": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-08-11T19:30:00Z"
+          },
+          "attempted_by": {
+            "type": "integer",
+            "format": "int64",
+            "example": 7,
+            "minimum": 1
+          },
+          "correction_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "example": 801,
+            "minimum": 1
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "item_mapping_not_found"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "item mapping was not found for CLIENT-CASE / CS"
+          },
+          "input_payload_sha256": {
+            "type": "string",
+            "example": "4cacc15b0023683e11cc4c371c585f8aefe1a12221edeb64290fbe35be4e4ccd",
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "inventory_owner_id": {
+            "type": "integer",
+            "format": "int64",
+            "example": 42,
+            "minimum": 1
+          },
+          "mapping_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Version of the canonical intake adapter contract, not an individual item mapping revision.",
+            "example": 2,
+            "minimum": 1
+          },
+          "order_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "example": 9001,
+            "minimum": 1
+          },
+          "order_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "example": 1,
+            "minimum": 1
+          },
+          "processed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "example": "2026-08-11T19:30:00Z"
+          },
+          "processing_attempt_id": {
+            "type": "integer",
+            "format": "int64",
+            "example": 701,
+            "minimum": 1
+          },
+          "processing_id": {
+            "type": "integer",
+            "format": "int64",
+            "example": 601,
+            "minimum": 1
+          },
+          "receipt_id": {
+            "type": "integer",
+            "format": "int64",
+            "example": 501,
+            "minimum": 1
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "example": 1,
+            "minimum": 1
+          },
+          "status": {
+            "$ref": "#/components/schemas/IntegrationOrderProcessingStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "IntegrationOrderProcessingStatus": {
+        "type": "string",
+        "enum": [
+          "quarantined",
+          "processed"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Opaque bearer credential provisioned for the integration identity. It is not a JWT and must be stored as a secret."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Orders",
+      "description": "Submit external fulfillment demand using partner inventory-owner, item, and UOM identities."
+    },
+    {
+      "name": "Visibility",
+      "description": "Read owner- and facility-scoped inventory, fulfillment status, reports, and documents."
+    }
+  ]
+}

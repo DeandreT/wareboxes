@@ -503,6 +503,110 @@ async fn lock_loose_source(
     })
 }
 
+/// Creates the same typed loose-balance relocation work used by the manual API,
+/// but inside a caller-owned transaction. Advisory planners use this only after
+/// their recommendation decision row has been locked and revalidated.
+pub(in crate::repo) struct AdvisoryLooseRelocation<'a> {
+    pub actor_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub destination_location_id: i64,
+    pub quantity: i64,
+    pub priority: i64,
+    pub instructions: Option<&'a str>,
+    pub metadata_json: &'a str,
+}
+
+pub(in crate::repo) async fn create_advisory_loose_relocation_task_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    command: AdvisoryLooseRelocation<'_>,
+) -> AppResult<i64> {
+    validate_creation(
+        command.source_inventory_balance_id,
+        command.destination_location_id,
+        command.quantity,
+        command.priority,
+        command.instructions,
+    )?;
+    let source = lock_loose_source(tx, tenant_id, command.source_inventory_balance_id).await?;
+    if source.location_id == command.destination_location_id {
+        return Err(AppError::conflict(
+            "relocation source and destination locations must differ",
+        ));
+    }
+    lock_relocation_destination(
+        tx,
+        tenant_id,
+        source.facility_id,
+        command.destination_location_id,
+    )
+    .await?;
+    inventory::ensure_location_accepts_batch_tx(
+        tx,
+        tenant_id,
+        source.inventory_owner_id,
+        command.destination_location_id,
+        source.item_batch_id,
+    )
+    .await?;
+    let owner_facility =
+        inventory_journal::owner_facility_scope(source.inventory_owner_id, source.facility_id)?;
+    inventory_journal::lock_active_owner_facility_tx(tx, tenant_id, owner_facility).await?;
+    let movable = movable_quantity(source.qty_on_hand, source.qty_reserved, source.qty_held)?;
+    if movable < command.quantity {
+        return Err(AppError::conflict(
+            "recommended source inventory is no longer available",
+        ));
+    }
+    require_no_active_loose_movement(tx, tenant_id, command.source_inventory_balance_id).await?;
+
+    let task_id = insert_task_tx(
+        tx,
+        tenant_id,
+        NewWorkTask {
+            facility_id: Some(source.facility_id),
+            inventory_owner_id: Some(source.inventory_owner_id),
+            task_type: WorkTaskType::InventoryRelocation,
+            title: "Execute accepted slotting recommendation".to_owned(),
+            instructions: command.instructions.map(str::to_owned),
+            required_permission: task_permission(WorkTaskType::InventoryRelocation).to_owned(),
+            priority: command.priority,
+            task_timeout_seconds: task_timeout_seconds(WorkTaskType::InventoryRelocation),
+            assigned_user_id: None,
+            created_by: Some(command.actor_id),
+            scheduled_for: None,
+            due_at: None,
+            metadata_json: Some(command.metadata_json.to_owned()),
+        },
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_relocation_tasks (
+            tenant_id, task_id, inventory_owner_id, facility_id, workflow,
+            source_inventory_balance_id, source_location_id,
+            destination_location_id, item_batch_id, item_id, uom,
+            inventory_status, planned_quantity
+        ) VALUES ($1,$2,$3,$4,'loose_balance',$5,$6,$7,$8,$9,$10,$11,$12)
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(task_id)
+    .bind(source.inventory_owner_id)
+    .bind(source.facility_id)
+    .bind(command.source_inventory_balance_id)
+    .bind(source.location_id)
+    .bind(command.destination_location_id)
+    .bind(source.item_batch_id)
+    .bind(source.item_id)
+    .bind(source.uom)
+    .bind(source.status.as_str())
+    .bind(command.quantity)
+    .execute(&mut **tx)
+    .await?;
+    Ok(task_id)
+}
+
 pub(super) async fn lock_plate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,

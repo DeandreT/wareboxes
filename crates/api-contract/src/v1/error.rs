@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Stable machine-readable reason for an API failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorReason {
@@ -26,19 +27,30 @@ pub enum ErrorReason {
 }
 
 /// Machine-addressable validation failure for one request field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FieldViolation {
+    /// Request field or logical input that failed validation.
+    #[schema(example = "lines[0].quantity")]
     pub field: String,
+    /// Stable validation explanation intended for an integration operator.
+    #[schema(example = "must be a positive integer")]
     pub reason: String,
 }
 
 /// Error response returned by every version 1 endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ErrorResponse {
     pub reason: ErrorReason,
+    #[schema(example = "idempotency key was already used with a different request")]
     pub message: String,
+    #[schema(
+        min_length = 1,
+        max_length = 128,
+        pattern = "^[A-Za-z0-9._:-]{1,128}$",
+        example = "partner-order-1001-attempt-1"
+    )]
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub violations: Vec<FieldViolation>,

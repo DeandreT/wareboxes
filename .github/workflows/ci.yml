@@ -43,6 +43,59 @@ jobs:
       - name: Architecture boundaries
         run: scripts/check-boundaries.sh
 
+      - name: Public API contract drift
+        run: >-
+          cargo run --locked -p wareboxes-api
+          --example export_integration_openapi --
+          --check developer-docs/api-reference/integrations-v1.openapi.json
+
+      - name: Developer documentation JSON
+        run: >-
+          jq empty
+          developer-docs/scalar.config.json
+          developer-docs/api-reference/integrations-v1.openapi.json
+          developer-docs/examples/v1/submit-order.json
+          developer-docs/examples/v1/processed-order-response.json
+
+      - name: Production operations configuration
+        run: |
+          bash -n \
+            deploy/provision.sh \
+            deploy/wareboxes-deploy \
+            deploy/wareboxes-backup \
+            deploy/wareboxes-archive-commands \
+            deploy/wareboxes-restore-drill \
+            deploy/wareboxes-restore-postgres \
+            scripts/build-images.sh \
+            scripts/seed-inventory.sh \
+            scripts/test-backup-restore.sh \
+            scripts/test-command-archive.sh \
+            scripts/test-automation-envelope.sh \
+            scripts/test-load-envelope.sh \
+            scripts/verify-systemd-units.sh \
+            scripts/test-support/restic
+          scripts/verify-systemd-units.sh
+          docker run --rm --volume "$PWD:/mnt:ro" \
+            koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+            shellcheck \
+              /mnt/deploy/provision.sh \
+              /mnt/deploy/wareboxes-deploy \
+              /mnt/deploy/wareboxes-backup \
+              /mnt/deploy/wareboxes-archive-commands \
+              /mnt/deploy/wareboxes-restore-drill \
+              /mnt/deploy/wareboxes-restore-postgres \
+              /mnt/scripts/build-images.sh \
+              /mnt/scripts/seed-inventory.sh \
+              /mnt/scripts/test-backup-restore.sh \
+              /mnt/scripts/test-command-archive.sh \
+              /mnt/scripts/test-automation-envelope.sh \
+              /mnt/scripts/test-load-envelope.sh \
+              /mnt/scripts/verify-systemd-units.sh \
+              /mnt/scripts/test-support/restic
+          docker run --rm --entrypoint /bin/promtool --volume "$PWD:/mnt:ro" \
+            prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
+            check rules /mnt/deploy/monitoring/wareboxes-alerts.yml
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -70,7 +123,26 @@ jobs:
       - name: Build SSR web application
         run: scripts/build-web.sh
 
+      - name: Build production container images
+        env:
+          WAREBOXES_IMAGE_TAG: ci
+          WAREBOXES_IMAGE_REVISION: ${{ github.sha }}
+          WAREBOXES_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: scripts/build-images.sh
+
       - name: Test (Postgres)
         env:
           TEST_DATABASE_URL: postgres://wareboxes_admin:wareboxes_admin@localhost:5432/wareboxes
         run: cargo test --workspace --locked
+
+      - name: Backup and restore acceptance
+        run: scripts/test-backup-restore.sh
+
+      - name: Durable command archive acceptance
+        run: scripts/test-command-archive.sh
+
+      - name: Baseline operational load envelope
+        run: scripts/test-load-envelope.sh
+
+      - name: Automation throughput and recovery envelope
+        run: scripts/test-automation-envelope.sh

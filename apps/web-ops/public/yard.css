@@ -1,0 +1,135 @@
+.yard-workspace {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  height: calc(100vh - 76px);
+  min-height: 620px;
+  grid-template-rows: 42px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.yard-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.yard-heading { display: flex; min-width: 210px; flex: 1 1 auto; align-items: center; gap: 8px; }
+.yard-heading > div { display: grid; min-width: 0; gap: 1px; }
+.yard-heading h1 { margin: 0; font-size: 14px; }
+.yard-heading span { overflow: hidden; color: var(--ink-soft); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.yard-toolbar > label { display: grid; min-width: 140px; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 5px; color: var(--label-ink); font-size: 8px; font-weight: 760; text-transform: uppercase; }
+.yard-toolbar select { height: var(--control-height); min-width: 0; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); color: var(--control-ink); font-size: 9px; }
+.yard-toolbar .yard-history-toggle { display: flex; min-width: auto; gap: 4px; }
+.yard-history-toggle input { width: 13px; height: 13px; margin: 0; }
+.yard-toolbar .button { min-height: var(--control-height); margin: 0; padding: 0 9px; white-space: nowrap; }
+
+.yard-body { display: grid; min-height: 0; grid-template-rows: 62px minmax(0, 1fr); }
+.yard-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; border-bottom: 1px solid var(--line); background: var(--surface); }
+.yard-metrics > div { position: relative; display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 8px; align-content: center; padding: 7px 12px; border-right: 1px solid var(--line); }
+.yard-metrics > div:last-child { border-right: 0; }
+.yard-metrics dt { grid-column: 1; grid-row: 1; color: var(--ink-soft); font-size: 8px; font-weight: 760; text-transform: uppercase; }
+.yard-metrics dd { grid-column: 2; grid-row: 1 / span 2; align-self: center; justify-self: end; margin: 0; color: var(--ink); font-size: 24px; font-weight: 760; }
+.yard-metrics small { grid-column: 1; grid-row: 2; color: var(--ink-soft); font-size: 8px; }
+
+.yard-board { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(660px, 1.45fr) minmax(380px, 0.85fr); }
+.yard-queue { display: grid; min-width: 0; min-height: 0; grid-template-rows: 38px minmax(190px, 1fr) minmax(210px, .8fr); border-right: 1px solid var(--line); background: var(--surface); }
+.yard-queue > header,
+.yard-appointments > header,
+.yard-actions > header,
+.yard-timeline > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
+.yard-queue h2,
+.yard-appointments h3,
+.yard-actions h3,
+.yard-timeline h3 { margin: 0; font-size: 11px; }
+.yard-queue header span,
+.yard-appointments header span,
+.yard-actions header span,
+.yard-timeline header span { color: var(--ink-soft); font-size: 8px; }
+.yard-table-scroll { min-width: 0; min-height: 0; overflow: auto; }
+.yard-table-scroll table { width: 100%; min-width: 660px; border-collapse: collapse; font-size: 9px; }
+.yard-table-scroll th { position: sticky; z-index: 1; top: 0; padding: 5px 7px; border-bottom: 1px solid var(--line-strong); background: var(--surface-raised); color: var(--ink-soft); font-size: 8px; text-align: left; text-transform: uppercase; }
+.yard-table-scroll td { height: var(--table-row-height); padding: var(--table-cell-padding-y) 7px; border-bottom: 1px solid var(--row-border); cursor: default; }
+.yard-table-scroll td small,
+.yard-table-scroll td strong { display: block; }
+.yard-table-scroll td small { margin-top: 2px; color: var(--ink-soft); font-size: 8px; }
+.yard-table-scroll tr:hover { background: var(--surface-subtle); }
+.yard-table-scroll tr.selected { box-shadow: inset 3px 0 0 var(--blue); background: var(--selected-row); }
+.yard-table-scroll .row-link { color: var(--ink); font-size: 9px; font-weight: 730; }
+.yard-appointments { display: grid; min-width: 0; min-height: 0; grid-template-rows: 38px minmax(0, 1fr); border-top: 1px solid var(--line); }
+.yard-row-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.yard-row-actions .text-button { font-size: 8px; }
+
+.yard-detail { min-width: 0; min-height: 0; background: var(--surface); }
+.yard-detail-scroll { height: 100%; overflow-y: auto; }
+.yard-detail-header { display: flex; min-height: 78px; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border-bottom: 1px solid var(--line); }
+.yard-detail-header h2 { margin: 2px 0; font-size: 18px; }
+.yard-detail-header p { margin: 0; color: var(--ink-soft); font-size: 9px; }
+.yard-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; border-bottom: 1px solid var(--line); }
+.yard-facts div { min-width: 0; padding: 7px 9px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.yard-facts div:nth-child(3n) { border-right: 0; }
+.yard-facts dt { color: var(--ink-soft); font-size: 8px; font-weight: 760; text-transform: uppercase; }
+.yard-facts dd { overflow: hidden; margin: 3px 0 0; font-size: 9px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.yard-detention { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 8px; border: 1px solid var(--line); background: var(--amber-soft); }
+.yard-detention div { display: grid; gap: 2px; padding: 7px; border-right: 1px solid var(--line); }
+.yard-detention div:last-child { border-right: 0; }
+.yard-detention span { color: var(--ink-soft); font-size: 8px; text-transform: uppercase; }
+.yard-detention strong { font-size: 10px; }
+.yard-actions { margin: 8px; border: 1px solid var(--line); }
+.yard-action-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; padding: 8px; }
+.yard-action-fields label,
+.yard-inline-door { display: grid; gap: 3px; color: var(--label-ink); font-size: 8px; font-weight: 760; text-transform: uppercase; }
+.yard-action-fields input,
+.yard-action-fields select,
+.yard-inline-door select { width: 100%; min-width: 0; height: var(--control-height); border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); color: var(--control-ink); font-size: 9px; }
+.yard-action-buttons { display: flex; flex-wrap: wrap; align-items: end; justify-content: flex-end; gap: 7px; padding: 7px 8px; border-top: 1px solid var(--line); }
+.yard-inline-door { min-width: 150px; flex: 1 1 170px; }
+.yard-action-buttons .button { min-height: var(--control-height); margin: 0; }
+.yard-timeline { margin: 8px; border: 1px solid var(--line); }
+.yard-timeline article { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 6px; min-height: 46px; align-items: start; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+.yard-timeline article:last-child { border-bottom: 0; }
+.yard-event-dot { width: 7px; height: 7px; margin-top: 3px; border: 2px solid var(--blue); border-radius: 50%; background: var(--surface); }
+.yard-timeline strong { font-size: 9px; }
+.yard-timeline p { margin: 2px 0; color: var(--ink-soft); font-size: 8px; }
+.yard-timeline small { color: var(--ink-soft); font-size: 8px; }
+.yard-timeline time { color: var(--ink-soft); font-size: 8px; white-space: nowrap; }
+.yard-empty,
+.yard-state { display: grid; min-height: 100%; place-items: center; align-content: center; padding: 28px; color: var(--ink-soft); text-align: center; }
+.yard-empty h2,
+.yard-state h2 { margin: 7px 0 3px; color: var(--ink); font-size: 14px; }
+.yard-empty p,
+.yard-state p { max-width: 360px; margin: 0; font-size: 9px; }
+
+.yard-dialog-backdrop { position: fixed; z-index: 140; inset: 0; display: grid; place-items: start center; padding-top: 50px; background: rgb(12 20 28 / 60%); }
+.yard-dialog { display: grid; width: min(720px, calc(100vw - 48px)); max-height: calc(100vh - 100px); grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); box-shadow: 0 24px 60px rgb(0 0 0 / 25%); }
+.yard-dialog > header,
+.yard-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; background: var(--surface-raised); }
+.yard-dialog > header { border-bottom: 1px solid var(--line); }
+.yard-dialog > footer { justify-content: flex-end; border-top: 1px solid var(--line); }
+.yard-dialog h2 { margin: 1px 0 0; font-size: 14px; }
+.yard-dialog-fields { display: grid; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 10px; overflow-y: auto; }
+.yard-dialog-fields label { display: grid; gap: 3px; color: var(--label-ink); font-size: 8px; font-weight: 760; text-transform: uppercase; }
+.yard-dialog-fields label.full { grid-column: 1 / -1; }
+.yard-dialog-fields input,
+.yard-dialog-fields select,
+.yard-dialog-fields textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); color: var(--control-ink); font-size: 10px; }
+.yard-dialog-fields input,
+.yard-dialog-fields select { height: var(--control-height); padding: 0 7px; }
+.yard-dialog-fields textarea { min-height: 64px; padding: 6px 7px; resize: vertical; }
+.yard-dialog .button { min-height: var(--control-height); margin: 0; }
+.yard-command-error { position: absolute; z-index: 145; right: 12px; bottom: 12px; display: flex; max-width: 620px; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--danger-line); border-radius: 4px; background: var(--red-soft); color: var(--danger-ink); box-shadow: 0 9px 24px rgb(0 0 0 / 14%); font-size: 9px; }
+
+@media (max-width: 1250px) {
+  .yard-toolbar > label { min-width: 110px; }
+  .yard-toolbar .secondary-action { display: none; }
+  .yard-board { grid-template-columns: minmax(600px, 1.3fr) minmax(340px, .7fr); }
+  .yard-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .yard-facts div:nth-child(3n) { border-right: 1px solid var(--line); }
+  .yard-facts div:nth-child(2n) { border-right: 0; }
+}

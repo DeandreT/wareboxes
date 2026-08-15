@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -17,7 +18,19 @@ pub struct Config {
 }
 
 pub enum PublisherConfig {
-    Http { endpoint: Url, bearer_token: String },
+    Http {
+        endpoint: Url,
+        bearer_token: String,
+        signing_secret: String,
+    },
+    Sftp {
+        host: String,
+        port: u16,
+        username: String,
+        private_key_file: PathBuf,
+        known_hosts_file: PathBuf,
+        remote_directory: String,
+    },
     Stdout,
 }
 
@@ -35,7 +48,16 @@ impl Config {
             optional_env("OUTBOX_PUBLISHER")?,
             optional_env("OUTBOX_PUBLISH_URL")?,
             optional_env("OUTBOX_PUBLISH_BEARER_TOKEN")?,
+            optional_env("OUTBOX_WEBHOOK_SIGNING_SECRET")?,
             parse_bool_env("OUTBOX_ALLOW_INSECURE_HTTP", false)?,
+            SftpEnvironment {
+                host: optional_env("OUTBOX_SFTP_HOST")?,
+                port: optional_env("OUTBOX_SFTP_PORT")?,
+                username: optional_env("OUTBOX_SFTP_USERNAME")?,
+                private_key_file: optional_env("OUTBOX_SFTP_PRIVATE_KEY_FILE")?,
+                known_hosts_file: optional_env("OUTBOX_SFTP_KNOWN_HOSTS_FILE")?,
+                remote_directory: optional_env("OUTBOX_SFTP_REMOTE_DIRECTORY")?,
+            },
         )?;
         let worker = WorkerConfig {
             batch_size: parse_i64_env("OUTBOX_BATCH_SIZE", 100, 1, 1_000)?,
@@ -63,7 +85,9 @@ fn publisher_config(
     publisher: Option<String>,
     endpoint: Option<String>,
     bearer_token: Option<String>,
+    signing_secret: Option<String>,
     allow_insecure_http: bool,
+    sftp: SftpEnvironment,
 ) -> anyhow::Result<PublisherConfig> {
     match publisher.as_deref().map(str::trim) {
         Some("http") => {
@@ -77,15 +101,80 @@ fn publisher_config(
                 );
             }
             let bearer_token = required_value("OUTBOX_PUBLISH_BEARER_TOKEN", bearer_token)?;
+            let signing_secret = required_value("OUTBOX_WEBHOOK_SIGNING_SECRET", signing_secret)?;
+            if signing_secret.len() < 32 {
+                bail!("OUTBOX_WEBHOOK_SIGNING_SECRET must contain at least 32 bytes");
+            }
             Ok(PublisherConfig::Http {
                 endpoint,
                 bearer_token,
+                signing_secret,
+            })
+        }
+        Some("sftp") => {
+            let host = required_value("OUTBOX_SFTP_HOST", sftp.host)?;
+            let username = required_value("OUTBOX_SFTP_USERNAME", sftp.username)?;
+            let private_key_file = PathBuf::from(required_value(
+                "OUTBOX_SFTP_PRIVATE_KEY_FILE",
+                sftp.private_key_file,
+            )?);
+            let known_hosts_file = PathBuf::from(required_value(
+                "OUTBOX_SFTP_KNOWN_HOSTS_FILE",
+                sftp.known_hosts_file,
+            )?);
+            let remote_directory =
+                required_value("OUTBOX_SFTP_REMOTE_DIRECTORY", sftp.remote_directory)?;
+            validate_remote_directory(&remote_directory)?;
+            let port = sftp
+                .port
+                .map(|value| {
+                    value
+                        .parse::<u16>()
+                        .context("OUTBOX_SFTP_PORT must be a TCP port")
+                })
+                .transpose()?
+                .unwrap_or(22);
+            if port == 0 {
+                bail!("OUTBOX_SFTP_PORT must be positive");
+            }
+            Ok(PublisherConfig::Sftp {
+                host,
+                port,
+                username,
+                private_key_file,
+                known_hosts_file,
+                remote_directory,
             })
         }
         Some("stdout") => Ok(PublisherConfig::Stdout),
-        None | Some("") => bail!("OUTBOX_PUBLISHER must be set to http or stdout"),
+        None | Some("") => bail!("OUTBOX_PUBLISHER must be set to http, sftp, or stdout"),
         Some(value) => bail!("unsupported OUTBOX_PUBLISHER: {value}"),
     }
+}
+
+#[derive(Default)]
+struct SftpEnvironment {
+    host: Option<String>,
+    port: Option<String>,
+    username: Option<String>,
+    private_key_file: Option<String>,
+    known_hosts_file: Option<String>,
+    remote_directory: Option<String>,
+}
+
+fn validate_remote_directory(value: &str) -> anyhow::Result<()> {
+    if !value.starts_with('/')
+        || value.ends_with('/')
+        || value.split('/').any(|segment| segment == "..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
+    {
+        bail!(
+            "OUTBOX_SFTP_REMOTE_DIRECTORY must be an absolute safe path without a trailing slash"
+        );
+    }
+    Ok(())
 }
 
 fn required_value(name: &str, value: Option<String>) -> anyhow::Result<String> {
@@ -162,7 +251,7 @@ mod tests {
 
     #[test]
     fn requires_an_explicit_publisher() {
-        let error = publisher_config(None, None, None, false)
+        let error = publisher_config(None, None, None, None, false, SftpEnvironment::default())
             .err()
             .expect("missing publisher must fail");
         assert!(error.to_string().contains("OUTBOX_PUBLISHER"));
@@ -174,14 +263,27 @@ mod tests {
             Some("http".into()),
             Some("http://example.com/events".into()),
             Some("token".into()),
+            Some("x".repeat(32)),
             false,
+            SftpEnvironment::default(),
         )
         .is_err());
         assert!(publisher_config(
             Some("http".into()),
             Some("https://example.com/events".into()),
             None,
+            Some("x".repeat(32)),
             false,
+            SftpEnvironment::default(),
+        )
+        .is_err());
+        assert!(publisher_config(
+            Some("http".into()),
+            Some("https://example.com/events".into()),
+            Some("token".into()),
+            Some("short".into()),
+            false,
+            SftpEnvironment::default(),
         )
         .is_err());
     }
@@ -189,8 +291,49 @@ mod tests {
     #[test]
     fn accepts_explicit_development_stdout_publisher() {
         assert!(matches!(
-            publisher_config(Some("stdout".into()), None, None, false).unwrap(),
+            publisher_config(
+                Some("stdout".into()),
+                None,
+                None,
+                None,
+                false,
+                SftpEnvironment::default(),
+            )
+            .unwrap(),
             PublisherConfig::Stdout
         ));
+    }
+
+    #[test]
+    fn sftp_requires_strict_host_identity_and_safe_remote_path() {
+        let environment = |remote_directory: &str| SftpEnvironment {
+            host: Some("sftp.example.test".into()),
+            username: Some("warehouse".into()),
+            private_key_file: Some("/run/secrets/sftp-key".into()),
+            known_hosts_file: Some("/run/secrets/known-hosts".into()),
+            remote_directory: Some(remote_directory.into()),
+            ..SftpEnvironment::default()
+        };
+        assert!(matches!(
+            publisher_config(
+                Some("sftp".into()),
+                None,
+                None,
+                None,
+                false,
+                environment("/exchange/outbound"),
+            )
+            .unwrap(),
+            PublisherConfig::Sftp { port: 22, .. }
+        ));
+        assert!(publisher_config(
+            Some("sftp".into()),
+            None,
+            None,
+            None,
+            false,
+            environment("../../unsafe"),
+        )
+        .is_err());
     }
 }

@@ -2,8 +2,11 @@
 
 pub mod authorization;
 pub mod backorder;
+pub mod billing;
+pub mod configuration;
 mod context;
 pub mod cross_dock;
+pub mod customer_portal;
 pub mod customer_return;
 pub mod cycle_count;
 pub mod cycle_count_control;
@@ -23,6 +26,7 @@ pub mod inventory_recall;
 pub mod item_storage_policy;
 pub mod item_substitution;
 pub mod item_traceability_policy;
+pub mod labor;
 pub mod order_allocation;
 pub mod order_amendment;
 pub mod order_cancellation;
@@ -38,9 +42,14 @@ pub mod purchase_order;
 pub mod putaway;
 pub mod replenishment;
 pub mod shipping;
+pub mod slotting;
 pub mod storage_zone;
 pub mod topology;
 pub mod transfer_order;
+pub mod value_added_work;
+pub mod vendor_return;
+pub mod workforce_identity;
+pub mod yard;
 
 pub use context::CommandContext;
 pub use error::{ApplicationError, ApplicationResult, ValidationIssue};

@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify a Wareboxes PostgreSQL restore weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=30m
+Unit=wareboxes-restore-drill.service
+
+[Install]
+WantedBy=timers.target

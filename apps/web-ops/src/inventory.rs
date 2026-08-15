@@ -227,7 +227,7 @@ pub fn InventoryTable(
                 <button type="button" class="button secondary-action" disabled=move || signals.loading.get() on:click=apply_filter>"Apply"</button>
             </div>
             <div class="table-scroll">
-                <table class="data-table">
+                <table class="data-table inventory-position-table">
                     <caption class="sr-only">"Inventory balances in the current access scope"</caption>
                     <thead>
                         <tr>
@@ -322,7 +322,7 @@ pub fn InventoryTable(
                             if rows.is_empty() {
                                 view! {
                                     <tr>
-                                        <td class="table-empty-row" colspan="10">"No inventory positions match this server-side view."</td>
+                                        <td class="table-empty-row" colspan="10">"No inventory positions match the current filters."</td>
                                     </tr>
                                 }
                                     .into_any()

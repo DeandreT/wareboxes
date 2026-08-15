@@ -195,6 +195,14 @@ async fn receive_license_plate(
     )
     .await
     .unwrap());
+    start_expected_receipt_unloading(
+        &fixture.db,
+        access,
+        load_id,
+        receiving_location_id,
+        &format!("{barcode}-unloading"),
+    )
+    .await;
     repo::inbound_receipt::receive_expected_inventory(
         &fixture.db,
         access,

@@ -1,7 +1,11 @@
 use leptos::prelude::*;
 
+#[path = "admin_billing.rs"]
+mod billing;
 #[path = "admin_clients.rs"]
 mod clients;
+#[path = "admin_configuration.rs"]
+mod configuration;
 #[path = "admin_count_plans.rs"]
 mod count_plans;
 #[path = "admin_integrations.rs"]
@@ -11,7 +15,9 @@ mod security;
 #[path = "admin_workforce.rs"]
 mod workforce;
 
+pub use billing::BillingWorkbench;
 pub use clients::ClientsWorkbench;
+pub use configuration::ConfigurationsWorkbench;
 pub use count_plans::CountPlansWorkbench;
 pub use integrations::IntegrationsWorkbench;
 pub use security::{PermissionsWorkbench, RolesWorkbench, UsersWorkbench};
@@ -27,6 +33,8 @@ pub enum AdministrationArea {
     Permissions,
     Employees,
     CountPlans,
+    Configuration,
+    Billing,
     Integrations,
 }
 
@@ -39,6 +47,8 @@ impl AdministrationArea {
             Self::Permissions => "Permissions",
             Self::Employees => "Employees",
             Self::CountPlans => "Count plans",
+            Self::Configuration => "Configuration",
+            Self::Billing => "3PL billing",
             Self::Integrations => "Integrations",
         }
     }
@@ -49,6 +59,8 @@ impl AdministrationArea {
             Self::Users | Self::Roles | Self::Permissions => "Organization security",
             Self::Employees => "Warehouse workforce",
             Self::CountPlans => "Inventory accuracy",
+            Self::Configuration => "Decision governance",
+            Self::Billing => "Client financial operations",
             Self::Integrations => "Platform operations",
         }
     }
@@ -90,6 +102,12 @@ pub fn AdministrationWorkspace(
                 AdministrationArea::CountPlans => {
                     view! { <CountPlansWorkbench on_unauthorized/> }.into_any()
                 }
+                AdministrationArea::Configuration => {
+                    view! { <ConfigurationsWorkbench on_unauthorized/> }.into_any()
+                }
+                AdministrationArea::Billing => {
+                    view! { <BillingWorkbench on_unauthorized/> }.into_any()
+                }
                 AdministrationArea::Integrations => {
                     view! { <IntegrationsWorkbench on_unauthorized/> }.into_any()
                 }
@@ -115,6 +133,12 @@ const fn area_description(area: AdministrationArea) -> &'static str {
         }
         AdministrationArea::CountPlans => {
             "Plan facility and client inventory counts and review recorded count lines."
+        }
+        AdministrationArea::Configuration => {
+            "Version, approve, promote, simulate, and roll back typed warehouse decision rules."
+        }
+        AdministrationArea::Billing => {
+            "Reconcile owner-scoped operational events to governed rates, review charges, and export financial batches."
         }
         AdministrationArea::Integrations => {
             "Inspect inbound receipts and outbound delivery state across connected systems."

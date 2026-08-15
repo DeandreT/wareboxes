@@ -36,6 +36,13 @@ use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
 mod backorder;
 pub use backorder::{configure_backorder_policy, split_order_backorder};
+mod billing;
+pub use billing::{
+    activate_billing_contract, billing_workspace, capture_billable_event,
+    capture_billing_storage_snapshot, close_billing_contract, configure_billing_rate,
+    create_billing_contract, export_billing_run, generate_billing_run, review_billing_run,
+    BillingFilters,
+};
 mod cycle_count;
 pub use cycle_count::{
     configure_cycle_count_policy, create_cycle_count_task, cycle_count_candidates,
@@ -45,6 +52,16 @@ mod customer_return;
 pub use customer_return::{
     cancel_customer_return, create_customer_return, customer_return_detail, customer_returns,
     plan_customer_return_load, CustomerReturnFilters,
+};
+mod customer_portal;
+pub use customer_portal::{
+    customer_portal_inventory_report_path, customer_portal_workspace, CustomerPortalFilters,
+};
+mod configuration;
+pub use configuration::{
+    activate_configuration, approve_configuration, configurations, create_configuration,
+    retire_configuration, rollback_configuration, simulate_configuration, submit_configuration,
+    ConfigurationFilters,
 };
 mod expected_receiving;
 pub use expected_receiving::expected_receiving_session;
@@ -94,6 +111,14 @@ pub use item_traceability_policy::{
     configure_item_traceability_policy, item_traceability_policies,
     retire_item_traceability_policy, ItemTraceabilityPolicyFilters,
 };
+mod labor;
+pub use labor::{
+    cancel_labor_activity, certify_labor_employee, change_labor_equipment_status, clock_in_labor,
+    clock_out_labor, complete_labor_activity, configure_labor_equipment_class,
+    configure_labor_skill, configure_labor_standard, correct_labor_activity,
+    correct_labor_attendance, create_labor_equipment_asset, labor_reference_candidates,
+    labor_roster, labor_workspace, revoke_labor_certification, start_labor_activity, LaborFilters,
+};
 mod order;
 pub use order::{
     amend_fulfillment_order, create_fulfillment_order, order_entry_items,
@@ -115,6 +140,23 @@ pub use transfer_order::{
     cancel_transfer_order, create_transfer_order, dispatch_transfer_order, receive_transfer_order,
     release_transfer_order, transfer_execution_readiness, transfer_order_detail, transfer_orders,
     TransferOrderFilters,
+};
+mod value_added_work;
+pub use value_added_work::{
+    cancel_value_added_work, complete_value_added_work, create_value_added_work,
+    release_value_added_work, value_added_work, value_added_work_detail, ValueAddedWorkFilters,
+};
+mod vendor_return;
+pub use vendor_return::{
+    cancel_vendor_return, create_vendor_return, release_vendor_return, ship_vendor_return,
+    vendor_return_detail, vendor_returns, VendorReturnFilters,
+};
+mod yard;
+pub use yard::{
+    assign_yard_visit_door, cancel_yard_appointment, complete_yard_operation,
+    configure_yard_location, create_yard_appointment, gate_in_yard_visit, gate_out_yard_visit,
+    no_show_yard_appointment, register_yard_asset, reject_yard_visit, spot_yard_visit,
+    start_yard_operation, yard_workspace, YardFilters,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

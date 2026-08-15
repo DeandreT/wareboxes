@@ -7,11 +7,16 @@ pub mod auth;
 pub mod config;
 pub use wareboxes_persistence_postgres::db;
 pub mod error;
+pub mod health;
 mod identity;
+pub mod observability;
+#[cfg(feature = "openapi")]
+pub mod openapi;
 pub mod permissions;
 pub mod repo;
 pub mod request_context;
 pub mod routes;
 pub mod state;
+pub mod traffic;
 #[cfg(feature = "ssr")]
 pub mod web_app;

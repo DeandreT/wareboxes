@@ -2,6 +2,8 @@
 
 mod allocation;
 mod backorder;
+mod billing;
+mod configuration;
 mod cross_dock;
 mod customer_return;
 mod cycle_count;
@@ -15,6 +17,7 @@ mod inventory_recall;
 mod item_storage_policy;
 mod item_substitution;
 mod item_traceability_policy;
+mod labor;
 mod order;
 mod order_amendment;
 mod order_cancellation;
@@ -28,9 +31,15 @@ mod picking;
 mod purchase_order;
 mod replenishment;
 mod shipping;
+mod slotting;
 mod storage_zone;
 mod tenant;
 mod transfer_order;
+mod value_added_work;
+mod vendor_return;
+mod work_orchestration;
+mod workforce;
+mod yard;
 
 pub use allocation::{
     assess_order_allocation_readiness, plan_fefo_allocation, AllocationCandidate,
@@ -42,6 +51,19 @@ pub use backorder::{
     split_current_allocation_shortage, BackorderDetails, BackorderError, BackorderLineSnapshot,
     BackorderNote, BackorderPolicyMode, BackorderPolicyRevision, BackorderReason,
     BackorderSplitLineTransition, BackorderSplitTransition, MAX_BACKORDER_NOTE_LENGTH,
+};
+pub use billing::{
+    validate_review_separation, BillingContractNumber, BillingContractStatus,
+    BillingEffectiveWindow, BillingError, BillingQuantity, BillingRateDefinition, BillingRunStatus,
+    CurrencyCode, MAX_BILLING_CONTRACT_NUMBER_LENGTH, MAX_BILLING_DESCRIPTION_LENGTH,
+    MAX_BILLING_QUANTITY, MAX_BILLING_RATE_MINOR, MAX_BILLING_SOURCE_TYPE_LENGTH,
+};
+pub use configuration::{
+    resolve_effective_rule, rollback_as_draft, BillableEventType, BillingUnit,
+    ConfigurationEffectiveWindow, ConfigurationError, ConfigurationScope, ConfigurationStatus,
+    DecisionRuleDefinition, DecisionRuleKind, EffectiveDecisionRule, InventoryRotation,
+    MAX_CONFIGURATION_CURRENCY_LENGTH, MAX_CONFIGURATION_RATE_MINOR, MAX_PERCENTAGE_BASIS_POINTS,
+    MAX_WAVE_ORDERS,
 };
 pub use cross_dock::{
     plan_cross_dock, CrossDockCancellationDetails, CrossDockCancellationReason,
@@ -140,6 +162,7 @@ pub use item_traceability_policy::{
     ItemTraceabilityPolicyStatus, ItemTraceabilityPolicyUom, MinimumShelfLifeDays,
     TraceabilityRequirement, MAX_ITEM_TRACEABILITY_POLICY_UOM_LENGTH, MAX_MINIMUM_SHELF_LIFE_DAYS,
 };
+pub use labor::*;
 pub use order::{
     CatalogItemId, FulfillmentOrderDemandLine, NewFulfillmentOrder, OrderCreationError,
     OrderCreationField, OrderHoldReason, OrderHoldTransitionError, OrderKey, OrderLineKey,
@@ -240,6 +263,7 @@ pub use shipping::{
     MAX_SHIPMENT_CANCELLATION_NOTE_LENGTH, MAX_SHIPMENT_SCAN_VALUE_LENGTH,
     MAX_TRACKING_NUMBER_LENGTH,
 };
+pub use slotting::*;
 pub use storage_zone::{
     StorageZoneCode, StorageZoneDefinition, StorageZoneError, StorageZoneLocationIds,
     StorageZoneName, StorageZonePurpose, StorageZoneRevision, StorageZoneStatus,
@@ -254,6 +278,22 @@ pub use transfer_order::{
     TransferOrderNumber, TransferOrderQuantity, TransferOrderRevision, TransferOrderScanValue,
     TransferOrderStatus, MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH,
     MAX_TRANSFER_ORDER_NUMBER_LENGTH,
+};
+pub use value_added_work::{
+    validate_value_added_quantities, validate_value_added_shape, ValueAddedInventoryStatus,
+    ValueAddedQuantity, ValueAddedRevision, ValueAddedWorkError, ValueAddedWorkKind,
+    ValueAddedWorkNote, ValueAddedWorkNumber, ValueAddedWorkStatus, MAX_VALUE_ADDED_WORK_LINES,
+    MAX_VALUE_ADDED_WORK_NOTE_LENGTH, MAX_VALUE_ADDED_WORK_NUMBER_LENGTH,
+};
+pub use vendor_return::*;
+pub use work_orchestration::*;
+pub use workforce::*;
+pub use yard::{
+    calculate_yard_detention, YardAppointmentNumber, YardAppointmentStatus, YardAppointmentWindow,
+    YardAssetKind, YardAssetNumber, YardDetention, YardDirection, YardError, YardFreeMinutes,
+    YardLocationCode, YardLocationKind, YardName, YardNote, YardOperation, YardRevision,
+    YardVisitStatus, MAX_YARD_CODE_LENGTH, MAX_YARD_FREE_MINUTES, MAX_YARD_NAME_LENGTH,
+    MAX_YARD_NOTE_LENGTH,
 };
 
 use chrono::{DateTime, Utc};
@@ -338,6 +378,17 @@ positive_id!(
     "facility shipping origin configuration ID"
 );
 positive_id!(UserId, "user ID");
+positive_id!(EmployeeId, "employee ID");
+positive_id!(EmployeeIdentityChangeId, "employee identity change ID");
+positive_id!(LaborSkillId, "labor skill ID");
+positive_id!(EmployeeCertificationId, "employee certification ID");
+positive_id!(EquipmentClassId, "equipment class ID");
+positive_id!(EquipmentAssetId, "equipment asset ID");
+positive_id!(LaborStandardId, "labor standard ID");
+positive_id!(AttendanceIntervalId, "attendance interval ID");
+positive_id!(AttendanceAdjustmentId, "attendance adjustment ID");
+positive_id!(LaborActivityId, "labor activity ID");
+positive_id!(LaborActivityAdjustmentId, "labor activity adjustment ID");
 positive_id!(OrderId, "order ID");
 positive_id!(OrderLineId, "order line ID");
 positive_id!(OrderAmendmentId, "order amendment ID");
@@ -345,6 +396,21 @@ positive_id!(OrderLineAmendmentId, "order line amendment ID");
 positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(BackorderPolicyId, "backorder policy ID");
 positive_id!(BackorderSplitId, "backorder split ID");
+positive_id!(ConfigurationVersionId, "configuration version ID");
+positive_id!(BillingContractId, "billing contract ID");
+positive_id!(BillingRateId, "billing rate ID");
+positive_id!(BillableEventId, "billable event ID");
+positive_id!(BillingStorageSnapshotId, "billing storage snapshot ID");
+positive_id!(BillingChargeId, "billing charge ID");
+positive_id!(BillingReconciliationRunId, "billing reconciliation run ID");
+positive_id!(BillingFinancialExportId, "billing financial export ID");
+positive_id!(YardLocationId, "yard location ID");
+positive_id!(YardAssetId, "yard asset ID");
+positive_id!(YardAppointmentId, "yard appointment ID");
+positive_id!(YardAppointmentEventId, "yard appointment event ID");
+positive_id!(YardVisitId, "yard visit ID");
+positive_id!(YardVisitEventId, "yard visit event ID");
+positive_id!(YardDetentionId, "yard detention ID");
 positive_id!(CycleCountPolicyId, "cycle count policy ID");
 positive_id!(CycleCountVarianceId, "cycle count variance ID");
 positive_id!(CustomerReturnId, "customer return ID");
@@ -381,6 +447,16 @@ positive_id!(
 positive_id!(InventoryHoldId, "inventory hold ID");
 positive_id!(InventoryRecallId, "inventory recall ID");
 positive_id!(StorageZoneId, "storage zone ID");
+positive_id!(SlottingProfileId, "slotting profile ID");
+positive_id!(SlottingRunId, "slotting run ID");
+positive_id!(SlottingRecommendationId, "slotting recommendation ID");
+positive_id!(WorkOrchestrationPolicyId, "work orchestration policy ID");
+positive_id!(WorkOrchestrationSignalId, "work orchestration signal ID");
+positive_id!(WorkOrchestrationPlanId, "work orchestration plan ID");
+positive_id!(
+    WorkOrchestrationPlanItemId,
+    "work orchestration plan item ID"
+);
 positive_id!(InboundAsnId, "inbound ASN ID");
 positive_id!(InboundAsnLineId, "inbound ASN line ID");
 positive_id!(InboundAsnLoadPlanId, "inbound ASN load plan ID");
@@ -475,6 +551,13 @@ positive_id!(InventoryBalanceId, "inventory balance ID");
 positive_id!(ItemBatchId, "item batch ID");
 positive_id!(LocationId, "location ID");
 positive_id!(LicensePlateId, "license plate ID");
+positive_id!(ValueAddedWorkId, "value-added work ID");
+positive_id!(ValueAddedWorkInputId, "value-added work input ID");
+positive_id!(ValueAddedWorkOutputId, "value-added work output ID");
+positive_id!(ValueAddedWorkEventId, "value-added work event ID");
+positive_id!(VendorReturnId, "vendor return ID");
+positive_id!(VendorReturnLineId, "vendor return line ID");
+positive_id!(VendorReturnEventId, "vendor return event ID");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SiteScope {

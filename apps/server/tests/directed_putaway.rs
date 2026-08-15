@@ -178,6 +178,14 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     )
     .await
     .unwrap();
+    start_expected_receipt_unloading(
+        &fixture.db,
+        &access,
+        load_id,
+        receiving_location_id,
+        "putaway-unloading",
+    )
+    .await;
     let receipt = repo::inbound_receipt::receive_expected_inventory(
         &fixture.db,
         &access,

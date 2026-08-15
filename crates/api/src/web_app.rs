@@ -1,6 +1,9 @@
+use axum::http::Request;
+use axum::middleware;
 use axum::Router;
 use leptos::prelude::{get_configuration, provide_context, LeptosOptions};
 use leptos_axum::{generate_route_list, LeptosRoutes};
+use tower_http::trace::TraceLayer;
 use wareboxes_core::dto::WebSessionContext;
 use wareboxes_web_ops::app::{
     shell, App, InitialWebSession, InitialWebWorkspace, WorkspaceBootstrap,
@@ -10,7 +13,7 @@ use wareboxes_web_ops::app::{
 use crate::error::AppResult;
 use crate::routes;
 use crate::state::AppState;
-use crate::{auth, repo};
+use crate::{auth, observability, repo, request_context, traffic};
 
 pub fn with_web_app(api: Router, state: AppState) -> anyhow::Result<Router> {
     let configuration = get_configuration(None)?;
@@ -24,7 +27,7 @@ pub fn with_web_app(api: Router, state: AppState) -> anyhow::Result<Router> {
 pub fn with_web_app_options(api: Router, state: AppState, options: LeptosOptions) -> Router {
     let app_routes = generate_route_list(App);
     let render_options = options.clone();
-    let render_state = state;
+    let render_state = state.clone();
     let handler = move |request: axum::extract::Request| {
         let options = render_options.clone();
         let state = render_state.clone();
@@ -70,7 +73,31 @@ pub fn with_web_app_options(api: Router, state: AppState, options: LeptosOptions
     let web = Router::new()
         .leptos_routes_with_handler(app_routes, handler)
         .fallback(leptos_axum::file_and_error_handler(shell))
-        .with_state(options);
+        .with_state(options)
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                let request_id = request
+                    .headers()
+                    .get(request_context::REQUEST_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("unknown");
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %request.uri(),
+                    %request_id
+                )
+            }),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.traffic.clone(),
+            traffic::enforce,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.metrics.clone(),
+            observability::observe_request,
+        ))
+        .layer(middleware::from_fn(request_context::assign_request_id));
     api.merge(web)
 }
 

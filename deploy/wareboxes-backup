@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: wareboxes-backup [--check]
+
+Creates an encrypted restic snapshot of the Wareboxes PostgreSQL database.
+--check validates configuration, repository access, and database readiness
+without creating a snapshot.
+EOF
+}
+
+check_positive_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$name must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+check_identifier() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+    echo "$name must be a lowercase PostgreSQL identifier" >&2
+    exit 2
+  fi
+}
+
+check_only=false
+case "${1:-}" in
+  "") ;;
+  --check) check_only=true ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+if [ "$#" -gt 1 ]; then
+  usage >&2
+  exit 2
+fi
+
+: "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required}"
+if [ -z "${RESTIC_PASSWORD_FILE:-}" ] \
+  && [ -z "${RESTIC_PASSWORD_COMMAND:-}" ] \
+  && [ -z "${RESTIC_PASSWORD:-}" ]; then
+  echo "RESTIC_PASSWORD_FILE, RESTIC_PASSWORD_COMMAND, or RESTIC_PASSWORD is required" >&2
+  exit 2
+fi
+
+compose_file="${WAREBOXES_POSTGRES_COMPOSE_FILE:-/opt/wareboxes/runtime/postgres.compose.yml}"
+postgres_service="${WAREBOXES_POSTGRES_SERVICE:-postgres}"
+postgres_database="${WAREBOXES_POSTGRES_DATABASE:-wareboxes}"
+postgres_user="${WAREBOXES_POSTGRES_USER:-wareboxes_admin}"
+backup_host="${WAREBOXES_BACKUP_HOST:-$(hostname -f)}"
+backup_tag="${WAREBOXES_BACKUP_TAG:-wareboxes-postgres}"
+dump_path="${WAREBOXES_BACKUP_DUMP_PATH:-/wareboxes/postgres.dump}"
+keep_daily="${WAREBOXES_BACKUP_KEEP_DAILY:-7}"
+keep_weekly="${WAREBOXES_BACKUP_KEEP_WEEKLY:-5}"
+keep_monthly="${WAREBOXES_BACKUP_KEEP_MONTHLY:-12}"
+lock_file="${WAREBOXES_BACKUP_LOCK_FILE:-/run/lock/wareboxes-backup.lock}"
+
+if [ ! -f "$compose_file" ]; then
+  echo "PostgreSQL compose file does not exist: $compose_file" >&2
+  exit 2
+fi
+if [ -z "$backup_host" ] || [ -z "$backup_tag" ] || [[ "$dump_path" != /* ]]; then
+  echo "backup host, tag, and absolute dump path are required" >&2
+  exit 2
+fi
+check_identifier WAREBOXES_POSTGRES_SERVICE "$postgres_service"
+check_identifier WAREBOXES_POSTGRES_DATABASE "$postgres_database"
+check_identifier WAREBOXES_POSTGRES_USER "$postgres_user"
+check_positive_integer WAREBOXES_BACKUP_KEEP_DAILY "$keep_daily"
+check_positive_integer WAREBOXES_BACKUP_KEEP_WEEKLY "$keep_weekly"
+check_positive_integer WAREBOXES_BACKUP_KEEP_MONTHLY "$keep_monthly"
+
+for command_name in docker flock restic; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required" >&2
+    exit 127
+  fi
+done
+
+exec 9>"$lock_file"
+flock -n 9 || {
+  echo "another Wareboxes backup or restore operation is active" >&2
+  exit 1
+}
+
+compose=(docker compose -f "$compose_file")
+if ! "${compose[@]}" exec -T "$postgres_service" \
+  pg_isready --username "$postgres_user" --dbname "$postgres_database" >/dev/null; then
+  echo "Wareboxes PostgreSQL is not ready" >&2
+  exit 1
+fi
+if ! restic cat config >/dev/null; then
+  echo "restic repository is unavailable or uninitialized" >&2
+  exit 1
+fi
+
+if [ "$check_only" = true ]; then
+  echo "event=backup_configuration_valid host=$backup_host database=$postgres_database"
+  exit 0
+fi
+
+started_at="$(date +%s)"
+echo "event=backup_started host=$backup_host database=$postgres_database"
+"${compose[@]}" exec -T "$postgres_service" \
+  pg_dump \
+    --username "$postgres_user" \
+    --dbname "$postgres_database" \
+    --format=custom \
+    --no-owner \
+  | restic backup \
+      --host "$backup_host" \
+      --tag "$backup_tag" \
+      --stdin \
+      --stdin-filename "${dump_path#/}"
+
+# Read the encrypted snapshot back through pg_restore before applying retention.
+restic dump --host "$backup_host" --tag "$backup_tag" latest "$dump_path" \
+  | "${compose[@]}" exec -T "$postgres_service" pg_restore --list >/dev/null
+
+restic forget \
+  --host "$backup_host" \
+  --tag "$backup_tag" \
+  --keep-daily "$keep_daily" \
+  --keep-weekly "$keep_weekly" \
+  --keep-monthly "$keep_monthly" \
+  --prune
+
+finished_at="$(date +%s)"
+echo "event=backup_completed host=$backup_host database=$postgres_database duration_seconds=$((finished_at - started_at))"

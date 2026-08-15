@@ -136,6 +136,18 @@ pub(crate) async fn require_permission_tx(
     user_id: i64,
     permission: &str,
 ) -> AppResult<()> {
+    require_any_permission_tx(tx, tenant_id, user_id, &[permission]).await
+}
+
+pub(crate) async fn require_any_permission_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+    permissions: &[&str],
+) -> AppResult<()> {
+    if permissions.is_empty() {
+        return Err(AppError::forbidden());
+    }
     let direct_role_ids = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT role_id
@@ -196,7 +208,7 @@ pub(crate) async fn require_permission_tx(
           AND role_permission.role_id = ANY($2)
           AND role_permission.deleted IS NULL
           AND permission.deleted IS NULL
-          AND UPPER(permission.name) IN (UPPER($3), 'ADMIN')
+          AND (UPPER(permission.name) = ANY($3) OR UPPER(permission.name) = 'ADMIN')
         ORDER BY role_permission.id
         LIMIT 1
         FOR SHARE OF role_permission, permission
@@ -204,7 +216,12 @@ pub(crate) async fn require_permission_tx(
     )
     .bind(tenant_id.get())
     .bind(&role_ids)
-    .bind(permission)
+    .bind(
+        permissions
+            .iter()
+            .map(|permission| permission.to_uppercase())
+            .collect::<Vec<_>>(),
+    )
     .fetch_optional(&mut **tx)
     .await?;
     grant.map(|_| ()).ok_or_else(AppError::forbidden)

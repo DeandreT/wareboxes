@@ -104,6 +104,9 @@ BEGIN
   WHERE tenant_id = tenant AND deleted IS NULL
   ORDER BY is_default DESC, id
   LIMIT 1;
+  IF actor IS NULL THEN
+    RAISE EXCEPTION 'seed-inventory requires an active tenant member for command attribution';
+  END IF;
 
   INSERT INTO inventory_owners (tenant_id, created, name, email)
   VALUES (tenant, now(), 'Northstar Retail', 'northstar.retail@example.test')
@@ -277,10 +280,10 @@ BEGIN
 
     INSERT INTO command_idempotency_records
         (tenant_id, created, operation, idempotency_key, request_hash,
-         result_json, inventory_transaction_id)
+         result_json, inventory_transaction_id, actor_user_id)
     VALUES (
       tenant, now(), 'seed_inventory', 'WB-SEED-INV-' || position_no,
-      md5('WB-SEED-INV-' || position_no), to_jsonb(transaction), transaction
+      md5('WB-SEED-INV-' || position_no), to_jsonb(transaction), transaction, actor
     );
 
     INSERT INTO inventory_entries

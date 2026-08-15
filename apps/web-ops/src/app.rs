@@ -20,6 +20,7 @@ use crate::app_frame::{Brand, PageFrame};
 use crate::catalog::CatalogWorkbench;
 use crate::components::{Icon, SearchField, UiIcon};
 use crate::cross_dock::CrossDockWorkspace;
+use crate::customer_portal::CustomerPortal;
 use crate::customer_returns::CustomerReturnsWorkspace;
 use crate::cycle_count::CycleCountWorkspace;
 use crate::fulfillment::{LoadsWorkbench, OrdersWorkbench};
@@ -28,6 +29,7 @@ use crate::inventory::InventoryWorkspace;
 use crate::inventory_disposition::InventoryDispositionWorkbench;
 use crate::inventory_holds::QuantityHoldsWorkbench;
 use crate::inventory_integrity::InventoryIntegrityWorkbench;
+use crate::labor::LaborWorkspace;
 use crate::orders::OrderTable;
 use crate::outbound_loads::OutboundLoadsWorkspace;
 use crate::packing::PackingWorkspace;
@@ -40,7 +42,10 @@ use crate::shipping::ShippingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::ToastProvider;
 use crate::transfer_orders::TransferOrdersWorkspace;
+use crate::value_added_work::ValueAddedWorkWorkspace;
+use crate::vendor_returns::VendorReturnsWorkspace;
 use crate::view_model::{facility_inventory, format_quantity, has_permission, open_order_count};
+use crate::yard::YardWorkspace;
 
 const SESSION_BOOTSTRAP_ID: &str = "wareboxes-session-bootstrap";
 const WORKSPACE_BOOTSTRAP_ID: &str = "wareboxes-workspace-bootstrap";
@@ -181,6 +186,9 @@ pub(crate) enum Section {
     Packing,
     Shipping,
     OutboundLoads,
+    Yard,
+    Labor,
+    CustomerPortal,
     Putaway,
     CycleCounts,
     CrossDock,
@@ -189,6 +197,8 @@ pub(crate) enum Section {
     TransferOrders,
     InboundAsns,
     CustomerReturns,
+    VendorReturns,
+    ValueAddedWork,
     Catalog,
     Inventory,
     InventoryHolds,
@@ -264,6 +274,10 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/pick-waves.css"/>
                 <link rel="stylesheet" href="/shipping.css"/>
                 <link rel="stylesheet" href="/outbound-loads.css"/>
+                <link rel="stylesheet" href="/yard.css"/>
+                <link rel="stylesheet" href="/labor.css"/>
+                <link rel="stylesheet" href="/value-added-work.css"/>
+                <link rel="stylesheet" href="/customer-portal.css"/>
                 <link rel="stylesheet" href="/replenishment.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
                 <link rel="stylesheet" href="/cycle-count.css"/>
@@ -316,6 +330,9 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("packing") view=PackingPage/>
                     <Route path=StaticSegment("shipping") view=ShippingPage/>
                     <Route path=StaticSegment("outbound-loads") view=OutboundLoadsPage/>
+                    <Route path=StaticSegment("yard") view=YardPage/>
+                    <Route path=StaticSegment("labor") view=LaborPage/>
+                    <Route path=StaticSegment("portal") view=CustomerPortalPage/>
                     <Route path=StaticSegment("putaway") view=PutawayPage/>
                     <Route path=StaticSegment("cycle-counts") view=CycleCountsPage/>
                     <Route path=StaticSegment("cross-dock") view=CrossDockPage/>
@@ -324,6 +341,8 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("transfer-orders") view=TransferOrdersPage/>
                     <Route path=StaticSegment("inbound-asns") view=InboundAsnsPage/>
                     <Route path=StaticSegment("customer-returns") view=CustomerReturnsPage/>
+                    <Route path=StaticSegment("vendor-returns") view=VendorReturnsPage/>
+                    <Route path=StaticSegment("value-added-work") view=ValueAddedWorkPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
                     <Route path=StaticSegment("replenishment") view=ReplenishmentPage/>
@@ -364,6 +383,14 @@ pub fn App() -> impl IntoView {
                     <Route
                         path=(StaticSegment("administration"), StaticSegment("count-plans"))
                         view=CountPlansPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("configuration"))
+                        view=ConfigurationPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("billing"))
+                        view=BillingPage
                     />
                 </Routes>
             </Router>
@@ -652,6 +679,12 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::Yard if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+        }
+        Section::Labor if has_permission(session, "labor_view") => {
+            data.access = api::access().await?;
+        }
         Section::Putaway if has_permission(session, "wms") => {
             data.putaway_candidates = Some(
                 api::putaway_candidates(
@@ -723,6 +756,12 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::VendorReturns if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+        }
+        Section::ValueAddedWork if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+        }
         Section::PurchaseOrders if has_permission(session, "wms") => {
             data.access = api::access().await?;
         }
@@ -779,11 +818,15 @@ async fn load_workspace(
             data.access = api::access().await?;
         }
         Section::Administration(_) if has_permission(session, "admin") => {}
+        Section::CustomerPortal if has_permission(session, "customer_portal") => {}
         Section::Orders
         | Section::PickWaves
         | Section::Packing
         | Section::Shipping
         | Section::OutboundLoads
+        | Section::Yard
+        | Section::Labor
+        | Section::CustomerPortal
         | Section::Putaway
         | Section::CycleCounts
         | Section::CrossDock
@@ -792,6 +835,8 @@ async fn load_workspace(
         | Section::TransferOrders
         | Section::InboundAsns
         | Section::CustomerReturns
+        | Section::VendorReturns
+        | Section::ValueAddedWork
         | Section::Catalog
         | Section::Inventory
         | Section::InventoryHolds
@@ -834,6 +879,21 @@ fn OutboundLoadsPage() -> impl IntoView {
 }
 
 #[component]
+fn YardPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Yard/> }
+}
+
+#[component]
+fn LaborPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Labor/> }
+}
+
+#[component]
+fn CustomerPortalPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::CustomerPortal/> }
+}
+
+#[component]
 fn PutawayPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Putaway/> }
 }
@@ -856,6 +916,16 @@ fn InboundAsnsPage() -> impl IntoView {
 #[component]
 fn CustomerReturnsPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::CustomerReturns/> }
+}
+
+#[component]
+fn VendorReturnsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::VendorReturns/> }
+}
+
+#[component]
+fn ValueAddedWorkPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::ValueAddedWork/> }
 }
 
 #[component]
@@ -951,6 +1021,20 @@ fn CountPlansPage() -> impl IntoView {
 }
 
 #[component]
+fn ConfigurationPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Configuration)/>
+    }
+}
+
+#[component]
+fn BillingPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Billing)/>
+    }
+}
+
+#[component]
 fn IntegrationsPage() -> impl IntoView {
     view! {
         <AuthenticatedPage section=Section::Administration(AdministrationArea::Integrations)/>
@@ -1012,6 +1096,29 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 />
             }
             .into_any(),
+            Section::Yard if has_permission(&session, "wms") => view! {
+                <YardWorkspace
+                    access=data.access
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::Labor if has_permission(&session, "labor_view") => view! {
+                <LaborWorkspace
+                    access=data.access
+                    can_execute=has_permission(&session, "labor_execute") || has_permission(&session, "labor_supervise")
+                    can_configure=has_permission(&session, "labor_configure")
+                    can_manage_equipment=has_permission(&session, "labor_equipment")
+                    can_certify=has_permission(&session, "labor_certify")
+                    can_supervise=has_permission(&session, "labor_supervise")
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::CustomerPortal if has_permission(&session, "customer_portal") => view! {
+                <CustomerPortal on_unauthorized=session_expired_callback()/>
+            }
+            .into_any(),
             Section::Putaway if has_permission(&session, "wms") => view! {
                 <PutawayWorkspace
                     initial_candidates=data.putaway_candidates
@@ -1054,6 +1161,20 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 <CustomerReturnsWorkspace
                     access=data.access
                     locations=data.locations
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::VendorReturns if has_permission(&session, "wms") => view! {
+                <VendorReturnsWorkspace
+                    access=data.access
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::ValueAddedWork if has_permission(&session, "wms") => view! {
+                <ValueAddedWorkWorkspace
+                    access=data.access
                     on_unauthorized=session_expired_callback()
                 />
             }

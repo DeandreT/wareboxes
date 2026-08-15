@@ -32,6 +32,33 @@ use super::access::{lock_current_scope_tx, require_permission_tx};
 use super::order_creation;
 use crate::error::{AppError, AppResult};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdapterDescriptor {
+    pub(crate) key: &'static str,
+    pub(crate) mapping_version: i32,
+}
+
+pub(crate) const JSON_ORDER_ADAPTER: AdapterDescriptor = AdapterDescriptor {
+    key: STANDARD_ORDER_INTAKE_ADAPTER,
+    mapping_version: STANDARD_ORDER_INTAKE_MAPPING_VERSION,
+};
+
+pub(crate) const X12_940_ORDER_ADAPTER: AdapterDescriptor = AdapterDescriptor {
+    key: "x12.940.warehouse_shipping_order",
+    mapping_version: 1,
+};
+
+fn supported_adapter(key: &str, mapping_version: i32) -> AppResult<AdapterDescriptor> {
+    [JSON_ORDER_ADAPTER, X12_940_ORDER_ADAPTER]
+        .into_iter()
+        .find(|adapter| adapter.key == key && adapter.mapping_version == mapping_version)
+        .ok_or_else(|| {
+            AppError::conflict(format!(
+                "integration receipt uses unsupported adapter {key} version {mapping_version}"
+            ))
+        })
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct StoredProcessing {
     result: IntegrationOrderProcessingResult,
@@ -43,6 +70,7 @@ pub(crate) struct ReprocessingEnvelope {
     pub(crate) input_payload: Vec<u8>,
     pub(crate) input_payload_sha256: [u8; 32],
     pub(crate) correction_id: Option<IntegrationInboxCorrectionId>,
+    pub(crate) adapter: AdapterDescriptor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +86,7 @@ pub(crate) struct ProcessingRequest<'a> {
     expected_revision: Option<IntegrationInboxProcessingRevision>,
     input: ProcessingInput,
     reprocess: Option<&'a ReprocessIntegrationOrderCommand>,
+    adapter: AdapterDescriptor,
 }
 
 impl<'a> ProcessingRequest<'a> {
@@ -66,12 +95,14 @@ impl<'a> ProcessingRequest<'a> {
         expected_revision: Option<IntegrationInboxProcessingRevision>,
         input: ProcessingInput,
         reprocess: Option<&'a ReprocessIntegrationOrderCommand>,
+        adapter: AdapterDescriptor,
     ) -> Self {
         Self {
             receipt,
             expected_revision,
             input,
             reprocess,
+            adapter,
         }
     }
 }
@@ -104,6 +135,7 @@ pub(super) struct OutcomeWrite<'a> {
     ids: OutcomeIds,
     failure: Option<QuarantineReason<'a>>,
     applied_mappings: &'a [AppliedMapping],
+    adapter: Option<AdapterDescriptor>,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +369,7 @@ pub(super) async fn write_outcome_tx(
         ids: outcome_ids,
         failure,
         applied_mappings,
+        adapter,
     } = outcome;
     if let Some(failure) = &failure {
         validate_failure(failure)?;
@@ -361,6 +394,28 @@ pub(super) async fn write_outcome_tx(
     let owner_id = receipt
         .inventory_owner_id
         .ok_or_else(|| AppError::internal("order intake receipt lost inventory owner scope"))?;
+    let (adapter_key, mapping_version) = match previous {
+        Some(previous) => {
+            if adapter.is_some_and(|adapter| {
+                adapter.key != previous.result.adapter_key
+                    || adapter.mapping_version != previous.result.mapping_version
+            }) {
+                return Err(AppError::conflict(
+                    "integration receipt adapter changed between processing attempts",
+                ));
+            }
+            (
+                previous.result.adapter_key.as_str(),
+                previous.result.mapping_version,
+            )
+        }
+        None => {
+            let adapter = adapter.ok_or_else(|| {
+                AppError::internal("initial integration processing has no adapter identity")
+            })?;
+            (adapter.key, adapter.mapping_version)
+        }
+    };
     let (error_code, error_message) = failure
         .as_ref()
         .map(|failure| (Some(failure.code), Some(failure.message)))
@@ -415,8 +470,8 @@ pub(super) async fn write_outcome_tx(
         .bind(&receipt.deduplication_key)
         .bind(&receipt.payload_sha256)
         .bind(input.payload_sha256.as_slice())
-        .bind(STANDARD_ORDER_INTAKE_ADAPTER)
-        .bind(STANDARD_ORDER_INTAKE_MAPPING_VERSION)
+        .bind(adapter_key)
+        .bind(mapping_version)
         .bind(status.as_str())
         .bind(outcome_ids.order_id.map(OrderId::get))
         .bind(outcome_ids.order_revision.map(OrderRevision::get))
@@ -484,8 +539,8 @@ pub(super) async fn write_outcome_tx(
         correction_id: input.correction_id,
         input_payload_sha256: input.payload_sha256,
         inventory_owner_id: owner_id,
-        adapter_key: STANDARD_ORDER_INTAKE_ADAPTER.into(),
-        mapping_version: STANDARD_ORDER_INTAKE_MAPPING_VERSION,
+        adapter_key: adapter_key.into(),
+        mapping_version,
         status,
         revision: IntegrationInboxProcessingRevision::new(revision).map_err(AppError::internal)?,
         attempt_count,
@@ -563,6 +618,7 @@ pub(crate) async fn quarantine(
             },
             failure: Some(reason),
             applied_mappings: &[],
+            adapter: Some(request.adapter),
         },
     )
     .await?;
@@ -779,6 +835,7 @@ pub(crate) async fn process_external(
                             message: &message,
                         }),
                         applied_mappings: &[],
+                        adapter: Some(request.adapter),
                     },
                 )
                 .await?;
@@ -834,6 +891,7 @@ pub(crate) async fn process_external(
                 message,
             }),
             applied_mappings: &mappings,
+            adapter: Some(request.adapter),
         },
     )
     .await?;
@@ -900,6 +958,7 @@ pub(crate) async fn process_internal(
             ids: outcome_ids,
             failure: None,
             applied_mappings: &[],
+            adapter: Some(request.adapter),
         },
     )
     .await?;
@@ -984,7 +1043,8 @@ pub(crate) async fn receipt_for_reprocessing(
                receipt.owner_mapping_revision,
                COALESCE(correction.corrected_payload,receipt.raw_payload) AS input_payload,
                COALESCE(correction.payload_sha256,receipt.payload_sha256) AS input_payload_sha256,
-               processing.last_correction_id
+               processing.last_correction_id,processing.adapter_key,
+               processing.mapping_version
         FROM integration_inbox_receipts receipt
         LEFT JOIN integration_inbox_processings processing
           ON processing.tenant_id=receipt.tenant_id AND processing.receipt_id=receipt.id
@@ -1051,6 +1111,12 @@ pub(crate) async fn receipt_for_reprocessing(
                 payload_sha256: row.try_get("payload_sha256")?,
                 request_id: row.try_get("request_id")?,
             };
+            let adapter_key = row
+                .try_get::<Option<String>, _>("adapter_key")?
+                .ok_or_else(|| AppError::conflict("integration inbox receipt has no processing"))?;
+            let mapping_version = row
+                .try_get::<Option<i32>, _>("mapping_version")?
+                .ok_or_else(|| AppError::conflict("integration inbox receipt has no processing"))?;
             Ok::<_, AppError>(ReprocessingEnvelope {
                 receipt,
                 input_payload: row.try_get("input_payload")?,
@@ -1065,6 +1131,7 @@ pub(crate) async fn receipt_for_reprocessing(
                     .map(IntegrationInboxCorrectionId::new)
                     .transpose()
                     .map_err(|error| AppError::internal(error.to_string()))?,
+                adapter: supported_adapter(&adapter_key, mapping_version)?,
             })
         })
         .transpose()?;

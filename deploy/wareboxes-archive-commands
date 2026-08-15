@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: wareboxes-archive-commands [--check]
+
+Creates a cumulative, encrypted JSON Lines archive of durable command replay
+records older than the configured age. Canonical database records are retained so
+exact replay remains available online. --check validates the archive contract and
+dependencies without creating a snapshot.
+EOF
+}
+
+check_positive_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$name must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+check_identifier() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+    echo "$name must be a lowercase PostgreSQL identifier" >&2
+    exit 2
+  fi
+}
+
+check_only=false
+case "${1:-}" in
+  "") ;;
+  --check) check_only=true ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+if [ "$#" -gt 1 ]; then
+  usage >&2
+  exit 2
+fi
+
+: "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required}"
+if [ -z "${RESTIC_PASSWORD_FILE:-}" ] \
+  && [ -z "${RESTIC_PASSWORD_COMMAND:-}" ] \
+  && [ -z "${RESTIC_PASSWORD:-}" ]; then
+  echo "RESTIC_PASSWORD_FILE, RESTIC_PASSWORD_COMMAND, or RESTIC_PASSWORD is required" >&2
+  exit 2
+fi
+
+compose_file="${WAREBOXES_POSTGRES_COMPOSE_FILE:-/opt/wareboxes/runtime/postgres.compose.yml}"
+postgres_service="${WAREBOXES_POSTGRES_SERVICE:-postgres}"
+postgres_database="${WAREBOXES_POSTGRES_DATABASE:-wareboxes}"
+postgres_user="${WAREBOXES_POSTGRES_USER:-wareboxes_admin}"
+archive_host="${WAREBOXES_BACKUP_HOST:-$(hostname -f)}"
+archive_tag="${WAREBOXES_COMMAND_ARCHIVE_TAG:-wareboxes-command-archive}"
+archive_after_days="${WAREBOXES_COMMAND_ARCHIVE_AFTER_DAYS:-90}"
+keep_monthly="${WAREBOXES_COMMAND_ARCHIVE_KEEP_MONTHLY:-24}"
+lock_file="${WAREBOXES_BACKUP_LOCK_FILE:-/run/lock/wareboxes-backup.lock}"
+
+if [ ! -f "$compose_file" ]; then
+  echo "PostgreSQL compose file does not exist: $compose_file" >&2
+  exit 2
+fi
+if [ -z "$archive_host" ] || [ -z "$archive_tag" ]; then
+  echo "archive host and tag are required" >&2
+  exit 2
+fi
+check_identifier WAREBOXES_POSTGRES_SERVICE "$postgres_service"
+check_identifier WAREBOXES_POSTGRES_DATABASE "$postgres_database"
+check_identifier WAREBOXES_POSTGRES_USER "$postgres_user"
+check_positive_integer WAREBOXES_COMMAND_ARCHIVE_AFTER_DAYS "$archive_after_days"
+check_positive_integer WAREBOXES_COMMAND_ARCHIVE_KEEP_MONTHLY "$keep_monthly"
+
+for command_name in date docker flock restic sha256sum; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required" >&2
+    exit 127
+  fi
+done
+
+exec 9>"$lock_file"
+flock -n 9 || {
+  echo "another Wareboxes backup or restore operation is active" >&2
+  exit 1
+}
+
+compose=(docker compose -f "$compose_file")
+if ! "${compose[@]}" exec -T "$postgres_service" \
+  pg_isready --username "$postgres_user" --dbname "$postgres_database" >/dev/null; then
+  echo "Wareboxes PostgreSQL is not ready" >&2
+  exit 1
+fi
+if ! restic cat config >/dev/null; then
+  echo "restic repository is unavailable or uninitialized" >&2
+  exit 1
+fi
+
+archive_contract="$("${compose[@]}" exec -T "$postgres_service" \
+  psql \
+    --username "$postgres_user" \
+    --dbname "$postgres_database" \
+    --tuples-only \
+    --no-align \
+    --set ON_ERROR_STOP=1 \
+    --command "
+      SELECT parent.relkind = 'p'
+         AND actor.attnotnull
+         AND (SELECT COUNT(*) FROM pg_inherits WHERE inhparent = parent.oid) = 16
+      FROM pg_class parent
+      JOIN pg_attribute actor
+        ON actor.attrelid = parent.oid
+       AND actor.attname = 'actor_user_id'
+       AND NOT actor.attisdropped
+      WHERE parent.oid = 'public.command_idempotency_records'::REGCLASS
+    " | tr -d '[:space:]')"
+if [ "$archive_contract" != t ]; then
+  echo "durable command partitioning or actor-attribution contract is invalid" >&2
+  exit 1
+fi
+
+if [ "$check_only" = true ]; then
+  echo "event=command_archive_configuration_valid host=$archive_host database=$postgres_database"
+  exit 0
+fi
+
+cutoff="$(date --utc --date "$archive_after_days days ago" '+%Y-%m-%dT%H:%M:%SZ')"
+archive_path="/wareboxes/command-idempotency/through-${cutoff//:/-}.jsonl"
+archive_sql=$(cat <<SQL
+COPY (
+    SELECT jsonb_build_object(
+        'archive_schema_version', 1,
+        'id', id,
+        'tenant_id', tenant_id,
+        'created', created,
+        'operation', operation,
+        'idempotency_key', idempotency_key,
+        'request_hash', request_hash,
+        'result_json', result_json,
+        'inventory_transaction_id', inventory_transaction_id,
+        'actor_user_id', actor_user_id,
+        'request_id', request_id,
+        'result_schema_version', result_schema_version
+    )::TEXT
+    FROM command_idempotency_records
+    WHERE created < TIMESTAMPTZ '$cutoff'
+    ORDER BY created, tenant_id, id
+) TO STDOUT
+SQL
+)
+
+stream_records() {
+  "${compose[@]}" exec -T "$postgres_service" \
+    psql \
+      --username "$postgres_user" \
+      --dbname "$postgres_database" \
+      --quiet \
+      --set ON_ERROR_STOP=1 \
+      --command "$archive_sql"
+}
+
+record_count="$("${compose[@]}" exec -T "$postgres_service" \
+  psql \
+    --username "$postgres_user" \
+    --dbname "$postgres_database" \
+    --tuples-only \
+    --no-align \
+    --set ON_ERROR_STOP=1 \
+    --command "SELECT COUNT(*) FROM command_idempotency_records WHERE created < TIMESTAMPTZ '$cutoff'" \
+  | tr -d '[:space:]')"
+if [[ ! "$record_count" =~ ^[0-9]+$ ]]; then
+  echo "could not determine durable command archive record count" >&2
+  exit 1
+fi
+
+expected_checksum="$(stream_records | sha256sum | awk '{print $1}')"
+started_at="$(date +%s)"
+echo "event=command_archive_started host=$archive_host database=$postgres_database cutoff=$cutoff records=$record_count"
+stream_records | restic backup \
+  --host "$archive_host" \
+  --tag "$archive_tag" \
+  --stdin \
+  --stdin-filename "${archive_path#/}"
+
+actual_count="$(restic dump --host "$archive_host" --tag "$archive_tag" latest "$archive_path" | wc -l | tr -d '[:space:]')"
+actual_checksum="$(restic dump --host "$archive_host" --tag "$archive_tag" latest "$archive_path" | sha256sum | awk '{print $1}')"
+if [ "$actual_count" != "$record_count" ] || [ "$actual_checksum" != "$expected_checksum" ]; then
+  echo "encrypted command archive readback did not match its source" >&2
+  exit 1
+fi
+
+restic forget \
+  --host "$archive_host" \
+  --tag "$archive_tag" \
+  --keep-monthly "$keep_monthly" \
+  --keep-last 1 \
+  --prune
+
+finished_at="$(date +%s)"
+echo "event=command_archive_completed host=$archive_host database=$postgres_database cutoff=$cutoff records=$record_count checksum_sha256=$actual_checksum duration_seconds=$((finished_at - started_at))"

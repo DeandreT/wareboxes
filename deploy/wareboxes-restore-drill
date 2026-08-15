@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: wareboxes-restore-drill [--snapshot <id>]
+
+Restores one encrypted Wareboxes backup into an isolated, temporary PostgreSQL
+container and verifies schema, row-level security, and runtime-role grants.
+EOF
+}
+
+snapshot=latest
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --snapshot)
+      if [ "$#" -lt 2 ]; then
+        usage >&2
+        exit 2
+      fi
+      snapshot="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ "$snapshot" != latest && ! "$snapshot" =~ ^[0-9a-f]{8,64}$ ]]; then
+  echo "snapshot must be 'latest' or a hexadecimal restic snapshot ID" >&2
+  exit 2
+fi
+
+: "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required}"
+if [ -z "${RESTIC_PASSWORD_FILE:-}" ] \
+  && [ -z "${RESTIC_PASSWORD_COMMAND:-}" ] \
+  && [ -z "${RESTIC_PASSWORD:-}" ]; then
+  echo "RESTIC_PASSWORD_FILE, RESTIC_PASSWORD_COMMAND, or RESTIC_PASSWORD is required" >&2
+  exit 2
+fi
+
+source_host="${WAREBOXES_BACKUP_SOURCE_HOST:-${WAREBOXES_BACKUP_HOST:-$(hostname -f)}}"
+backup_tag="${WAREBOXES_BACKUP_TAG:-wareboxes-postgres}"
+dump_path="${WAREBOXES_BACKUP_DUMP_PATH:-/wareboxes/postgres.dump}"
+postgres_image="${WAREBOXES_RESTORE_POSTGRES_IMAGE:-postgres:16-bookworm}"
+postgres_database="${WAREBOXES_POSTGRES_DATABASE:-wareboxes}"
+postgres_user="${WAREBOXES_POSTGRES_USER:-wareboxes_admin}"
+max_seconds="${WAREBOXES_RESTORE_MAX_SECONDS:-3600}"
+lock_file="${WAREBOXES_BACKUP_LOCK_FILE:-/run/lock/wareboxes-backup.lock}"
+postgres_init_script="${WAREBOXES_POSTGRES_INIT_SCRIPT:-/opt/wareboxes/runtime/postgres-init/001-create-app-role.sh}"
+
+if [[ ! "$postgres_database" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] \
+  || [[ ! "$postgres_user" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+  echo "PostgreSQL database and user must be lowercase identifiers" >&2
+  exit 2
+fi
+if [[ ! "$max_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  echo "WAREBOXES_RESTORE_MAX_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+if [ -z "$source_host" ] || [ -z "$backup_tag" ] || [[ "$dump_path" != /* ]]; then
+  echo "backup source host, tag, and absolute dump path are required" >&2
+  exit 2
+fi
+if [ ! -f "$postgres_init_script" ]; then
+  echo "PostgreSQL role initialization script does not exist: $postgres_init_script" >&2
+  exit 2
+fi
+for command_name in docker flock openssl restic; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "$command_name is required" >&2
+    exit 127
+  fi
+done
+
+exec 9>"$lock_file"
+flock -n 9 || {
+  echo "another Wareboxes backup or restore operation is active" >&2
+  exit 1
+}
+
+container_name="wareboxes-restore-drill-$(date +%s)-$$"
+if [[ ! "$container_name" =~ ^wareboxes-restore-drill-[0-9]+-[0-9]+$ ]]; then
+  echo "could not construct a safe restore-drill container name" >&2
+  exit 1
+fi
+restore_password="$(openssl rand -hex 32)"
+
+cleanup() {
+  docker rm --force "$container_name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+started_at="$(date +%s)"
+echo "event=restore_drill_started source_host=$source_host snapshot=$snapshot"
+docker run \
+  --detach \
+  --name "$container_name" \
+  --network none \
+  --env "POSTGRES_DB=$postgres_database" \
+  --env "POSTGRES_USER=$postgres_user" \
+  --env "POSTGRES_PASSWORD=$restore_password" \
+  --env "POSTGRES_APP_PASSWORD=$restore_password" \
+  --volume "$postgres_init_script:/docker-entrypoint-initdb.d/001-create-app-role.sh:ro" \
+  "$postgres_image" >/dev/null
+
+ready=false
+for _ in $(seq 1 60); do
+  if docker exec \
+    --env "PGPASSWORD=$restore_password" \
+    "$container_name" \
+    pg_isready --username "$postgres_user" --dbname "$postgres_database" >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+if [ "$ready" != true ]; then
+  docker logs "$container_name" >&2 || true
+  echo "restore-drill PostgreSQL did not become ready within 60 seconds" >&2
+  exit 1
+fi
+
+restic dump --host "$source_host" --tag "$backup_tag" "$snapshot" "$dump_path" \
+  | docker exec \
+      --interactive \
+      --env "PGPASSWORD=$restore_password" \
+      "$container_name" \
+      pg_restore \
+        --username "$postgres_user" \
+        --dbname "$postgres_database" \
+        --no-owner \
+        --exit-on-error
+
+validation="$({
+  docker exec \
+    --env "PGPASSWORD=$restore_password" \
+    "$container_name" \
+    psql \
+      --username "$postgres_user" \
+      --dbname "$postgres_database" \
+      --tuples-only \
+      --no-align \
+      --set ON_ERROR_STOP=1 \
+      --command "SELECT
+        to_regclass('public.tenants') IS NOT NULL,
+        to_regclass('public.inventory_transactions') IS NOT NULL,
+        to_regclass('public.outbox_events') IS NOT NULL,
+        (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'public.inventory_transactions'::regclass),
+        has_table_privilege('wareboxes_app', 'public.inventory_transactions', 'SELECT'),
+        NOT (SELECT rolbypassrls FROM pg_roles WHERE rolname = 'wareboxes_app');"
+} | tr -d '[:space:]')"
+if [ "$validation" != "t|t|t|t|t|t" ]; then
+  echo "restored database failed invariant validation: $validation" >&2
+  exit 1
+fi
+
+finished_at="$(date +%s)"
+duration_seconds="$((finished_at - started_at))"
+if [ "$duration_seconds" -gt "$max_seconds" ]; then
+  echo "restore drill exceeded its ${max_seconds}s recovery budget: ${duration_seconds}s" >&2
+  exit 1
+fi
+echo "event=restore_drill_completed source_host=$source_host snapshot=$snapshot duration_seconds=$duration_seconds"

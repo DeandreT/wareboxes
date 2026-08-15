@@ -19,6 +19,16 @@
   overflow: auto;
 }
 
+.inventory-position-table {
+  min-width: 1180px;
+}
+
+.inventory-position-table th:nth-last-child(-n + 3),
+.inventory-position-table td:nth-last-child(-n + 3) {
+  width: 82px;
+  min-width: 82px;
+}
+
 .inventory-view-tabs {
   display: inline-flex;
   width: max-content;

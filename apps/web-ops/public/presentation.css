@@ -60,6 +60,7 @@ html[data-theme="dark"] {
   --info-ink: #a9cdf2;
   --warning-ink: #efd47c;
   --danger-ink: #f4a4a8;
+  --danger-button-ink: #171b1d;
   --muted-badge: #303739;
   --muted-badge-ink: #bdc6c3;
   --scope-background: #202729;
@@ -97,6 +98,7 @@ html[data-theme="dark"] {
     --info-ink: #a9cdf2;
     --warning-ink: #efd47c;
     --danger-ink: #f4a4a8;
+    --danger-button-ink: #171b1d;
     --muted-badge: #303739;
     --muted-badge-ink: #bdc6c3;
     --scope-background: #202729;

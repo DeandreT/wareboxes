@@ -140,7 +140,7 @@ async fn get_tasks_with_scope(
               OR EXISTS (SELECT 1 FROM cycle_count_item_location_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.order_id = $7)
           )
           AND ($8 OR facility_id = ANY($9))
-          AND ($10 OR inventory_owner_id = ANY($11))
+          AND ($10 OR inventory_owner_id IS NULL OR inventory_owner_id = ANY($11))
         ORDER BY COALESCE(scheduled_for, created), priority DESC, created, id
         "#
     );

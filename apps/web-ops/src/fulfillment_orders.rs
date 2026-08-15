@@ -201,6 +201,7 @@ pub fn OrdersWorkbench(
             style=move || layout.style()
             data-pane-mode=move || layout.mode_attribute()
         >
+            <h1 class="sr-only">"Orders"</h1>
             <section class="data-section fulfillment-list split-master">
                 <form class="table-toolbar fulfillment-toolbar" on:submit=submit_search>
                     <div class="toolbar-summary">

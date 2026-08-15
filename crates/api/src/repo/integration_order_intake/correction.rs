@@ -147,6 +147,7 @@ pub(crate) async fn correct(
             ids: outcome,
             failure: None,
             applied_mappings: &[],
+            adapter: None,
         },
     )
     .await?;
@@ -192,6 +193,7 @@ pub(crate) async fn quarantine_correction(
             },
             failure: Some(reason),
             applied_mappings: &[],
+            adapter: None,
         },
     )
     .await?;

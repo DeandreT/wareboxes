@@ -6,18 +6,21 @@ use sqlx::Acquire;
 async fn insert_command_record(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
+    actor_user_id: i64,
     key: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO command_idempotency_records
-            (tenant_id, created, operation, idempotency_key, request_hash, result_json)
-        VALUES ($1, $2, 'rls.contract.v1', $3, 'request-hash', '{"ok": true}'::JSONB)
+            (tenant_id, created, operation, idempotency_key, request_hash, result_json,
+             actor_user_id)
+        VALUES ($1, $2, 'rls.contract.v1', $3, 'request-hash', '{"ok": true}'::JSONB, $4)
         "#,
     )
     .bind(tenant_id.get())
     .bind(db::now_iso())
     .bind(key)
+    .bind(actor_user_id)
     .execute(&mut **tx)
     .await
     .map(|_| ())
@@ -73,6 +76,42 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     .await
     .unwrap();
     assert_eq!(rls_configuration, (true, true, 1));
+
+    let partitioning: (String, i64) = sqlx::query_as(
+        r#"
+        SELECT class.relkind::TEXT,
+               (SELECT COUNT(*)
+                FROM pg_inherits inheritance
+                WHERE inheritance.inhparent = class.oid)
+        FROM pg_class class
+        WHERE class.oid = 'command_idempotency_records'::REGCLASS
+        "#,
+    )
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(partitioning, ("p".to_string(), 16));
+
+    let partition_privileges: Vec<(String, bool, bool, bool, bool)> = sqlx::query_as(
+        r#"
+        SELECT child.relname,
+               has_table_privilege('wareboxes_app', child.oid, 'SELECT'),
+               has_table_privilege('wareboxes_app', child.oid, 'INSERT'),
+               has_table_privilege('wareboxes_app', child.oid, 'UPDATE'),
+               has_table_privilege('wareboxes_app', child.oid, 'DELETE')
+        FROM pg_inherits inheritance
+        JOIN pg_class child ON child.oid = inheritance.inhrelid
+        WHERE inheritance.inhparent = 'command_idempotency_records'::REGCLASS
+        ORDER BY child.relname
+        "#,
+    )
+    .fetch_all(&admin_db)
+    .await
+    .unwrap();
+    assert_eq!(partition_privileges.len(), 16);
+    assert!(partition_privileges
+        .iter()
+        .all(|(_, select, insert, update, delete)| !select && !insert && !update && !delete));
 
     let runtime_privileges: (bool, bool, bool) = sqlx::query_as(
         r#"
@@ -847,29 +886,31 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     assert_eq!(unbound_count, 0);
 
     let mut unbound_tx = fixture.db.begin().await.unwrap();
-    assert!(insert_command_record(&mut unbound_tx, tenant_a, "unbound")
-        .await
-        .is_err());
+    assert!(
+        insert_command_record(&mut unbound_tx, tenant_a, user_a.id, "unbound")
+            .await
+            .is_err()
+    );
     unbound_tx.rollback().await.unwrap();
 
     let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
-    insert_command_record(&mut tenant_a_tx, tenant_a, "tenant-a")
+    insert_command_record(&mut tenant_a_tx, tenant_a, user_a.id, "tenant-a")
         .await
         .unwrap();
     assert!(
-        insert_command_record(&mut tenant_a_tx, tenant_b, "cross-tenant")
+        insert_command_record(&mut tenant_a_tx, tenant_b, user_b.id, "cross-tenant")
             .await
             .is_err()
     );
     tenant_a_tx.rollback().await.unwrap();
 
     let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
-    insert_command_record(&mut tenant_a_tx, tenant_a, "tenant-a")
+    insert_command_record(&mut tenant_a_tx, tenant_a, user_a.id, "tenant-a")
         .await
         .unwrap();
     tenant_a_tx.commit().await.unwrap();
     let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
-    insert_command_record(&mut tenant_b_tx, tenant_b, "tenant-b")
+    insert_command_record(&mut tenant_b_tx, tenant_b, user_b.id, "tenant-b")
         .await
         .unwrap();
     tenant_b_tx.commit().await.unwrap();

@@ -1,0 +1,45 @@
+groups:
+  - name: wareboxes-api
+    rules:
+      - alert: WareboxesApiTargetDown
+        expr: up{job="wareboxes-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Wareboxes API metrics target is unavailable
+          runbook: docs/operations/telemetry-alerts.md#api-target-down
+
+      - alert: WareboxesApiReadinessFailure
+        expr: increase(wareboxes_readiness_checks_total{result="unready"}[5m]) > 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Wareboxes API is repeatedly failing readiness checks
+          runbook: docs/operations/telemetry-alerts.md#readiness-failure
+
+      - alert: WareboxesApiHighServerErrorRate
+        expr: |
+          sum(rate(wareboxes_http_requests_total{status_class="5xx"}[5m]))
+          /
+          clamp_min(sum(rate(wareboxes_http_requests_total[5m])), 0.001)
+          > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Wareboxes API server-error ratio exceeds two percent
+          runbook: docs/operations/telemetry-alerts.md#high-server-error-rate
+
+      - alert: WareboxesApiDatabasePoolSaturated
+        expr: |
+          wareboxes_database_pool_connections{state="open"} > 0
+          and
+          wareboxes_database_pool_connections{state="idle"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Wareboxes API database pool has no idle connections
+          runbook: docs/operations/telemetry-alerts.md#database-pool-saturation

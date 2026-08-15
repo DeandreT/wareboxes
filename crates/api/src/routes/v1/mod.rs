@@ -1,7 +1,10 @@
 //! Version 1 public HTTP routes.
 
 mod backorders;
+mod billing;
+mod configurations;
 pub(crate) mod cross_dock;
+pub(crate) mod customer_portal;
 mod customer_returns;
 pub(crate) mod cycle_count;
 mod error;
@@ -12,7 +15,7 @@ mod inbound_inspections;
 mod inbound_loads;
 mod integration_mappings;
 mod integration_monitor;
-mod integration_order_intake;
+pub(crate) mod integration_order_intake;
 pub(crate) mod inventory_balances;
 mod inventory_holds;
 mod inventory_integrity;
@@ -23,6 +26,7 @@ mod inventory_status_transitions;
 mod item_storage_policies;
 mod item_substitutions;
 mod item_traceability_policies;
+mod labor;
 mod license_plate_putaway;
 mod order_allocations;
 mod order_cancellations;
@@ -43,8 +47,14 @@ pub(crate) mod replenishment;
 mod rf_sessions;
 mod shipping;
 pub(crate) mod shipping_queue;
+mod slotting;
 mod storage_zones;
 mod transfer_orders;
+mod value_added_work;
+mod vendor_returns;
+mod workforce_identity;
+mod x12_940;
+mod yard;
 
 use axum::middleware;
 use axum::routing::{get, post};
@@ -54,6 +64,220 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/portal/workspace", get(customer_portal::workspace))
+        .route(
+            "/portal/documents/{document_id}/content",
+            get(customer_portal::download_document),
+        )
+        .route(
+            "/portal/reports/inventory.csv",
+            get(customer_portal::inventory_report),
+        )
+        .route("/billing/workspace", get(billing::workspace))
+        .route("/labor/workspace", get(labor::workspace))
+        .route("/labor/roster", get(labor::roster_candidates))
+        .route(
+            "/labor/reference-candidates",
+            get(labor::reference_candidates),
+        )
+        .route(
+            "/slotting/profiles",
+            get(slotting::list_profiles).post(slotting::configure_profile),
+        )
+        .route("/slotting/runs", post(slotting::run))
+        .route(
+            "/slotting/recommendations",
+            get(slotting::list_recommendations),
+        )
+        .route(
+            "/slotting/recommendations/{recommendation_id}/acceptances",
+            post(slotting::accept),
+        )
+        .route(
+            "/slotting/recommendations/{recommendation_id}/dismissals",
+            post(slotting::dismiss),
+        )
+        .route(
+            "/workforce/employees/{employee_id}/identity-links",
+            post(workforce_identity::link),
+        )
+        .route(
+            "/workforce/employees/{employee_id}/identity-unlinks",
+            post(workforce_identity::unlink),
+        )
+        .route("/labor/skills", post(labor::configure_skill))
+        .route("/labor/certifications", post(labor::certify_employee))
+        .route(
+            "/labor/certifications/{certification_id}/revocations",
+            post(labor::revoke_certification),
+        )
+        .route(
+            "/labor/equipment-classes",
+            post(labor::configure_equipment_class),
+        )
+        .route(
+            "/labor/equipment-assets",
+            post(labor::create_equipment_asset),
+        )
+        .route(
+            "/labor/equipment-assets/{equipment_asset_id}/status-changes",
+            post(labor::change_equipment_status),
+        )
+        .route("/labor/standards", post(labor::configure_standard))
+        .route("/labor/attendance", post(labor::clock_in))
+        .route(
+            "/labor/attendance/{attendance_interval_id}/clock-outs",
+            post(labor::clock_out),
+        )
+        .route(
+            "/labor/attendance/{attendance_interval_id}/corrections",
+            post(labor::correct_attendance),
+        )
+        .route("/labor/activities", post(labor::start_activity))
+        .route(
+            "/labor/activities/{labor_activity_id}/completions",
+            post(labor::complete_activity),
+        )
+        .route(
+            "/labor/activities/{labor_activity_id}/cancellations",
+            post(labor::cancel_activity),
+        )
+        .route(
+            "/labor/activities/{labor_activity_id}/corrections",
+            post(labor::correct_activity),
+        )
+        .route("/yard/workspace", get(yard::workspace))
+        .route(
+            "/value-added-work",
+            get(value_added_work::list).post(value_added_work::create),
+        )
+        .route(
+            "/value-added-work/{work_id}",
+            get(value_added_work::get),
+        )
+        .route(
+            "/value-added-work/{work_id}/releases",
+            post(value_added_work::release),
+        )
+        .route(
+            "/value-added-work/{work_id}/completions",
+            post(value_added_work::complete),
+        )
+        .route(
+            "/value-added-work/{work_id}/cancellations",
+            post(value_added_work::cancel),
+        )
+        .route(
+            "/vendor-returns",
+            get(vendor_returns::list).post(vendor_returns::create),
+        )
+        .route(
+            "/vendor-returns/{vendor_return_id}",
+            get(vendor_returns::get),
+        )
+        .route(
+            "/vendor-returns/{vendor_return_id}/releases",
+            post(vendor_returns::release),
+        )
+        .route(
+            "/vendor-returns/{vendor_return_id}/shipments",
+            post(vendor_returns::ship),
+        )
+        .route(
+            "/vendor-returns/{vendor_return_id}/cancellations",
+            post(vendor_returns::cancel),
+        )
+        .route("/yard/locations", post(yard::configure_location))
+        .route("/yard/assets", post(yard::register_asset))
+        .route("/yard/appointments", post(yard::create_appointment))
+        .route(
+            "/yard/appointments/{appointment_id}/cancellations",
+            post(yard::cancel_appointment),
+        )
+        .route(
+            "/yard/appointments/{appointment_id}/no-shows",
+            post(yard::mark_no_show),
+        )
+        .route("/yard/visits", post(yard::gate_in))
+        .route("/yard/visits/{visit_id}/spot-moves", post(yard::spot_visit))
+        .route(
+            "/yard/visits/{visit_id}/door-assignments",
+            post(yard::assign_door),
+        )
+        .route(
+            "/yard/visits/{visit_id}/operation-starts",
+            post(yard::start_operation),
+        )
+        .route(
+            "/yard/visits/{visit_id}/operation-completions",
+            post(yard::complete_operation),
+        )
+        .route(
+            "/yard/visits/{visit_id}/rejections",
+            post(yard::reject_visit),
+        )
+        .route(
+            "/yard/visits/{visit_id}/gate-outs",
+            post(yard::gate_out),
+        )
+        .route("/billing/contracts", post(billing::create_contract))
+        .route(
+            "/billing/contracts/{contract_id}/activations",
+            post(billing::activate_contract),
+        )
+        .route(
+            "/billing/contracts/{contract_id}/closures",
+            post(billing::close_contract),
+        )
+        .route(
+            "/billing/contracts/{contract_id}/rates",
+            post(billing::configure_rate),
+        )
+        .route(
+            "/billing/contracts/{contract_id}/billable-events",
+            post(billing::capture_event),
+        )
+        .route(
+            "/billing/contracts/{contract_id}/storage-snapshots",
+            post(billing::capture_snapshot),
+        )
+        .route(
+            "/billing/contracts/{contract_id}/reconciliation-runs",
+            post(billing::generate_run),
+        )
+        .route(
+            "/billing/reconciliation-runs/{run_id}/reviews",
+            post(billing::review_run),
+        )
+        .route(
+            "/billing/reconciliation-runs/{run_id}/exports",
+            post(billing::export_run),
+        )
+        .route(
+            "/configurations",
+            get(configurations::list).post(configurations::create),
+        )
+        .route(
+            "/configurations/{configuration_id}/submissions",
+            post(configurations::submit),
+        )
+        .route(
+            "/configurations/{configuration_id}/approvals",
+            post(configurations::approve),
+        )
+        .route(
+            "/configurations/{configuration_id}/activations",
+            post(configurations::activate),
+        )
+        .route(
+            "/configurations/{configuration_id}/retirements",
+            post(configurations::retire),
+        )
+        .route(
+            "/configurations/{configuration_id}/rollbacks",
+            post(configurations::rollback),
+        )
+        .route("/configuration-simulations", post(configurations::simulate))
         .route("/inbound-asns", get(inbound_asns::list).post(inbound_asns::create))
         .route("/inbound-asns/{asn_id}", get(inbound_asns::get))
         .route(
@@ -255,6 +479,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/integrations/order-intake/{source_key}/inventory-owners/{external_inventory_owner_key}/orders",
             post(integration_order_intake::receive_order),
+        )
+        .route(
+            "/integrations/x12-940/{source_key}/inventory-owners/{external_inventory_owner_key}/orders",
+            post(integration_order_intake::receive_x12_940_order),
         )
         .route(
             "/integration-monitor/inbound/{receipt_id}/reprocessings",
