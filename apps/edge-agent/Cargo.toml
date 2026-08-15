@@ -1,0 +1,31 @@
+[package]
+name = "wareboxes-edge-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Vendor-neutral local device and automation bridge for Wareboxes"
+publish = false
+
+[lib]
+name = "wareboxes_edge_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wareboxes-edge-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { version = "=0.30.0", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10.9"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.11", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

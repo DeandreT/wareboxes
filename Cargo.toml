@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/edge-agent",
     "apps/rf-android",
     "apps/worker",
     "apps/web-ops",
