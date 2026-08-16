@@ -10,7 +10,7 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     assess_order_allocation_readiness, AllocationCandidate, AllocationOutcome, AllocationQuantity,
-    AllocationShortageReason, AllocationStrategy, FacilityId, InventoryBalanceId, InventoryOwnerId,
+    AllocationShortageReason, FacilityId, InventoryBalanceId, InventoryOwnerId,
     InventoryReservationId, ItemBatchId, LicensePlateId, LocationId, OrderAllocationBlockReason,
     OrderAllocationReadiness, OrderId, OrderLineId, OrderRevision, OrderStatus, PlannedAllocation,
     Timestamp,
@@ -22,9 +22,11 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
 use crate::repo::orders::{insert_order_activity_tx, require_replayed_order_visible_tx};
 
+pub(crate) mod policy;
 mod read_model;
 mod workflow;
 
+use policy::resolve_allocation_policy_tx;
 use read_model::{eligible_facilities_tx, line_state_totals, load_line_states_tx};
 use workflow::{
     create_missing_full_demand_reservations_tx, cumulative_outcome,
@@ -208,6 +210,21 @@ pub async fn plan_order_allocation(
         command.facility_id,
     )
     .await?;
+    let occurred_at = now_iso();
+    let policy = resolve_allocation_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        command.facility_id,
+        occurred_at,
+        true,
+    )
+    .await?;
+    if !policy.matches_expectation(&command.expected_policy) {
+        return Err(AppError::conflict(
+            "allocation policy changed; refresh allocation readiness",
+        ));
+    }
 
     let lines = lock_order_lines_tx(
         &mut tx,
@@ -248,7 +265,6 @@ pub async fn plan_order_allocation(
     }
     validate_existing_reservations(&lines, &reservations, command.facility_id)?;
 
-    let occurred_at = now_iso();
     create_missing_full_demand_reservations_tx(
         &mut tx,
         access.tenant_id,
@@ -304,7 +320,7 @@ pub async fn plan_order_allocation(
         occurred_at,
     )
     .await?;
-    let planned_lines = plan_lines(&lines, &reservations, &candidates, occurred_at)?;
+    let planned_lines = plan_lines(&lines, &reservations, &candidates, &policy, occurred_at)?;
     let newly_allocated_quantity = planned_lines
         .iter()
         .try_fold(0_i64, |total, line| {
@@ -331,6 +347,7 @@ pub async fn plan_order_allocation(
         order.inventory_owner_id,
         context.actor_id.get(),
         command,
+        &policy,
         outcome,
         demand_quantity,
         allocated_quantity,
@@ -346,6 +363,7 @@ pub async fn plan_order_allocation(
         order.inventory_owner_id,
         context.actor_id.get(),
         command,
+        &policy,
         allocation_run_id,
         &planned_lines,
         &candidates,
@@ -375,6 +393,7 @@ pub async fn plan_order_allocation(
         order.inventory_owner_id,
         context.actor_id.get(),
         command,
+        &policy,
         allocation_run_id,
         outcome,
         resulting_revision,
@@ -399,7 +418,8 @@ pub async fn plan_order_allocation(
         order_id: command.order_id,
         inventory_owner_id: order.inventory_owner_id,
         facility_id: command.facility_id,
-        strategy: command.strategy,
+        policy: policy.clone(),
+        strategy: policy.strategy,
         outcome,
         revision: resulting_revision,
         newly_allocated_quantity,
@@ -513,6 +533,15 @@ pub async fn order_allocation_readiness(
             configured_at: policy.configured_at,
         },
     );
+    let allocation_policy = resolve_allocation_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        facility_id,
+        now_iso(),
+        false,
+    )
+    .await?;
     let remaining_quantity_u64 = u64::try_from(totals.shortage_quantity)
         .map_err(|_| AppError::internal("remaining order quantity is invalid"))?;
     let active_hold_count_u64 = u64::try_from(active_hold_count)
@@ -561,7 +590,8 @@ pub async fn order_allocation_readiness(
         revision: order.revision,
         status,
         blocking_reasons,
-        strategy: AllocationStrategy::Fefo,
+        strategy: allocation_policy.strategy,
+        policy: allocation_policy,
         outcome: totals.outcome,
         original_demand_quantity: totals.original_demand_quantity,
         backordered_quantity: totals.backordered_quantity,

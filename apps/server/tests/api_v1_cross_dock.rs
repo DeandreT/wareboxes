@@ -238,7 +238,7 @@ async fn expected_receipt_cross_docks_into_reserved_pick_face_atomically() {
             Some(json!({
                 "facility_id": facility_id,
                 "expected_revision": plan.order_revision,
-                "strategy": "fefo"
+                "expected_policy": {"source": "product_default", "policy_hash": "6090a99a06ea2e049d7321d5cf2b8f462c6d6e6e2ca527ae87657a7a5fd9d156"}
             })),
         )
         .await

@@ -1,8 +1,9 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    OpaqueCursor, OrderAllocationStrategy, PickShortagePage, PickShortageQueueSort,
-    PickShortageQueueSortDirection, PickShortageReason, PickShortageResolution,
-    PickShortageResponse, PickShortageStatus, ReallocatePickShortageRequest,
+    AllocationPolicySource, OpaqueCursor, OrderAllocationStrategy, PickShortagePage,
+    PickShortageQueueSort, PickShortageQueueSortDirection, PickShortageReason,
+    PickShortageResolution, PickShortageResponse, PickShortageStatus,
+    ReallocatePickShortageRequest,
 };
 use wareboxes_api_contract::web::access::AccessScopeResource;
 
@@ -589,7 +590,7 @@ fn PickShortageDetail(shortage: PickShortageResponse, signals: DetailSignals) ->
 
             <section class="detail-section shortage-action-section">
                 <div class="detail-section-title">
-                    <div><h3>"FEFO recovery"</h3><span>{format!("Order revision {}", shortage.order_revision.get())}</span></div>
+                    <div><h3>"Policy-driven recovery"</h3><span>{format!("Order revision {}", shortage.order_revision.get())}</span></div>
                 </div>
                 <Show when=reallocation_retry_for_shortage>
                     <p class="shortage-retry-note" role="status">"The previous result is unknown. Retry sends the exact saved command and idempotency key."</p>
@@ -795,7 +796,6 @@ fn dispatch_reallocation(shortage_id: i64, signals: DetailSignals) {
                 ReallocatePickShortageRequest {
                     expected_shortage_revision: shortage.shortage_revision,
                     expected_order_revision: shortage.order_revision,
-                    strategy: OrderAllocationStrategy::Fefo,
                 },
                 api::new_idempotency_key(),
             )
@@ -826,8 +826,21 @@ fn dispatch_reallocation(shortage_id: i64, signals: DetailSignals) {
                     signals.reallocation_retry.set(None);
                 }
                 signals.command_error.set(None);
+                let rotation = match result.policy.strategy {
+                    OrderAllocationStrategy::Fifo => "FIFO",
+                    OrderAllocationStrategy::Fefo => "FEFO",
+                };
+                let policy_source = match result.policy.source {
+                    AllocationPolicySource::ProductDefault => "product default".to_owned(),
+                    AllocationPolicySource::Configuration => {
+                        result.policy.configuration_id.map_or_else(
+                            || "configured policy".to_owned(),
+                            |id| format!("policy #{id}"),
+                        )
+                    }
+                };
                 signals.toasts.success(format!(
-                    "Pick exception #{shortage_id}: {} {} allocated, {} still open.",
+                    "Pick exception #{shortage_id}: {} {} allocated using {rotation} {policy_source}; {} still open.",
                     format_quantity(result.newly_allocated_quantity),
                     result
                         .new_allocations

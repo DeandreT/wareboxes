@@ -1,21 +1,129 @@
 use serde::{Deserialize, Serialize};
 
-use super::{BackorderPolicyResponse, Revision};
+use super::{BackorderPolicyResponse, ConfigurationScope, Revision};
+
+pub const PRODUCT_DEFAULT_ALLOCATION_POLICY_HASH: &str =
+    "6090a99a06ea2e049d7321d5cf2b8f462c6d6e6e2ca527ae87657a7a5fd9d156";
 
 /// Allocation policy selected for an order planning run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderAllocationStrategy {
+    Fifo,
     Fefo,
 }
 
-/// Parameters for an optimistic, replay-safe order allocation command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocationPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AllocationPolicyReference {
+    pub source: AllocationPolicySource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration_revision: Option<Revision>,
+    pub policy_hash: String,
+}
+
+impl AllocationPolicyReference {
+    pub fn product_default() -> Self {
+        Self {
+            source: AllocationPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            policy_hash: PRODUCT_DEFAULT_ALLOCATION_POLICY_HASH.to_owned(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let identity_is_valid = match self.source {
+            AllocationPolicySource::ProductDefault => {
+                self.configuration_id.is_none() && self.configuration_revision.is_none()
+            }
+            AllocationPolicySource::Configuration => {
+                self.configuration_id.is_some_and(|id| id > 0)
+                    && self.configuration_revision.is_some()
+            }
+        };
+        if !identity_is_valid {
+            return Err("allocation policy identity is inconsistent");
+        }
+        if self.policy_hash.len() != 64
+            || !self
+                .policy_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("allocation policy hash must be 64 lowercase hexadecimal characters");
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for AllocationPolicyReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawReference {
+            source: AllocationPolicySource,
+            #[serde(default)]
+            configuration_id: Option<i64>,
+            #[serde(default)]
+            configuration_revision: Option<Revision>,
+            policy_hash: String,
+        }
+
+        let raw = RawReference::deserialize(deserializer)?;
+        let reference = Self {
+            source: raw.source,
+            configuration_id: raw.configuration_id,
+            configuration_revision: raw.configuration_revision,
+            policy_hash: raw.policy_hash,
+        };
+        reference.validate().map_err(serde::de::Error::custom)?;
+        Ok(reference)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllocationPolicyResponse {
+    pub source: AllocationPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<Revision>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub strategy: OrderAllocationStrategy,
+    pub allow_partial: bool,
+    pub require_complete_line: bool,
+    pub policy_hash: String,
+}
+
+impl AllocationPolicyResponse {
+    pub fn reference(&self) -> AllocationPolicyReference {
+        AllocationPolicyReference {
+            source: self.source,
+            configuration_id: self.configuration_id,
+            configuration_revision: self.configuration_revision,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+}
+
+/// Parameters for an optimistic, replay-safe order allocation command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanOrderAllocationRequest {
     pub facility_id: i64,
     pub expected_revision: Revision,
-    pub strategy: OrderAllocationStrategy,
+    pub expected_policy: AllocationPolicyReference,
 }
 
 /// Facility-specific parameters for the allocation-readiness query.
@@ -90,6 +198,7 @@ pub struct PlanOrderAllocationResponse {
     pub order_id: i64,
     pub inventory_owner_id: i64,
     pub facility_id: i64,
+    pub policy: AllocationPolicyResponse,
     pub strategy: OrderAllocationStrategy,
     pub outcome: OrderAllocationOutcome,
     pub revision: Revision,
@@ -142,6 +251,7 @@ pub struct OrderAllocationReadinessResponse {
     pub revision: Revision,
     pub status: OrderAllocationReadinessStatus,
     pub blocking_reasons: Vec<OrderAllocationReadinessBlocker>,
+    pub policy: AllocationPolicyResponse,
     pub strategy: OrderAllocationStrategy,
     pub outcome: OrderAllocationOutcome,
     pub original_demand_quantity: i64,
@@ -196,27 +306,52 @@ mod tests {
         }
     }
 
+    fn product_policy() -> AllocationPolicyResponse {
+        AllocationPolicyResponse {
+            source: AllocationPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            configuration_scope: None,
+            strategy: OrderAllocationStrategy::Fefo,
+            allow_partial: true,
+            require_complete_line: false,
+            policy_hash: "a".repeat(64),
+        }
+    }
+
     #[test]
     fn allocation_command_is_strict_and_revision_validated() {
         let request = serde_json::from_value::<PlanOrderAllocationRequest>(json!({
             "facility_id": 8,
             "expected_revision": 3,
-            "strategy": "fefo"
+            "expected_policy": {
+                "source": "product_default",
+                "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
         }))
         .unwrap();
         assert_eq!(request.expected_revision.get(), 3);
-        assert_eq!(request.strategy, OrderAllocationStrategy::Fefo);
+        assert_eq!(
+            request.expected_policy.source,
+            AllocationPolicySource::ProductDefault
+        );
 
         assert!(serde_json::from_value::<PlanOrderAllocationRequest>(json!({
             "facility_id": 8,
             "expected_revision": 0,
-            "strategy": "fefo"
+            "expected_policy": {
+                "source": "product_default",
+                "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
         }))
         .is_err());
         assert!(serde_json::from_value::<PlanOrderAllocationRequest>(json!({
             "facility_id": 8,
             "expected_revision": 3,
-            "strategy": "fefo",
+            "expected_policy": {
+                "source": "product_default",
+                "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
             "inventory_owner_id": 9
         }))
         .is_err());
@@ -224,6 +359,15 @@ mod tests {
             "facility_id": 8,
             "expected_revision": 3,
             "strategy": "fifo"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<PlanOrderAllocationRequest>(json!({
+            "facility_id": 8,
+            "expected_revision": 3,
+            "expected_policy": {
+                "source": "configuration",
+                "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
         }))
         .is_err());
     }
@@ -235,6 +379,7 @@ mod tests {
             order_id: 7,
             inventory_owner_id: 9,
             facility_id: 8,
+            policy: product_policy(),
             strategy: OrderAllocationStrategy::Fefo,
             outcome: OrderAllocationOutcome::PartiallyAllocated,
             revision: Revision::new(4).unwrap(),
@@ -254,6 +399,16 @@ mod tests {
                 "order_id": 7,
                 "inventory_owner_id": 9,
                 "facility_id": 8,
+                "policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "configuration_scope": null,
+                    "strategy": "fefo",
+                    "allow_partial": true,
+                    "require_complete_line": false,
+                    "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
                 "strategy": "fefo",
                 "outcome": "partially_allocated",
                 "revision": 4,
@@ -312,6 +467,7 @@ mod tests {
             revision: Revision::new(4).unwrap(),
             status: OrderAllocationReadinessStatus::Ready,
             blocking_reasons: Vec::new(),
+            policy: product_policy(),
             strategy: OrderAllocationStrategy::Fefo,
             outcome: OrderAllocationOutcome::PartiallyAllocated,
             original_demand_quantity: 8,
@@ -346,6 +502,16 @@ mod tests {
                 "revision": 4,
                 "status": "ready",
                 "blocking_reasons": [],
+                "policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "configuration_scope": null,
+                    "strategy": "fefo",
+                    "allow_partial": true,
+                    "require_complete_line": false,
+                    "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
                 "strategy": "fefo",
                 "outcome": "not_allocated",
                 "original_demand_quantity": 8,

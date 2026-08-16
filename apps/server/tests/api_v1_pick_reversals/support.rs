@@ -5,8 +5,8 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::{IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER};
 use wareboxes_api_contract::v1::{
-    PickClaimResponse, PickContentConfirmationResponse, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse, ReleaseOrderResponse, Revision,
+    AllocationPolicyReference, PickClaimResponse, PickContentConfirmationResponse,
+    PlanOrderAllocationRequest, PlanOrderAllocationResponse, ReleaseOrderResponse, Revision,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -281,7 +281,7 @@ pub async fn completed_pick(
             serde_json::to_value(PlanOrderAllocationRequest {
                 facility_id,
                 expected_revision: Revision::new(1).unwrap(),
-                strategy: wareboxes_api_contract::v1::OrderAllocationStrategy::Fefo,
+                expected_policy: AllocationPolicyReference::product_default(),
             })
             .unwrap(),
         ),

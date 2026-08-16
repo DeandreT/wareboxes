@@ -1,9 +1,8 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    OrderAllocationDetailResponse, OrderAllocationLineResponse, OrderAllocationOutcome,
-    OrderAllocationReadinessBlocker, OrderAllocationReadinessResponse,
-    OrderAllocationReadinessStatus, OrderAllocationStrategy, PlanOrderAllocationRequest,
-    ReleaseOrderRequest,
+    AllocationPolicyResponse, OrderAllocationDetailResponse, OrderAllocationLineResponse,
+    OrderAllocationOutcome, OrderAllocationReadinessBlocker, OrderAllocationReadinessResponse,
+    OrderAllocationReadinessStatus, PlanOrderAllocationRequest, ReleaseOrderRequest,
 };
 use wareboxes_api_contract::web::access::AccessScopeResource;
 use wareboxes_core::models::Location;
@@ -14,7 +13,9 @@ use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
 mod backorder;
+mod policy;
 use backorder::BackorderControls;
+use policy::{allocation_action_title, AllocationPolicyBadge, CommittedAllocationPolicy};
 
 type AllocationRetry = (PlanOrderAllocationRequest, String);
 type ReleaseRetry = (ReleaseOrderRequest, String);
@@ -52,6 +53,7 @@ pub(super) fn OrderAllocationPanel(
     let readiness_error = RwSignal::new(None::<String>);
     let command_error = RwSignal::new(None::<String>);
     let release_error = RwSignal::new(None::<String>);
+    let committed_policy = RwSignal::new(None::<(i64, AllocationPolicyResponse)>);
     let request_generation = RwSignal::new(0_u64);
     let retry_attempt = RwSignal::new(None::<AllocationRetry>);
     let release_retry = RwSignal::new(None::<ReleaseRetry>);
@@ -125,18 +127,19 @@ pub(super) fn OrderAllocationPanel(
                 PlanOrderAllocationRequest {
                     facility_id: current.facility_id,
                     expected_revision: current.revision,
-                    strategy: OrderAllocationStrategy::Fefo,
+                    expected_policy: current.policy.reference(),
                 },
                 api::new_idempotency_key(),
             )
         };
-        retry_attempt.set(Some((request, idempotency_key.clone())));
+        retry_attempt.set(Some((request.clone(), idempotency_key.clone())));
         command_pending.set(true);
         command_error.set(None);
 
         leptos::task::spawn_local(async move {
             match api::plan_order_allocation(order_id, &request, &idempotency_key).await {
                 Ok(result) => {
+                    committed_policy.set(Some((result.allocation_run_id, result.policy.clone())));
                     retry_attempt.set(None);
                     command_pending.set(false);
                     toasts.success(format!(
@@ -254,7 +257,9 @@ pub(super) fn OrderAllocationPanel(
             <div class="allocation-toolbar">
                 <div>
                     <h3>"Stock allocation"</h3>
-                    <span title="Earliest expiration, then oldest receipt">"Strategy: FEFO"</span>
+                    {move || readiness.get().map(|state| {
+                        view! { <AllocationPolicyBadge policy=state.policy/> }
+                    })}
                 </div>
                 <label class="allocation-facility-selector">
                     <span class="sr-only">"Allocation facility"</span>
@@ -293,7 +298,7 @@ pub(super) fn OrderAllocationPanel(
                 <button
                     type="button"
                     class="button primary-action allocation-run-action"
-                    title="Allocate eligible stock using FEFO"
+                    title=move || allocation_action_title(readiness.get().as_ref().map(|state| &state.policy))
                     disabled=move || {
                         command_pending.get()
                             || release_pending.get()
@@ -346,6 +351,10 @@ pub(super) fn OrderAllocationPanel(
                 on_changed=backorder_changed
                 on_unauthorized
             />
+
+            {move || committed_policy.get().map(|(run_id, policy)| {
+                view! { <CommittedAllocationPolicy run_id policy/> }
+            })}
 
             <Show when=move || {
                 release_retry.get().is_some()

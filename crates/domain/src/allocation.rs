@@ -10,6 +10,8 @@ use crate::{InventoryBalanceId, ItemBatchId, LicensePlateId, LocationId, OrderSt
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AllocationStrategy {
+    /// Allocate the oldest received stock first, regardless of expiration.
+    Fifo,
     /// Allocate the earliest expiration first, then the oldest received stock.
     Fefo,
 }
@@ -45,12 +47,14 @@ impl AllocationExecutionStage {
 impl AllocationStrategy {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Fifo => "fifo",
             Self::Fefo => "fefo",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "fifo" => Some(Self::Fifo),
             "fefo" => Some(Self::Fefo),
             _ => None,
         }
@@ -199,7 +203,7 @@ impl AllocationCandidate {
     }
 }
 
-/// Concrete inventory selected by the FEFO policy.
+/// Concrete inventory selected by an allocation rotation policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedAllocation {
     inventory_balance_id: InventoryBalanceId,
@@ -374,11 +378,12 @@ pub const fn assess_order_allocation_readiness(
     }
 }
 
-/// Selects concrete stock in deterministic FEFO order.
+/// Selects concrete stock in the requested deterministic rotation order.
 ///
 /// The repository must pre-filter candidates to the command's tenant, owner,
 /// facility, item, UOM, and allocatable inventory status.
-pub fn plan_fefo_allocation(
+pub fn plan_allocation(
+    strategy: AllocationStrategy,
     demand_quantity: AllocationQuantity,
     mut candidates: Vec<AllocationCandidate>,
 ) -> Result<AllocationPlan, AllocationPlanError> {
@@ -391,7 +396,7 @@ pub fn plan_fefo_allocation(
         }
     }
 
-    candidates.sort_by(compare_fefo_candidates);
+    candidates.sort_by(|left, right| compare_candidates(strategy, left, right));
     let mut remaining = demand_quantity.get();
     let mut allocations = Vec::new();
 
@@ -435,6 +440,33 @@ pub fn plan_fefo_allocation(
         outcome,
         shortage_reason,
         allocations,
+    })
+}
+
+/// Compatibility entry point for callers that explicitly require FEFO.
+pub fn plan_fefo_allocation(
+    demand_quantity: AllocationQuantity,
+    candidates: Vec<AllocationCandidate>,
+) -> Result<AllocationPlan, AllocationPlanError> {
+    plan_allocation(AllocationStrategy::Fefo, demand_quantity, candidates)
+}
+
+fn compare_candidates(
+    strategy: AllocationStrategy,
+    left: &AllocationCandidate,
+    right: &AllocationCandidate,
+) -> Ordering {
+    match strategy {
+        AllocationStrategy::Fifo => compare_fifo_candidates(left, right),
+        AllocationStrategy::Fefo => compare_fefo_candidates(left, right),
+    }
+}
+
+fn compare_fifo_candidates(left: &AllocationCandidate, right: &AllocationCandidate) -> Ordering {
+    left.received_at.cmp(&right.received_at).then_with(|| {
+        left.inventory_balance_id
+            .get()
+            .cmp(&right.inventory_balance_id.get())
     })
 }
 
@@ -530,6 +562,32 @@ mod tests {
             .map(|allocation| allocation.inventory_balance_id().get())
             .collect();
         assert_eq!(selected, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn fifo_uses_receipt_time_even_when_newer_stock_expires_first() {
+        let plan = plan_allocation(
+            AllocationStrategy::Fifo,
+            AllocationQuantity::new(6).unwrap(),
+            vec![
+                candidate(3, Some(5), 4, 5),
+                candidate(2, None, 1, 4),
+                candidate(1, Some(20), 1, 4),
+            ],
+        )
+        .unwrap();
+
+        let selected = plan
+            .allocations()
+            .iter()
+            .map(|allocation| {
+                (
+                    allocation.inventory_balance_id().get(),
+                    allocation.quantity().get(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec![(1, 4), (2, 2)]);
     }
 
     #[test]

@@ -285,11 +285,12 @@ pub use order::{
     FulfillmentOrderDestination, OrderEntryItemResponse,
 };
 pub use order_allocation::{
+    AllocationPolicyReference, AllocationPolicyResponse, AllocationPolicySource,
     OrderAllocationDetailResponse, OrderAllocationFacilityResponse, OrderAllocationLineResponse,
     OrderAllocationOutcome, OrderAllocationReadinessBlocker, OrderAllocationReadinessRequest,
     OrderAllocationReadinessResponse, OrderAllocationReadinessStatus,
     OrderAllocationShortageReason, OrderAllocationStrategy, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse,
+    PlanOrderAllocationResponse, PRODUCT_DEFAULT_ALLOCATION_POLICY_HASH,
 };
 pub use order_amendment::{
     AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse, AmendedFulfillmentOrderStatus,

@@ -1,7 +1,9 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
-    BackorderPolicyMode, BackorderPolicyResponse, OrderAllocationDetailResponse,
+    AllocationPolicyReference as ApiPolicyReference, AllocationPolicyResponse,
+    AllocationPolicySource as ApiPolicySource, BackorderPolicyMode, BackorderPolicyResponse,
+    ConfigurationScope as ApiConfigurationScope, OrderAllocationDetailResponse,
     OrderAllocationFacilityResponse, OrderAllocationLineResponse, OrderAllocationOutcome,
     OrderAllocationReadinessBlocker, OrderAllocationReadinessRequest,
     OrderAllocationReadinessResponse, OrderAllocationReadinessStatus,
@@ -9,13 +11,15 @@ use wareboxes_api_contract::v1::{
     PlanOrderAllocationResponse, Revision,
 };
 use wareboxes_application::order_allocation::{
-    OrderAllocationDetail, OrderAllocationLineState, OrderAllocationReadinessBlocker as AppBlocker,
-    OrderAllocationReadinessReadModel, OrderAllocationReadinessStatus as AppReadinessStatus,
-    PlanOrderAllocationCommand, PlanOrderAllocationResult,
+    AllocationPolicyExpectation, AllocationPolicyReadModel,
+    AllocationPolicySource as AppPolicySource, OrderAllocationDetail, OrderAllocationLineState,
+    OrderAllocationReadinessBlocker as AppBlocker, OrderAllocationReadinessReadModel,
+    OrderAllocationReadinessStatus as AppReadinessStatus, PlanOrderAllocationCommand,
+    PlanOrderAllocationResult,
 };
 use wareboxes_domain::{
-    AllocationOutcome, AllocationShortageReason, AllocationStrategy, FacilityId, OrderId,
-    OrderRevision,
+    AllocationOutcome, AllocationShortageReason, AllocationStrategy, ConfigurationScope,
+    ConfigurationVersionId, FacilityId, OrderId, OrderRevision,
 };
 
 use super::error::{V1Error, V1Result};
@@ -73,7 +77,7 @@ fn plan_command(
         facility_id: FacilityId::new(request.facility_id).map_err(domain_validation)?,
         expected_revision: OrderRevision::new(request.expected_revision.get())
             .map_err(domain_validation)?,
-        strategy: map_strategy_to_domain(request.strategy),
+        expected_policy: map_policy_expectation(request.expected_policy)?,
     })
 }
 
@@ -89,6 +93,7 @@ fn map_plan_result(result: PlanOrderAllocationResult) -> V1Result<PlanOrderAlloc
         order_id: result.order_id.get(),
         inventory_owner_id: result.inventory_owner_id.get(),
         facility_id: result.facility_id.get(),
+        policy: map_policy(result.policy)?,
         strategy: map_strategy(result.strategy),
         outcome: map_outcome(result.outcome),
         revision: map_revision(result.revision)?,
@@ -151,6 +156,7 @@ fn map_readiness(
             .into_iter()
             .map(map_readiness_blocker)
             .collect(),
+        policy: map_policy(readiness.policy)?,
         strategy: map_strategy(readiness.strategy),
         outcome: map_outcome(readiness.outcome),
         original_demand_quantity: readiness.original_demand_quantity,
@@ -202,16 +208,65 @@ fn map_allocation(allocation: OrderAllocationDetail) -> OrderAllocationDetailRes
     }
 }
 
-const fn map_strategy_to_domain(strategy: OrderAllocationStrategy) -> AllocationStrategy {
+pub(super) const fn map_strategy(strategy: AllocationStrategy) -> OrderAllocationStrategy {
     match strategy {
-        OrderAllocationStrategy::Fefo => AllocationStrategy::Fefo,
+        AllocationStrategy::Fifo => OrderAllocationStrategy::Fifo,
+        AllocationStrategy::Fefo => OrderAllocationStrategy::Fefo,
     }
 }
 
-const fn map_strategy(strategy: AllocationStrategy) -> OrderAllocationStrategy {
-    match strategy {
-        AllocationStrategy::Fefo => OrderAllocationStrategy::Fefo,
-    }
+fn map_policy_expectation(policy: ApiPolicyReference) -> V1Result<AllocationPolicyExpectation> {
+    policy.validate().map_err(domain_validation)?;
+    Ok(AllocationPolicyExpectation {
+        source: match policy.source {
+            ApiPolicySource::ProductDefault => AppPolicySource::ProductDefault,
+            ApiPolicySource::Configuration => AppPolicySource::Configuration,
+        },
+        configuration_id: policy
+            .configuration_id
+            .map(ConfigurationVersionId::new)
+            .transpose()
+            .map_err(domain_validation)?,
+        configuration_revision: policy.configuration_revision.map(|revision| revision.get()),
+        policy_hash: policy.policy_hash,
+    })
+}
+
+pub(super) fn map_policy(policy: AllocationPolicyReadModel) -> V1Result<AllocationPolicyResponse> {
+    Ok(AllocationPolicyResponse {
+        source: match policy.source {
+            AppPolicySource::ProductDefault => ApiPolicySource::ProductDefault,
+            AppPolicySource::Configuration => ApiPolicySource::Configuration,
+        },
+        configuration_id: policy.configuration_id.map(|id| id.get()),
+        configuration_revision: policy
+            .configuration_revision
+            .map(Revision::new)
+            .transpose()
+            .map_err(|_| V1Error::internal("allocation policy revision is invalid"))?,
+        configuration_scope: policy.configuration_scope.map(|scope| match scope {
+            ConfigurationScope::Tenant => ApiConfigurationScope::Tenant,
+            ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                ApiConfigurationScope::InventoryOwner {
+                    inventory_owner_id: inventory_owner_id.get(),
+                }
+            }
+            ConfigurationScope::Facility { facility_id } => ApiConfigurationScope::Facility {
+                facility_id: facility_id.get(),
+            },
+            ConfigurationScope::OwnerFacility {
+                inventory_owner_id,
+                facility_id,
+            } => ApiConfigurationScope::OwnerFacility {
+                inventory_owner_id: inventory_owner_id.get(),
+                facility_id: facility_id.get(),
+            },
+        }),
+        strategy: map_strategy(policy.strategy),
+        allow_partial: policy.allow_partial,
+        require_complete_line: policy.require_complete_line,
+        policy_hash: policy.policy_hash,
+    })
 }
 
 const fn map_outcome(outcome: AllocationOutcome) -> OrderAllocationOutcome {
@@ -268,7 +323,8 @@ fn domain_validation(error: impl std::fmt::Display) -> V1Error {
 #[cfg(test)]
 mod tests {
     use wareboxes_application::order_allocation::{
-        OrderAllocationFacilityReadModel, OrderAllocationReadinessReadModel,
+        AllocationPolicyReadModel, OrderAllocationFacilityReadModel,
+        OrderAllocationReadinessReadModel,
     };
     use wareboxes_domain::{
         AllocationQuantity, AllocationRunId, InventoryAllocationId, InventoryBalanceId,
@@ -316,14 +372,14 @@ mod tests {
         let request = PlanOrderAllocationRequest {
             facility_id: 8,
             expected_revision: Revision::new(3).unwrap(),
-            strategy: OrderAllocationStrategy::Fefo,
+            expected_policy: ApiPolicyReference::product_default(),
         };
-        let command = plan_command(7, request).unwrap();
+        let command = plan_command(7, request.clone()).unwrap();
         assert_eq!(command.order_id.get(), 7);
         assert_eq!(command.facility_id.get(), 8);
         assert_eq!(command.expected_revision.get(), 3);
 
-        assert!(plan_command(0, request).is_err());
+        assert!(plan_command(0, request.clone()).is_err());
         assert!(plan_command(
             7,
             PlanOrderAllocationRequest {
@@ -341,6 +397,7 @@ mod tests {
             order_id: OrderId::new(7).unwrap(),
             inventory_owner_id: InventoryOwnerId::new(9).unwrap(),
             facility_id: FacilityId::new(8).unwrap(),
+            policy: AllocationPolicyReadModel::product_default(),
             strategy: AllocationStrategy::Fefo,
             outcome: AllocationOutcome::PartiallyAllocated,
             revision: OrderRevision::new(4).unwrap(),
@@ -381,6 +438,7 @@ mod tests {
             revision: OrderRevision::new(4).unwrap(),
             status: AppReadinessStatus::Blocked,
             blocking_reasons: vec![AppBlocker::OwnerFacilityUnavailable],
+            policy: AllocationPolicyReadModel::product_default(),
             strategy: AllocationStrategy::Fefo,
             outcome: AllocationOutcome::PartiallyAllocated,
             original_demand_quantity: 8,

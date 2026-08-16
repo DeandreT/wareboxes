@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CursorPage, OpaqueCursor, OrderAllocationOutcome, OrderAllocationStrategy, PageLimit, Revision,
+    AllocationPolicyResponse, CursorPage, OpaqueCursor, OrderAllocationOutcome,
+    OrderAllocationStrategy, PageLimit, Revision,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -402,13 +403,12 @@ pub struct ReportPickShortageResponse {
     pub reported_at: String,
 }
 
-/// Optimistic FEFO recovery command for one unresolved shortage.
+/// Optimistic policy-driven recovery command for one unresolved shortage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReallocatePickShortageRequest {
     pub expected_shortage_revision: Revision,
     pub expected_order_revision: Revision,
-    pub strategy: OrderAllocationStrategy,
 }
 
 /// One replacement allocation created under the existing order release.
@@ -445,7 +445,7 @@ pub struct PickShortageTaskResponse {
     pub planned_quantity: i64,
 }
 
-/// Replay-stable result of one FEFO shortage-recovery attempt.
+/// Replay-stable result of one policy-driven shortage-recovery attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReallocatePickShortageResponse {
@@ -455,6 +455,7 @@ pub struct ReallocatePickShortageResponse {
     pub shortage_status: PickShortageStatus,
     pub order_id: i64,
     pub order_revision: Revision,
+    pub policy: AllocationPolicyResponse,
     pub strategy: OrderAllocationStrategy,
     pub outcome: OrderAllocationOutcome,
     pub newly_allocated_quantity: i64,
@@ -858,8 +859,7 @@ mod tests {
     fn reallocation_and_queue_contracts_are_optimistic_bounded_and_strict() {
         let request = serde_json::from_value::<ReallocatePickShortageRequest>(json!({
             "expected_shortage_revision": 2,
-            "expected_order_revision": 7,
-            "strategy": "fefo"
+            "expected_order_revision": 7
         }))
         .unwrap();
         assert_eq!(request.expected_shortage_revision.get(), 2);
@@ -867,8 +867,7 @@ mod tests {
         assert!(
             serde_json::from_value::<ReallocatePickShortageRequest>(json!({
                 "expected_shortage_revision": 0,
-                "expected_order_revision": 7,
-                "strategy": "fefo"
+                "expected_order_revision": 7
             }))
             .is_err()
         );

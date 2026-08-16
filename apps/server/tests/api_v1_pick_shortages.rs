@@ -7,9 +7,10 @@ use axum::http::{Method, StatusCode};
 use serde_json::json;
 use support::*;
 use wareboxes_api_contract::v1::{
-    ErrorReason, ErrorResponse, OrderAllocationOutcome, PickContentState, PickOrderStatus,
-    PickShortagePage, PickShortageReason, PickShortageResponse, PickShortageStatus,
-    ReallocatePickShortageResponse, ReportPickShortageResponse,
+    AllocationPolicySource, ErrorReason, ErrorResponse, InventoryRotation, OrderAllocationOutcome,
+    OrderAllocationStrategy, PickContentState, PickOrderStatus, PickShortagePage,
+    PickShortageReason, PickShortageResponse, PickShortageStatus, ReallocatePickShortageResponse,
+    ReportPickShortageResponse,
 };
 
 #[tokio::test]
@@ -25,7 +26,7 @@ async fn short_pick_zero_and_partial_outcomes_are_strict_replay_safe_and_conserv
             Some(json!({
                 "facility_id": zero.facility_id,
                 "expected_revision": zero.claim.order_revision,
-                "strategy": "fefo"
+                "expected_policy": {"source": "product_default", "policy_hash": "6090a99a06ea2e049d7321d5cf2b8f462c6d6e6e2ca527ae87657a7a5fd9d156"}
             })),
         )
         .await;
@@ -149,6 +150,9 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
     let report: ReportPickShortageResponse = response_json(report).await;
     let shortage_id = report.shortage_id;
     shortage.grant_supervisor().await;
+    let active_policy = shortage
+        .activate_allocation_policy(InventoryRotation::Fifo, true, false)
+        .await;
 
     let queue = shortage
         .request(
@@ -226,8 +230,7 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
             Some("short-recovery-invalid-revision"),
             json!({
                 "expected_shortage_revision": 0,
-                "expected_order_revision": report.order_revision,
-                "strategy": "fefo"
+                "expected_order_revision": report.order_revision
             }),
         )
         .await;
@@ -245,7 +248,7 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
             Some(json!({
                 "facility_id": shortage.facility_id,
                 "expected_revision": report.order_revision,
-                "strategy": "fefo"
+                "expected_policy": {"source": "product_default", "policy_hash": "6090a99a06ea2e049d7321d5cf2b8f462c6d6e6e2ca527ae87657a7a5fd9d156"}
             })),
         )
         .await;
@@ -260,6 +263,12 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
         .await;
     let none = expect_status(none, StatusCode::OK, "no-stock reallocation").await;
     let none: ReallocatePickShortageResponse = response_json(none).await;
+    assert_eq!(none.strategy, OrderAllocationStrategy::Fifo);
+    assert_eq!(none.policy.source, AllocationPolicySource::Configuration);
+    assert_eq!(
+        none.policy.configuration_id,
+        Some(active_policy.configuration_id)
+    );
     assert_reallocation_contract(
         &none,
         shortage_id,
@@ -298,6 +307,7 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
         .await;
     let partial = expect_status(partial, StatusCode::OK, "partial reallocation").await;
     let partial: ReallocatePickShortageResponse = response_json(partial).await;
+    assert_eq!(partial.policy, none.policy);
     assert_reallocation_contract(
         &partial,
         shortage_id,
@@ -317,18 +327,16 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
     shortage
         .add_recovery_balance(2, "short-recovery-alt-b")
         .await;
+    let full_body = reallocation_body(
+        partial.shortage_revision.get(),
+        partial.order_revision.get(),
+    );
     let full = shortage
-        .reallocate(
-            shortage_id,
-            Some("short-recovery-full"),
-            reallocation_body(
-                partial.shortage_revision.get(),
-                partial.order_revision.get(),
-            ),
-        )
+        .reallocate(shortage_id, Some("short-recovery-full"), full_body.clone())
         .await;
     let full = expect_status(full, StatusCode::OK, "full reallocation").await;
     let full: ReallocatePickShortageResponse = response_json(full).await;
+    assert_eq!(full.policy, none.policy);
     assert_reallocation_contract(
         &full,
         shortage_id,
@@ -344,6 +352,15 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
     );
     assert_eq!(full.shortage_revision.get(), 4);
     assert_eq!(full.order_revision.get(), 7);
+    shortage.retire_allocation_policy(&active_policy).await;
+    let replay = shortage
+        .reallocate(shortage_id, Some("short-recovery-full"), full_body)
+        .await;
+    let replay = expect_status(replay, StatusCode::OK, "retired-policy replay").await;
+    assert_eq!(
+        response_json::<ReallocatePickShortageResponse>(replay).await,
+        full
+    );
     shortage
         .assert_reallocation_ledger(shortage_id, &none, &partial, &full)
         .await;

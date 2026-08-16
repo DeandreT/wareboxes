@@ -13,6 +13,8 @@ use wareboxes_domain::{
     PickShortageStatus, PickTaskId, ShortShipDemandQuantities, Timestamp, UserId,
 };
 
+use crate::order_allocation::AllocationPolicyReadModel;
+
 pub const REPORT_PICK_SHORTAGE_OPERATION: &str = "picking.shortage.report.v1";
 pub const REVERSE_PICK_CONFIRMATION_OPERATION: &str = "picking.confirmation.reverse.v1";
 pub const REALLOCATE_PICK_SHORTAGE_OPERATION: &str = "picking.shortage.reallocate.v1";
@@ -332,13 +334,12 @@ pub struct ReportPickShortageResult {
     pub reported_at: Timestamp,
 }
 
-/// Replans an unresolved shortage using the warehouse's FEFO policy.
+/// Replans an unresolved shortage using the effective warehouse allocation policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReallocatePickShortageCommand {
     pub shortage_id: PickShortageId,
     pub expected_shortage_revision: PickShortageRevision,
     pub expected_order_revision: OrderRevision,
-    pub strategy: AllocationStrategy,
 }
 
 /// One replacement allocation created under the existing order release.
@@ -373,7 +374,7 @@ pub struct PickShortageTaskReadModel {
     pub planned_quantity: PickQuantity,
 }
 
-/// Replay-stable result of one FEFO shortage-recovery attempt.
+/// Replay-stable result of one policy-driven shortage-recovery attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReallocatePickShortageResult {
     pub reallocation_run_id: PickShortageReallocationRunId,
@@ -382,6 +383,7 @@ pub struct ReallocatePickShortageResult {
     pub shortage_status: PickShortageStatus,
     pub order_id: OrderId,
     pub order_revision: OrderRevision,
+    pub policy: AllocationPolicyReadModel,
     pub strategy: AllocationStrategy,
     pub outcome: AllocationOutcome,
     pub newly_allocated_quantity: ActualPickQuantity,

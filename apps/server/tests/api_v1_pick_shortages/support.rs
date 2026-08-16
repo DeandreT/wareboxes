@@ -23,6 +23,9 @@ mod assertions;
 #[path = "support/scenarios.rs"]
 mod scenarios;
 
+#[path = "support/policy.rs"]
+mod policy;
+
 pub(super) struct PickShortageFixture {
     pub(super) fixture: Fixture,
     pub(super) app: axum::Router,
@@ -155,7 +158,7 @@ impl PickShortageFixture {
             Some(json!({
                 "facility_id": facility_id,
                 "expected_revision": 1,
-                "strategy": "fefo"
+                "expected_policy": {"source": "product_default", "policy_hash": "6090a99a06ea2e049d7321d5cf2b8f462c6d6e6e2ca527ae87657a7a5fd9d156"}
             })),
         )
         .await;
@@ -1031,8 +1034,7 @@ async fn plate_at(
 pub(super) fn reallocation_body(shortage_revision: i64, order_revision: i64) -> Value {
     json!({
         "expected_shortage_revision": shortage_revision,
-        "expected_order_revision": order_revision,
-        "strategy": "fefo"
+        "expected_order_revision": order_revision
     })
 }
 

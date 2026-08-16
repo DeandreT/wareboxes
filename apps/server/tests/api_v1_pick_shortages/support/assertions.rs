@@ -27,7 +27,15 @@ impl PickShortageFixture {
                 SELECT expected_shortage_revision, resulting_shortage_revision,
                        expected_order_revision, resulting_order_revision,
                        requested_qty, allocated_qty, remaining_qty,
-                       allocation_count, outcome,
+                       allocation_count, outcome, strategy, policy_source,
+                       policy_configuration_id, policy_configuration_revision,
+                       policy_scope_level, policy_definition, policy_hash,
+                       (SELECT event.payload->'allocation_policy'
+                        FROM outbox_events event
+                        WHERE event.tenant_id=run.tenant_id
+                          AND event.event_type='outbound.pick.shortage_reallocated'
+                          AND event.payload->>'reallocation_run_id'=run.id::TEXT)
+                          AS event_policy,
                        (SELECT COUNT(*) FROM order_release_allocations snapshot
                         WHERE snapshot.tenant_id = run.tenant_id
                           AND snapshot.pick_shortage_reallocation_run_id = run.id)
@@ -72,6 +80,34 @@ impl PickShortageFixture {
                 i64::try_from(result.new_allocations.len()).unwrap()
             );
             assert_eq!(row.get::<String, _>("outcome"), outcome);
+            assert_eq!(row.get::<String, _>("strategy"), "fifo");
+            assert_eq!(row.get::<String, _>("policy_source"), "configuration");
+            assert_eq!(
+                row.get::<Option<i64>, _>("policy_configuration_id"),
+                result.policy.configuration_id
+            );
+            assert_eq!(
+                row.get::<Option<i64>, _>("policy_configuration_revision"),
+                result
+                    .policy
+                    .configuration_revision
+                    .map(|revision| revision.get())
+            );
+            assert_eq!(
+                row.get::<Option<String>, _>("policy_scope_level")
+                    .as_deref(),
+                Some("owner_facility")
+            );
+            let definition = row.get::<serde_json::Value, _>("policy_definition");
+            assert_eq!(definition["rotation"], "fifo");
+            assert_eq!(
+                row.get::<String, _>("policy_hash"),
+                result.policy.policy_hash
+            );
+            assert_eq!(
+                row.get::<serde_json::Value, _>("event_policy"),
+                serde_json::to_value(&result.policy).unwrap()
+            );
             assert_eq!(
                 row.get::<i64, _>("snapshot_count"),
                 i64::try_from(result.new_allocations.len()).unwrap()

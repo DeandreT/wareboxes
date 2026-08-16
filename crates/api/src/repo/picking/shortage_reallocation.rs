@@ -10,8 +10,8 @@ use wareboxes_application::picking::{
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    plan_fefo_allocation, ActualPickQuantity, AllocationCandidate, AllocationExecutionStage,
-    AllocationOutcome, AllocationQuantity, InventoryAllocationId, InventoryBalanceId,
+    plan_allocation, ActualPickQuantity, AllocationCandidate, AllocationExecutionStage,
+    AllocationOutcome, AllocationQuantity, FacilityId, InventoryAllocationId, InventoryBalanceId,
     InventoryOwnerId, ItemBatchId, LicensePlateId, LocationId, OrderId, OrderRevision, OrderStatus,
     PickContentId, PickQuantity, PickScanValue, PickShortageId, PickShortageReallocationRunId,
     PickShortageRevision, PickShortageStatus, PickTaskId, PlannedAllocation, TenantId, Timestamp,
@@ -23,7 +23,12 @@ use wareboxes_persistence_postgres::outbox;
 
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
+use crate::repo::order_allocation::policy::resolve_allocation_policy_tx;
 use crate::repo::orders::{insert_order_activity_tx, next_outbox_sequence_tx};
+
+mod policy_evidence;
+
+use policy_evidence::insert_run_tx;
 
 const PICK_LEASE_SECONDS: i64 = 30 * 60;
 
@@ -150,10 +155,22 @@ pub async fn reallocate_shortage(
     lock_reservation_tx(&mut tx, access.tenant_id, &shortage).await?;
 
     let executed_at = now_iso();
+    let facility_id = FacilityId::new(shortage.facility_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let policy = resolve_allocation_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        shortage.inventory_owner_id,
+        facility_id,
+        executed_at,
+        true,
+    )
+    .await?;
     let candidates = lock_candidates_tx(&mut tx, access.tenant_id, &shortage, executed_at).await?;
     let demand = AllocationQuantity::new(shortage.remaining_quantity)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let plan = plan_fefo_allocation(
+    let plan = plan_allocation(
+        policy.strategy,
         demand,
         candidates
             .values()
@@ -161,7 +178,16 @@ pub async fn reallocate_shortage(
             .collect::<AppResult<Vec<_>>>()?,
     )
     .map_err(|error| AppError::internal(error.to_string()))?;
-    let newly_allocated = plan.allocated_quantity();
+    let mut planned_allocations = plan.allocations().to_vec();
+    if plan.shortage_quantity() > 0 && (policy.require_complete_line || !policy.allow_partial) {
+        planned_allocations.clear();
+    }
+    let newly_allocated = planned_allocations
+        .iter()
+        .try_fold(0_i64, |total, allocation| {
+            total.checked_add(allocation.quantity().get())
+        })
+        .ok_or_else(|| AppError::internal("shortage recovery allocation total exceeds i64"))?;
     let remaining = shortage
         .remaining_quantity
         .checked_sub(newly_allocated)
@@ -186,13 +212,14 @@ pub async fn reallocate_shortage(
         access.tenant_id,
         context.actor_id.get(),
         command,
+        &policy,
         &shortage,
         resulting_shortage_revision,
         resulting_order_revision,
         outcome,
         newly_allocated,
         remaining,
-        i64::try_from(plan.allocations().len())
+        i64::try_from(planned_allocations.len())
             .map_err(|_| AppError::internal("recovery allocation count exceeds i64"))?,
         executed_at,
     )
@@ -203,7 +230,7 @@ pub async fn reallocate_shortage(
         context.actor_id.get(),
         &shortage,
         run_id,
-        plan.allocations(),
+        &planned_allocations,
         &candidates,
         executed_at,
     )
@@ -256,7 +283,8 @@ pub async fn reallocate_shortage(
         shortage_status: resulting_status,
         order_id: shortage.order_id,
         order_revision: resulting_order_revision,
-        strategy: command.strategy,
+        strategy: policy.strategy,
+        policy,
         outcome,
         newly_allocated_quantity: ActualPickQuantity::new(newly_allocated)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -775,60 +803,6 @@ impl LockedCandidate {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_run_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    actor_user_id: i64,
-    command: &ReallocatePickShortageCommand,
-    shortage: &LockedShortage,
-    resulting_shortage_revision: PickShortageRevision,
-    resulting_order_revision: OrderRevision,
-    outcome: AllocationOutcome,
-    allocated_quantity: i64,
-    remaining_quantity: i64,
-    allocation_count: i64,
-    occurred_at: Timestamp,
-) -> AppResult<PickShortageReallocationRunId> {
-    let id: i64 = sqlx::query_scalar(
-        r#"
-        INSERT INTO pick_shortage_reallocation_runs (
-            tenant_id, inventory_owner_id, facility_id, order_release_id,
-            order_id, order_item_id, reservation_id, pick_shortage_id,
-            created_by_user_id, created_at, expected_shortage_revision,
-            resulting_shortage_revision, expected_order_revision,
-            resulting_order_revision, requested_qty, allocated_qty,
-            remaining_qty, allocation_count, outcome
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19
-        ) RETURNING id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(shortage.inventory_owner_id.get())
-    .bind(shortage.facility_id)
-    .bind(shortage.release_id)
-    .bind(shortage.order_id.get())
-    .bind(shortage.order_item_id)
-    .bind(shortage.reservation_id)
-    .bind(shortage.id.get())
-    .bind(actor_user_id)
-    .bind(occurred_at)
-    .bind(command.expected_shortage_revision.get())
-    .bind(resulting_shortage_revision.get())
-    .bind(command.expected_order_revision.get())
-    .bind(resulting_order_revision.get())
-    .bind(shortage.remaining_quantity)
-    .bind(allocated_quantity)
-    .bind(remaining_quantity)
-    .bind(allocation_count)
-    .bind(outcome.as_str())
-    .fetch_one(&mut **tx)
-    .await?;
-    PickShortageReallocationRunId::new(id).map_err(|error| AppError::internal(error.to_string()))
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn persist_recovery_work_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
@@ -1157,6 +1131,7 @@ async fn enqueue_reallocation_event_tx(
         "reallocation_run_id": result.reallocation_run_id,
         "pick_shortage_id": result.shortage_id,
         "order_id": result.order_id,
+        "allocation_policy": result.policy,
         "outcome": result.outcome,
         "newly_allocated_quantity": result.newly_allocated_quantity,
         "reallocated_quantity": result.reallocated_quantity,

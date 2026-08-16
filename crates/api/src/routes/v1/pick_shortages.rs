@@ -3,13 +3,12 @@ use axum::Json;
 use wareboxes_api_contract::v1::{
     AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
     AllocationExecutionStage as ApiExecutionStage, OpaqueCursor, OrderAllocationOutcome,
-    OrderAllocationStrategy, PickOrderStatus, PickShortShipReason as ApiShortShipReason,
-    PickShortageAllocationResponse, PickShortageDetails as ApiShortageDetails,
-    PickShortageHoldResponse, PickShortageMovementResponse, PickShortagePage as ApiShortagePage,
-    PickShortagePageRequest, PickShortageQuantitiesResponse, PickShortageQueueSort,
-    PickShortageQueueSortDirection, PickShortageReason as ApiShortageReason,
-    PickShortageResolution as ApiShortageResolution, PickShortageResponse,
-    PickShortageStatus as ApiShortageStatus, PickShortageTaskResponse,
+    PickOrderStatus, PickShortShipReason as ApiShortShipReason, PickShortageAllocationResponse,
+    PickShortageDetails as ApiShortageDetails, PickShortageHoldResponse,
+    PickShortageMovementResponse, PickShortagePage as ApiShortagePage, PickShortagePageRequest,
+    PickShortageQuantitiesResponse, PickShortageQueueSort, PickShortageQueueSortDirection,
+    PickShortageReason as ApiShortageReason, PickShortageResolution as ApiShortageResolution,
+    PickShortageResponse, PickShortageStatus as ApiShortageStatus, PickShortageTaskResponse,
     ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReportPickShortageOutcome,
     ReportPickShortageRequest, ReportPickShortageResponse, Revision, ShortShipDemandResponse,
 };
@@ -23,14 +22,15 @@ use wareboxes_application::picking::{
     ReportPickShortageResult,
 };
 use wareboxes_domain::{
-    AllocationExecutionStage, AllocationOutcome, AllocationStrategy, FacilityId, InventoryOwnerId,
-    OrderId, OrderKey, OrderRevision, OrderStatus, PickContentId, PickQuantity, PickScanValue,
-    PickShortShipNote, PickShortShipReason, PickShortageDetails, PickShortageId, PickShortageNote,
-    PickShortageReason, PickShortageResolution, PickShortageRevision, PickShortageStatus,
-    PickTaskId, ShortShipDemandQuantities,
+    AllocationExecutionStage, AllocationOutcome, FacilityId, InventoryOwnerId, OrderId, OrderKey,
+    OrderRevision, OrderStatus, PickContentId, PickQuantity, PickScanValue, PickShortShipNote,
+    PickShortShipReason, PickShortageDetails, PickShortageId, PickShortageNote, PickShortageReason,
+    PickShortageResolution, PickShortageRevision, PickShortageStatus, PickTaskId,
+    ShortShipDemandQuantities,
 };
 
 use super::error::{V1Error, V1Result};
+use super::order_allocations::{map_policy, map_strategy};
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
@@ -74,7 +74,6 @@ pub async fn reallocate(
         .map_err(domain_validation)?,
         expected_order_revision: OrderRevision::new(body.expected_order_revision.get())
             .map_err(domain_validation)?,
-        strategy: map_strategy_to_domain(body.strategy),
     };
     let context = user.command_context(&idempotency_key);
     let result =
@@ -290,6 +289,7 @@ fn map_reallocation(
         shortage_status: map_status(result.shortage_status),
         order_id: result.order_id.get(),
         order_revision: revision(result.order_revision.get())?,
+        policy: map_policy(result.policy)?,
         strategy: map_strategy(result.strategy),
         outcome: map_outcome(result.outcome),
         newly_allocated_quantity: result.newly_allocated_quantity.get(),
@@ -547,18 +547,6 @@ const fn map_execution_stage(stage: AllocationExecutionStage) -> ApiExecutionSta
         AllocationExecutionStage::PickSource => ApiExecutionStage::PickSource,
         AllocationExecutionStage::Staged => ApiExecutionStage::Staged,
         AllocationExecutionStage::Packed => ApiExecutionStage::Packed,
-    }
-}
-
-const fn map_strategy_to_domain(strategy: OrderAllocationStrategy) -> AllocationStrategy {
-    match strategy {
-        OrderAllocationStrategy::Fefo => AllocationStrategy::Fefo,
-    }
-}
-
-const fn map_strategy(strategy: AllocationStrategy) -> OrderAllocationStrategy {
-    match strategy {
-        AllocationStrategy::Fefo => OrderAllocationStrategy::Fefo,
     }
 }
 

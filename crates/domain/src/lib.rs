@@ -44,7 +44,7 @@ mod workforce;
 mod yard;
 
 pub use allocation::{
-    assess_order_allocation_readiness, plan_fefo_allocation, AllocationCandidate,
+    assess_order_allocation_readiness, plan_allocation, plan_fefo_allocation, AllocationCandidate,
     AllocationExecutionStage, AllocationOutcome, AllocationPlan, AllocationPlanError,
     AllocationQuantity, AllocationShortageReason, AllocationStrategy, OrderAllocationBlockReason,
     OrderAllocationReadiness, OrderRevision, PlannedAllocation,

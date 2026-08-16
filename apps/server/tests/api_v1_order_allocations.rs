@@ -11,8 +11,8 @@ use wareboxes_api::request_context::{IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER};
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, OrderAllocationOutcome, OrderAllocationReadinessResponse,
-    OrderAllocationReadinessStatus, OrderAllocationStrategy, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse, Revision,
+    OrderAllocationReadinessStatus, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+    Revision,
 };
 use wareboxes_application::order_cancellation::CancelOrderCommand;
 use wareboxes_application::CommandContext;
@@ -342,7 +342,7 @@ fn plan_request(facility_id: i64, revision: i64) -> PlanOrderAllocationRequest {
     PlanOrderAllocationRequest {
         facility_id,
         expected_revision: Revision::new(revision).unwrap(),
-        strategy: OrderAllocationStrategy::Fefo,
+        expected_policy: wareboxes_api_contract::v1::AllocationPolicyReference::product_default(),
     }
 }
 

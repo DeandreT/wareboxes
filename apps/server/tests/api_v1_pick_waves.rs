@@ -9,8 +9,9 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::{IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER};
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    ErrorReason, ErrorResponse, OrderAllocationOutcome, PickWavePage, PickWaveResponse,
-    PickWaveStatus, PlanOrderAllocationRequest, PlanOrderAllocationResponse, Revision,
+    AllocationPolicyReference, ErrorReason, ErrorResponse, OrderAllocationOutcome, PickWavePage,
+    PickWaveResponse, PickWaveStatus, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+    Revision,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -174,7 +175,7 @@ async fn allocated_order(
     let body = serde_json::to_value(PlanOrderAllocationRequest {
         facility_id,
         expected_revision: Revision::new(1).unwrap(),
-        strategy: wareboxes_api_contract::v1::OrderAllocationStrategy::Fefo,
+        expected_policy: AllocationPolicyReference::product_default(),
     })
     .unwrap();
     let response = expect(

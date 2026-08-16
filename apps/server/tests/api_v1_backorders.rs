@@ -237,7 +237,7 @@ impl BackorderFixture {
             Some(json!({
                 "facility_id": self.facility_id,
                 "expected_revision": 1,
-                "strategy": "fefo"
+                "expected_policy": {"source": "product_default", "policy_hash": "6090a99a06ea2e049d7321d5cf2b8f462c6d6e6e2ca527ae87657a7a5fd9d156"}
             })),
         )
         .await

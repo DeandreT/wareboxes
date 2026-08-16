@@ -12171,6 +12171,14 @@ CREATE TABLE public.order_allocation_runs (
     created timestamp with time zone NOT NULL,
     created_by_user_id bigint NOT NULL,
     strategy text NOT NULL,
+    policy_source text NOT NULL,
+    policy_configuration_id bigint,
+    policy_configuration_revision bigint,
+    policy_scope_level text,
+    policy_inventory_owner_id bigint,
+    policy_facility_id bigint,
+    policy_definition jsonb NOT NULL,
+    policy_hash text NOT NULL,
     outcome text NOT NULL,
     requested_qty bigint NOT NULL,
     allocated_qty bigint NOT NULL,
@@ -12183,7 +12191,35 @@ CREATE TABLE public.order_allocation_runs (
     CONSTRAINT order_allocation_runs_requested_qty_check CHECK (requested_qty > 0),
     CONSTRAINT order_allocation_runs_revision_check CHECK ((expected_revision > 0) AND (resulting_revision = (expected_revision + 1))),
     CONSTRAINT order_allocation_runs_short_qty_check CHECK ((short_qty >= 0) AND (short_qty = (requested_qty - allocated_qty))),
-    CONSTRAINT order_allocation_runs_strategy_check CHECK (strategy = 'fefo'::text)
+    CONSTRAINT order_allocation_runs_strategy_check CHECK (strategy IN ('fifo','fefo')),
+    CONSTRAINT order_allocation_runs_policy_source_check CHECK (
+        policy_source IN ('product_default','configuration')),
+    CONSTRAINT order_allocation_runs_policy_hash_check CHECK (
+        policy_hash~'^[0-9a-f]{64}$'),
+    CONSTRAINT order_allocation_runs_policy_definition_check CHECK (
+        jsonb_typeof(policy_definition)='object'
+        AND policy_definition->>'kind'='allocation'
+        AND policy_definition->>'rotation'=strategy),
+    CONSTRAINT order_allocation_runs_policy_identity_check CHECK (
+        (policy_source='product_default'
+          AND policy_configuration_id IS NULL
+          AND policy_configuration_revision IS NULL
+          AND policy_scope_level IS NULL
+          AND policy_inventory_owner_id IS NULL
+          AND policy_facility_id IS NULL)
+        OR
+        (policy_source='configuration'
+          AND policy_configuration_id IS NOT NULL
+          AND policy_configuration_revision>0
+          AND (
+            (policy_scope_level='tenant'
+              AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='inventory_owner'
+              AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='facility'
+              AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NOT NULL)
+            OR (policy_scope_level='owner_facility'
+              AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NOT NULL))))
 );
 
 ALTER TABLE ONLY public.order_allocation_runs FORCE ROW LEVEL SECURITY;
@@ -13483,11 +13519,49 @@ CREATE TABLE public.pick_shortage_reallocation_runs (
     remaining_qty bigint NOT NULL,
     allocation_count bigint NOT NULL,
     outcome text NOT NULL,
+    strategy text NOT NULL,
+    policy_source text NOT NULL,
+    policy_configuration_id bigint,
+    policy_configuration_revision bigint,
+    policy_scope_level text,
+    policy_inventory_owner_id bigint,
+    policy_facility_id bigint,
+    policy_definition jsonb NOT NULL,
+    policy_hash text NOT NULL,
     CONSTRAINT pick_shortage_reallocation_runs_allocation_count_check CHECK (allocation_count >= 0),
     CONSTRAINT pick_shortage_reallocation_runs_order_revision_check CHECK ((expected_order_revision > 0) AND (resulting_order_revision = (expected_order_revision + 1))),
     CONSTRAINT pick_shortage_reallocation_runs_outcome_check CHECK ((((outcome = 'not_allocated'::text) AND (allocation_count = 0) AND (allocated_qty = 0) AND (remaining_qty = requested_qty)) OR ((outcome = 'partially_allocated'::text) AND (allocation_count > 0) AND (allocated_qty > 0) AND (allocated_qty < requested_qty) AND (remaining_qty = (requested_qty - allocated_qty))) OR ((outcome = 'fully_allocated'::text) AND (allocation_count > 0) AND (allocated_qty = requested_qty) AND (remaining_qty = 0)))),
     CONSTRAINT pick_shortage_reallocation_runs_quantity_check CHECK ((requested_qty > 0) AND (allocated_qty >= 0) AND (allocated_qty <= requested_qty) AND (remaining_qty >= 0) AND ((allocated_qty + remaining_qty) = requested_qty)),
-    CONSTRAINT pick_shortage_reallocation_runs_shortage_revision_check CHECK ((expected_shortage_revision > 0) AND (resulting_shortage_revision = (expected_shortage_revision + 1)))
+    CONSTRAINT pick_shortage_reallocation_runs_shortage_revision_check CHECK ((expected_shortage_revision > 0) AND (resulting_shortage_revision = (expected_shortage_revision + 1))),
+    CONSTRAINT pick_shortage_reallocation_runs_strategy_check CHECK (strategy IN ('fifo','fefo')),
+    CONSTRAINT pick_shortage_reallocation_runs_policy_source_check CHECK (
+        policy_source IN ('product_default','configuration')),
+    CONSTRAINT pick_shortage_reallocation_runs_policy_hash_check CHECK (
+        policy_hash~'^[0-9a-f]{64}$'),
+    CONSTRAINT pick_shortage_reallocation_runs_policy_definition_check CHECK (
+        jsonb_typeof(policy_definition)='object'
+        AND policy_definition->>'kind'='allocation'
+        AND policy_definition->>'rotation'=strategy),
+    CONSTRAINT pick_shortage_reallocation_runs_policy_identity_check CHECK (
+        (policy_source='product_default'
+          AND policy_configuration_id IS NULL
+          AND policy_configuration_revision IS NULL
+          AND policy_scope_level IS NULL
+          AND policy_inventory_owner_id IS NULL
+          AND policy_facility_id IS NULL)
+        OR
+        (policy_source='configuration'
+          AND policy_configuration_id IS NOT NULL
+          AND policy_configuration_revision>0
+          AND (
+            (policy_scope_level='tenant'
+              AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='inventory_owner'
+              AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='facility'
+              AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NOT NULL)
+            OR (policy_scope_level='owner_facility'
+              AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NOT NULL))))
 );
 
 ALTER TABLE ONLY public.pick_shortage_reallocation_runs FORCE ROW LEVEL SECURITY;
@@ -16917,6 +16991,10 @@ CREATE INDEX idx_order_activity_order_id ON public.order_activity USING btree (t
 --
 
 CREATE INDEX idx_order_allocation_runs_order ON public.order_allocation_runs USING btree (tenant_id, inventory_owner_id, order_id, created DESC, id DESC);
+
+CREATE INDEX idx_order_allocation_runs_policy ON public.order_allocation_runs
+USING btree (tenant_id, policy_configuration_id, created DESC)
+WHERE policy_configuration_id IS NOT NULL;
 
 
 --
@@ -40699,6 +40777,10 @@ CREATE FUNCTION public.guard_configuration_version_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE overlap_id bigint; source public.configuration_versions%ROWTYPE;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format(
+      'configuration-kind:%s:%s',
+      CASE WHEN TG_OP='DELETE' THEN OLD.tenant_id ELSE NEW.tenant_id END,
+      CASE WHEN TG_OP='DELETE' THEN OLD.kind ELSE NEW.kind END),0));
     IF TG_OP='DELETE' THEN
         RAISE EXCEPTION 'configuration history is immutable' USING ERRCODE='55000';
     END IF;
@@ -40801,6 +40883,342 @@ ON public.configuration_versions TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.configuration_versions_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_configuration_definition() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_configuration_version_mutation() FROM PUBLIC;
+
+ALTER TABLE public.order_allocation_runs
+ADD CONSTRAINT order_allocation_runs_policy_configuration_fkey
+FOREIGN KEY (tenant_id,policy_configuration_id)
+REFERENCES public.configuration_versions(tenant_id,id);
+
+ALTER TABLE public.pick_shortage_reallocation_runs
+ADD CONSTRAINT pick_shortage_reallocation_runs_policy_configuration_fkey
+FOREIGN KEY (tenant_id,policy_configuration_id)
+REFERENCES public.configuration_versions(tenant_id,id);
+
+CREATE INDEX idx_pick_shortage_reallocation_runs_policy
+ON public.pick_shortage_reallocation_runs (tenant_id,policy_configuration_id)
+WHERE policy_configuration_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.validate_pick_shortage_reallocation_run()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE calculated_hash text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:allocation',NEW.tenant_id),0));
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.pick_shortages shortage
+    INNER JOIN public.order_releases release
+      ON release.tenant_id=shortage.tenant_id
+     AND release.inventory_owner_id=shortage.inventory_owner_id
+     AND release.facility_id=shortage.facility_id
+     AND release.id=shortage.order_release_id
+     AND release.order_id=shortage.order_id
+    INNER JOIN public.orders order_header
+      ON order_header.tenant_id=shortage.tenant_id
+     AND order_header.inventory_owner_id=shortage.inventory_owner_id
+     AND order_header.id=shortage.order_id
+    WHERE shortage.tenant_id=NEW.tenant_id
+      AND shortage.inventory_owner_id=NEW.inventory_owner_id
+      AND shortage.facility_id=NEW.facility_id
+      AND shortage.order_release_id=NEW.order_release_id
+      AND shortage.order_id=NEW.order_id
+      AND shortage.order_item_id=NEW.order_item_id
+      AND shortage.reservation_id=NEW.reservation_id
+      AND shortage.id=NEW.pick_shortage_id
+      AND shortage.status<>'resolved'
+      AND shortage.revision=NEW.expected_shortage_revision
+      AND shortage.remaining_to_allocate_qty=NEW.requested_qty
+      AND order_header.deleted IS NULL
+      AND order_header.status='processing'
+      AND order_header.revision=NEW.expected_order_revision
+  ) THEN
+    RAISE EXCEPTION 'pick shortage reallocation run is stale or outside the shortage scope'
+      USING ERRCODE='23514';
+  END IF;
+  IF NOT (NEW.policy_definition ?& ARRAY[
+       'kind','rotation','allow_partial','require_complete_line'])
+    OR NEW.policy_definition-ARRAY[
+       'kind','rotation','allow_partial','require_complete_line']<>'{}'::jsonb
+    OR NEW.policy_definition->>'kind'<>'allocation'
+    OR NEW.policy_definition->>'rotation' NOT IN ('fifo','fefo')
+    OR jsonb_typeof(NEW.policy_definition->'allow_partial')<>'boolean'
+    OR jsonb_typeof(NEW.policy_definition->'require_complete_line')<>'boolean'
+    OR ((NEW.policy_definition->>'allow_partial')::boolean
+        AND (NEW.policy_definition->>'require_complete_line')::boolean)
+    OR NEW.strategy<>NEW.policy_definition->>'rotation' THEN
+    RAISE EXCEPTION 'pick shortage reallocation has an invalid policy snapshot'
+      USING ERRCODE='23514';
+  END IF;
+  calculated_hash:=encode(sha256(convert_to(
+    'allocation-policy-v1|'||(NEW.policy_definition->>'rotation')||'|'||
+    (NEW.policy_definition->>'allow_partial')||'|'||
+    (NEW.policy_definition->>'require_complete_line'),'UTF8')),'hex');
+  IF NEW.policy_hash<>calculated_hash THEN
+    RAISE EXCEPTION 'pick shortage reallocation policy hash does not match its snapshot'
+      USING ERRCODE='23514';
+  END IF;
+
+  SELECT configuration.id INTO resolved_configuration_id
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id
+    AND configuration.kind='allocation' AND configuration.status='active'
+    AND configuration.effective_from<=NEW.created_at
+    AND (configuration.effective_until IS NULL
+         OR configuration.effective_until>NEW.created_at)
+    AND (configuration.inventory_owner_id IS NULL
+         OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL
+         OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level
+             WHEN 'owner_facility' THEN 2
+             WHEN 'inventory_owner' THEN 1
+             WHEN 'facility' THEN 1
+             ELSE 0 END DESC,
+           configuration.effective_from DESC,
+           configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+
+  IF NEW.policy_source='product_default' THEN
+    IF NEW.policy_definition<>jsonb_build_object(
+      'kind','allocation','rotation','fefo','allow_partial',true,
+      'require_complete_line',false)
+      OR resolved_configuration_id IS NOT NULL THEN
+      RAISE EXCEPTION 'pick shortage reallocation product default is not effective'
+        USING ERRCODE='23514';
+    END IF;
+  ELSE
+    SELECT * INTO configuration_row
+    FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.id=NEW.policy_configuration_id;
+    IF configuration_row.id IS NULL
+      OR configuration_row.kind<>'allocation'
+      OR configuration_row.status<>'active'
+      OR configuration_row.revision<>NEW.policy_configuration_revision
+      OR configuration_row.scope_level<>NEW.policy_scope_level
+      OR configuration_row.inventory_owner_id
+           IS DISTINCT FROM NEW.policy_inventory_owner_id
+      OR configuration_row.facility_id IS DISTINCT FROM NEW.policy_facility_id
+      OR configuration_row.definition<>NEW.policy_definition
+      OR configuration_row.effective_from>NEW.created_at
+      OR (configuration_row.effective_until IS NOT NULL
+          AND configuration_row.effective_until<=NEW.created_at)
+      OR (configuration_row.inventory_owner_id IS NOT NULL
+          AND configuration_row.inventory_owner_id<>NEW.inventory_owner_id)
+      OR (configuration_row.facility_id IS NOT NULL
+          AND configuration_row.facility_id<>NEW.facility_id)
+      OR resolved_configuration_id IS DISTINCT FROM NEW.policy_configuration_id THEN
+      RAISE EXCEPTION 'pick shortage reallocation policy is stale or inapplicable'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  IF (NEW.policy_definition->>'require_complete_line')::boolean
+    AND NEW.allocated_qty NOT IN (0,NEW.requested_qty) THEN
+    RAISE EXCEPTION 'pick shortage reallocation policy requires a complete line'
+      USING ERRCODE='23514';
+  END IF;
+  IF NOT (NEW.policy_definition->>'allow_partial')::boolean
+    AND NEW.allocated_qty NOT IN (0,NEW.requested_qty) THEN
+    RAISE EXCEPTION 'pick shortage reallocation policy forbids partial allocation'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+  RAISE EXCEPTION 'pick shortage reallocation policy has an invalid typed value'
+    USING ERRCODE='23514';
+END $$;
+
+CREATE FUNCTION public.validate_order_allocation_run_policy() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE calculated_hash text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:allocation',NEW.tenant_id),0));
+  IF NOT (NEW.policy_definition ?& ARRAY[
+       'kind','rotation','allow_partial','require_complete_line'])
+    OR NEW.policy_definition-ARRAY[
+       'kind','rotation','allow_partial','require_complete_line']<>'{}'::jsonb
+    OR NEW.policy_definition->>'kind'<>'allocation'
+    OR NEW.policy_definition->>'rotation' NOT IN ('fifo','fefo')
+    OR jsonb_typeof(NEW.policy_definition->'allow_partial')<>'boolean'
+    OR jsonb_typeof(NEW.policy_definition->'require_complete_line')<>'boolean'
+    OR ((NEW.policy_definition->>'allow_partial')::boolean
+        AND (NEW.policy_definition->>'require_complete_line')::boolean)
+    OR NEW.strategy<>NEW.policy_definition->>'rotation' THEN
+    RAISE EXCEPTION 'allocation run has an invalid policy snapshot'
+      USING ERRCODE='23514';
+  END IF;
+  calculated_hash:=encode(sha256(convert_to(
+    'allocation-policy-v1|'||(NEW.policy_definition->>'rotation')||'|'||
+    (NEW.policy_definition->>'allow_partial')||'|'||
+    (NEW.policy_definition->>'require_complete_line'),'UTF8')),'hex');
+  IF NEW.policy_hash<>calculated_hash THEN
+    RAISE EXCEPTION 'allocation run policy hash does not match its snapshot'
+      USING ERRCODE='23514';
+  END IF;
+
+  IF NEW.policy_source='product_default' THEN
+    IF NEW.policy_definition<>jsonb_build_object(
+      'kind','allocation','rotation','fefo','allow_partial',true,
+      'require_complete_line',false)
+      OR EXISTS (
+        SELECT 1 FROM public.configuration_versions configuration
+        WHERE configuration.tenant_id=NEW.tenant_id
+          AND configuration.kind='allocation' AND configuration.status='active'
+          AND configuration.effective_from<=NEW.created
+          AND (configuration.effective_until IS NULL
+               OR configuration.effective_until>NEW.created)
+          AND (configuration.inventory_owner_id IS NULL
+               OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+          AND (configuration.facility_id IS NULL
+               OR configuration.facility_id=NEW.facility_id)
+      ) THEN
+      RAISE EXCEPTION 'allocation product default is not effective'
+        USING ERRCODE='23514';
+    END IF;
+  ELSE
+    SELECT * INTO configuration_row
+    FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.id=NEW.policy_configuration_id;
+    IF configuration_row.id IS NULL
+      OR configuration_row.kind<>'allocation'
+      OR configuration_row.status<>'active'
+      OR configuration_row.revision<>NEW.policy_configuration_revision
+      OR configuration_row.scope_level<>NEW.policy_scope_level
+      OR configuration_row.inventory_owner_id
+           IS DISTINCT FROM NEW.policy_inventory_owner_id
+      OR configuration_row.facility_id IS DISTINCT FROM NEW.policy_facility_id
+      OR configuration_row.definition<>NEW.policy_definition
+      OR configuration_row.effective_from>NEW.created
+      OR (configuration_row.effective_until IS NOT NULL
+          AND configuration_row.effective_until<=NEW.created)
+      OR (configuration_row.inventory_owner_id IS NOT NULL
+          AND configuration_row.inventory_owner_id<>NEW.inventory_owner_id)
+      OR (configuration_row.facility_id IS NOT NULL
+          AND configuration_row.facility_id<>NEW.facility_id) THEN
+      RAISE EXCEPTION 'allocation configuration snapshot is stale or inapplicable'
+        USING ERRCODE='23514';
+    END IF;
+    SELECT configuration.id INTO resolved_configuration_id
+    FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.kind='allocation' AND configuration.status='active'
+      AND configuration.effective_from<=NEW.created
+      AND (configuration.effective_until IS NULL
+           OR configuration.effective_until>NEW.created)
+      AND (configuration.inventory_owner_id IS NULL
+           OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+      AND (configuration.facility_id IS NULL
+           OR configuration.facility_id=NEW.facility_id)
+    ORDER BY CASE configuration.scope_level
+               WHEN 'owner_facility' THEN 2
+               WHEN 'inventory_owner' THEN 1
+               WHEN 'facility' THEN 1
+               ELSE 0 END DESC,
+             configuration.effective_from DESC,
+             configuration.revision DESC,configuration.id DESC
+    LIMIT 1;
+    IF resolved_configuration_id IS DISTINCT FROM NEW.policy_configuration_id THEN
+      RAISE EXCEPTION 'allocation run did not snapshot the effective configuration'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+  RAISE EXCEPTION 'allocation run policy has an invalid typed value'
+    USING ERRCODE='23514';
+END $$;
+
+CREATE FUNCTION public.require_order_allocation_run_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE run_row public.order_allocation_runs%ROWTYPE;
+DECLARE demand_line_count bigint; run_line_count bigint;
+DECLARE demand_quantity bigint; line_requested bigint; line_allocated bigint;
+DECLARE line_short bigint; line_new bigint; run_allocation_quantity bigint;
+DECLARE active_allocation_quantity bigint;
+BEGIN
+  SELECT * INTO run_row FROM public.order_allocation_runs run
+  WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.id;
+  SELECT COUNT(*)::bigint,COALESCE(SUM(demand.effective_qty),0)::bigint
+  INTO demand_line_count,demand_quantity
+  FROM public.order_items line
+  JOIN public.outbound_effective_demand demand
+    ON demand.tenant_id=line.tenant_id
+   AND demand.inventory_owner_id=line.inventory_owner_id
+   AND demand.order_id=line.order_id AND demand.order_item_id=line.id
+  WHERE line.tenant_id=run_row.tenant_id
+    AND line.inventory_owner_id=run_row.inventory_owner_id
+    AND line.order_id=run_row.order_id AND line.deleted IS NULL;
+  SELECT COUNT(*)::bigint,COALESCE(SUM(requested_qty),0)::bigint,
+         COALESCE(SUM(total_allocated_qty),0)::bigint,
+         COALESCE(SUM(short_qty),0)::bigint,
+         COALESCE(SUM(newly_allocated_qty),0)::bigint
+  INTO run_line_count,line_requested,line_allocated,line_short,line_new
+  FROM public.order_allocation_run_lines line
+  WHERE line.tenant_id=run_row.tenant_id
+    AND line.inventory_owner_id=run_row.inventory_owner_id
+    AND line.order_id=run_row.order_id
+    AND line.allocation_run_id=run_row.id;
+  SELECT COALESCE(SUM(allocation.qty),0)::bigint
+  INTO run_allocation_quantity
+  FROM public.inventory_allocations allocation
+  WHERE allocation.tenant_id=run_row.tenant_id
+    AND allocation.inventory_owner_id=run_row.inventory_owner_id
+    AND allocation.allocation_run_id=run_row.id
+    AND allocation.status='allocated' AND allocation.deleted IS NULL;
+  SELECT COALESCE(SUM(allocation.qty),0)::bigint
+  INTO active_allocation_quantity
+  FROM public.inventory_allocations allocation
+  JOIN public.inventory_reservations reservation
+    ON reservation.tenant_id=allocation.tenant_id
+   AND reservation.inventory_owner_id=allocation.inventory_owner_id
+   AND reservation.id=allocation.reservation_id
+  WHERE allocation.tenant_id=run_row.tenant_id
+    AND allocation.inventory_owner_id=run_row.inventory_owner_id
+    AND reservation.order_id=run_row.order_id
+    AND allocation.status='allocated' AND allocation.deleted IS NULL;
+  IF demand_line_count<>run_line_count OR demand_quantity<>run_row.requested_qty
+    OR line_requested<>run_row.requested_qty
+    OR line_allocated<>run_row.allocated_qty OR line_short<>run_row.short_qty
+    OR line_new<>run_allocation_quantity
+    OR active_allocation_quantity<>run_row.allocated_qty THEN
+    RAISE EXCEPTION 'allocation run execution evidence is incomplete'
+      USING ERRCODE='23514';
+  END IF;
+  IF (run_row.policy_definition->>'require_complete_line')::boolean
+    AND EXISTS(SELECT 1 FROM public.order_allocation_run_lines line
+      WHERE line.tenant_id=run_row.tenant_id
+        AND line.allocation_run_id=run_row.id
+        AND line.newly_allocated_qty NOT IN (
+          0,line.requested_qty-line.previously_allocated_qty)) THEN
+    RAISE EXCEPTION 'allocation policy requires complete-line decisions'
+      USING ERRCODE='23514';
+  END IF;
+  IF NOT (run_row.policy_definition->>'allow_partial')::boolean
+    AND NOT (run_row.policy_definition->>'require_complete_line')::boolean
+    AND run_row.short_qty>0 AND line_new>0 THEN
+    RAISE EXCEPTION 'allocation policy forbids a partial order allocation'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER order_allocation_runs_validate_policy
+BEFORE INSERT ON public.order_allocation_runs FOR EACH ROW
+EXECUTE FUNCTION public.validate_order_allocation_run_policy();
+CREATE CONSTRAINT TRIGGER order_allocation_runs_require_integrity
+AFTER INSERT ON public.order_allocation_runs
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_order_allocation_run_integrity();
+
+REVOKE ALL ON FUNCTION public.validate_order_allocation_run_policy() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_order_allocation_run_integrity() FROM PUBLIC;
 
 -- Owner-scoped 3PL billing ledger, reconciliation, review, and financial export.
 CREATE TABLE public.billing_contracts (

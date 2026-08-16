@@ -18,7 +18,7 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::{IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER};
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CancelOrderRequest, CancelOrderResponse, ErrorReason, ErrorResponse, OrderAllocationStrategy,
+    AllocationPolicyReference, CancelOrderRequest, CancelOrderResponse, ErrorReason, ErrorResponse,
     OrderCancellationReason, OrderCancellationStatus, PlanOrderAllocationRequest,
     PlanOrderAllocationResponse, Revision,
 };
@@ -92,7 +92,7 @@ async fn allocate(
             &PlanOrderAllocationRequest {
                 facility_id,
                 expected_revision: Revision::new(1).unwrap(),
-                strategy: OrderAllocationStrategy::Fefo,
+                expected_policy: AllocationPolicyReference::product_default(),
             },
         ))
         .await

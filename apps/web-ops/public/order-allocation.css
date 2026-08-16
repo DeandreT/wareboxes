@@ -33,6 +33,38 @@
   white-space: nowrap;
 }
 
+.allocation-policy-badge {
+  font-variant-numeric: tabular-nums;
+}
+
+.allocation-policy-evidence {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--blue-soft);
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.allocation-policy-evidence strong {
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.allocation-policy-evidence span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.allocation-policy-evidence code {
+  color: var(--ink-soft);
+  font-size: 8px;
+}
+
 .allocation-facility-selector {
   min-width: 0;
 }

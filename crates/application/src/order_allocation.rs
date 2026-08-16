@@ -1,11 +1,12 @@
 //! Application contracts for order-level reservation and concrete stock planning.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use wareboxes_domain::{
     AllocationOutcome, AllocationQuantity, AllocationRunId, AllocationShortageReason,
-    AllocationStrategy, FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryOwnerId,
-    InventoryReservationId, ItemBatchId, LicensePlateId, LocationId, OrderId, OrderLineId,
-    OrderRevision, Timestamp,
+    AllocationStrategy, ConfigurationScope, ConfigurationVersionId, FacilityId,
+    InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, InventoryReservationId,
+    ItemBatchId, LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, Timestamp,
 };
 
 use crate::backorder::BackorderPolicyReadModel;
@@ -13,16 +14,108 @@ use crate::backorder::BackorderPolicyReadModel;
 /// Stable idempotency operation for the first order allocation command schema.
 pub const ORDER_ALLOCATION_OPERATION: &str = "order.allocate.v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocationPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllocationPolicyExpectation {
+    pub source: AllocationPolicySource,
+    pub configuration_id: Option<ConfigurationVersionId>,
+    pub configuration_revision: Option<i64>,
+    pub policy_hash: String,
+}
+
+impl AllocationPolicyExpectation {
+    pub fn is_well_formed(&self) -> bool {
+        let identity_is_valid = match self.source {
+            AllocationPolicySource::ProductDefault => {
+                self.configuration_id.is_none() && self.configuration_revision.is_none()
+            }
+            AllocationPolicySource::Configuration => {
+                self.configuration_id.is_some()
+                    && self
+                        .configuration_revision
+                        .is_some_and(|revision| revision > 0)
+            }
+        };
+        identity_is_valid
+            && self.policy_hash.len() == 64
+            && self
+                .policy_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllocationPolicyReadModel {
+    pub source: AllocationPolicySource,
+    pub configuration_id: Option<ConfigurationVersionId>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub strategy: AllocationStrategy,
+    pub allow_partial: bool,
+    pub require_complete_line: bool,
+    pub policy_hash: String,
+}
+
+impl AllocationPolicyReadModel {
+    pub fn product_default() -> Self {
+        let strategy = AllocationStrategy::Fefo;
+        let allow_partial = true;
+        let require_complete_line = false;
+        Self {
+            source: AllocationPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            configuration_scope: None,
+            strategy,
+            allow_partial,
+            require_complete_line,
+            policy_hash: allocation_policy_hash(strategy, allow_partial, require_complete_line),
+        }
+    }
+
+    pub fn expectation(&self) -> AllocationPolicyExpectation {
+        AllocationPolicyExpectation {
+            source: self.source,
+            configuration_id: self.configuration_id,
+            configuration_revision: self.configuration_revision,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+
+    pub fn matches_expectation(&self, expected: &AllocationPolicyExpectation) -> bool {
+        expected.is_well_formed() && self.expectation() == *expected
+    }
+}
+
+pub fn allocation_policy_hash(
+    strategy: AllocationStrategy,
+    allow_partial: bool,
+    require_complete_line: bool,
+) -> String {
+    let canonical = format!(
+        "allocation-policy-v1|{}|{allow_partial}|{require_complete_line}",
+        strategy.as_str()
+    );
+    hex::encode(Sha256::digest(canonical.as_bytes()))
+}
+
 /// Plans all remaining demand on one order against one facility.
 ///
 /// The inventory owner is deliberately absent. It is derived from the scoped,
 /// locked order aggregate inside the command transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanOrderAllocationCommand {
     pub order_id: OrderId,
     pub facility_id: FacilityId,
     pub expected_revision: OrderRevision,
-    pub strategy: AllocationStrategy,
+    pub expected_policy: AllocationPolicyExpectation,
 }
 
 /// One active concrete allocation in the post-command order state.
@@ -92,6 +185,7 @@ pub struct PlanOrderAllocationResult {
     pub order_id: OrderId,
     pub inventory_owner_id: InventoryOwnerId,
     pub facility_id: FacilityId,
+    pub policy: AllocationPolicyReadModel,
     pub strategy: AllocationStrategy,
     pub outcome: AllocationOutcome,
     pub revision: OrderRevision,
@@ -180,6 +274,7 @@ pub struct OrderAllocationReadinessReadModel {
     pub revision: OrderRevision,
     pub status: OrderAllocationReadinessStatus,
     pub blocking_reasons: Vec<OrderAllocationReadinessBlocker>,
+    pub policy: AllocationPolicyReadModel,
     pub strategy: AllocationStrategy,
     pub outcome: AllocationOutcome,
     pub original_demand_quantity: i64,
@@ -250,22 +345,20 @@ mod tests {
 
     #[test]
     fn command_identity_never_accepts_a_caller_supplied_owner() {
+        let policy = AllocationPolicyReadModel::product_default();
         let command = PlanOrderAllocationCommand {
             order_id: OrderId::new(7).unwrap(),
             facility_id: FacilityId::new(8).unwrap(),
             expected_revision: OrderRevision::new(3).unwrap(),
-            strategy: AllocationStrategy::Fefo,
+            expected_policy: policy.expectation(),
         };
 
-        assert_eq!(
-            serde_json::to_value(command).unwrap(),
-            json!({
-                "order_id": 7,
-                "facility_id": 8,
-                "expected_revision": 3,
-                "strategy": "fefo"
-            })
-        );
+        let serialized = serde_json::to_value(command).unwrap();
+        assert_eq!(serialized["order_id"], json!(7));
+        assert_eq!(serialized["expected_policy"]["source"], "product_default");
+        assert!(serialized.get("inventory_owner_id").is_none());
+        assert!(serialized.get("strategy").is_none());
+        assert!(policy.expectation().is_well_formed());
     }
 
     #[test]
@@ -278,6 +371,7 @@ mod tests {
             order_id: OrderId::new(7).unwrap(),
             inventory_owner_id: InventoryOwnerId::new(9).unwrap(),
             facility_id: FacilityId::new(8).unwrap(),
+            policy: AllocationPolicyReadModel::product_default(),
             strategy: AllocationStrategy::Fefo,
             outcome: AllocationOutcome::PartiallyAllocated,
             revision: OrderRevision::new(4).unwrap(),
