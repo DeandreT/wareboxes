@@ -68,12 +68,59 @@ if [[ ! "$WAREBOXES_TEST_RUN_ID" =~ ^[0-9]{1,16}$ ]]; then
   exit 1
 fi
 
+cleanup_stale_test_databases() {
+  local cleanup_jobs="${WAREBOXES_TEST_CLEANUP_JOBS:-4}"
+  local container_id
+  local current_prefix="wareboxes_test_${WAREBOXES_TEST_RUN_ID}_"
+  if [[ ! "$cleanup_jobs" =~ ^[0-9]+$ ]] || ((cleanup_jobs < 1 || cleanup_jobs > 8)); then
+    echo "WAREBOXES_TEST_CLEANUP_JOBS must be between 1 and 8." >&2
+    return 1
+  fi
+  container_id="$(docker compose ps -q postgres)"
+  if [ -z "$container_id" ]; then
+    return
+  fi
+
+  docker exec -i "$container_id" bash -s -- "$current_prefix" "$cleanup_jobs" <<'EOF'
+set -euo pipefail
+current_prefix="$1"
+cleanup_jobs="$2"
+databases_to_remove=()
+mapfile -t databases < <(
+  PGOPTIONS='-c max_parallel_workers_per_gather=0' \
+    psql -U wareboxes_admin -d postgres -Atc \
+    "SELECT database.datname
+     FROM pg_database database
+     WHERE database.datname LIKE 'wareboxes_test_%'
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_stat_activity activity
+         WHERE activity.datname=database.datname)
+     ORDER BY database.datname"
+)
+for database in "${databases[@]}"; do
+  if [[ "$database" == "$current_prefix"* ]]; then
+    continue
+  fi
+  if [[ ! "$database" =~ ^wareboxes_test_[0-9]+_[0-9]+(_[0-9]+)?$ ]]; then
+    echo "refusing to remove unexpected stale test database name: $database" >&2
+    exit 1
+  fi
+  databases_to_remove+=("$database")
+done
+if ((${#databases_to_remove[@]} > 0)); then
+  printf '%s\0' "${databases_to_remove[@]}" | xargs -0 -P "$cleanup_jobs" -n 1 \
+    bash -c 'dropdb -U wareboxes_admin --if-exists "$1" || echo "warning: could not remove active test database $1" >&2' _
+fi
+echo "removed ${#databases_to_remove[@]} stale test database(s)"
+EOF
+}
+
 cleanup_test_databases() {
-  local cleanup_jobs="${WAREBOXES_TEST_CLEANUP_JOBS:-12}"
+  local cleanup_jobs="${WAREBOXES_TEST_CLEANUP_JOBS:-4}"
   local container_id
   local prefix="wareboxes_test_${WAREBOXES_TEST_RUN_ID}_"
-  if [[ ! "$cleanup_jobs" =~ ^[0-9]+$ ]] || ((cleanup_jobs < 1 || cleanup_jobs > 32)); then
-    echo "WAREBOXES_TEST_CLEANUP_JOBS must be between 1 and 32." >&2
+  if [[ ! "$cleanup_jobs" =~ ^[0-9]+$ ]] || ((cleanup_jobs < 1 || cleanup_jobs > 8)); then
+    echo "WAREBOXES_TEST_CLEANUP_JOBS must be between 1 and 8." >&2
     return 1
   fi
   container_id="$(docker compose ps -q postgres)"
@@ -108,6 +155,7 @@ echo "removed ${#databases_to_remove[@]} run-scoped test database(s)"
 EOF
 }
 
+cleanup_stale_test_databases
 trap cleanup_test_databases EXIT
 echo "running: cargo test --workspace $*"
 cargo test --workspace "$@"

@@ -8,6 +8,7 @@ services:
       POSTGRES_APP_PASSWORD: wareboxes_app
     ports:
       - "5433:5432"
+    shm_size: 256mb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U wareboxes_admin -d wareboxes"]
       interval: 5s

@@ -118,12 +118,13 @@ tenant context. `WEB_SESSION_ABSOLUTE_TTL_SECONDS` and
 scripts/test-postgres.sh
 ```
 
-Or directly:
+Pass Cargo test arguments through the wrapper when narrowing or serializing a run:
 
 ```bash
-TEST_DATABASE_URL=postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes \
-  cargo test --workspace -- --test-threads=1
+scripts/test-postgres.sh --locked -- --test-threads=1
 ```
+
+The wrapper assigns a run identity and removes its cloned test databases on exit.
 
 Validate crate dependency direction independently of compilation:
 
