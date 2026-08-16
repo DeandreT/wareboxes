@@ -347,6 +347,8 @@ pub struct AutomationCommandResponse {
     pub correlation_id: String,
     pub recovery_policy: AutomationRecoveryPolicy,
     pub command: AutomationDeviceCommand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packing_scale_context: Option<PackingScaleCommandContextResponse>,
     pub status: AutomationCommandStatus,
     pub revision: Revision,
     pub delivery_attempts: u32,
@@ -364,6 +366,15 @@ pub struct AutomationCommandResponse {
     pub resolved_at: Option<String>,
     pub requested_by: i64,
     pub requested_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackingScaleCommandContextResponse {
+    pub inventory_owner_id: i64,
+    pub session_id: i64,
+    pub carton_id: i64,
+    pub carton_reopen_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

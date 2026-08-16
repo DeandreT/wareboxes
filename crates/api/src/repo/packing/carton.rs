@@ -19,6 +19,7 @@ use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
 use crate::repo::inventory_locking;
 use crate::repo::orders::insert_order_activity_tx;
 
+use super::weight_evidence::{bind_actor_tx, capture_tx, WeightEvidenceCapture};
 use super::{
     enqueue_order_event_tx, lock_order_tx, lock_session_tx, require_replayed_ids_visible_tx,
     require_revision, session_order_hint_tx,
@@ -207,11 +208,13 @@ pub async fn close_carton(
         "carton_id": command.carton_id,
         "carton_barcode": command.carton_barcode,
         "measurements": command.measurements,
+        "weight_automation_command_id": command.weight_automation_command_id,
         "expected_revision": command.expected_revision,
     });
     let prepared = PreparedCommand::new_v1(context, CLOSE_CARTON_OPERATION, &fingerprint)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
+    bind_actor_tx(&mut tx, context.actor_id.get()).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
     require_permission_tx(&mut tx, access.tenant_id, context.actor_id.get(), "wms").await?;
     if let Some(result) = prepared.replayed::<CloseCartonResult>(&mut tx).await? {
@@ -237,6 +240,13 @@ pub async fn close_carton(
     if session.pack_policy.require_weight && command.measurements.weight_grams().is_none() {
         return Err(AppError::bad_request(
             "the effective Pack policy requires carton weight",
+        ));
+    }
+    if command.weight_automation_command_id.is_some()
+        && command.measurements.weight_grams().is_none()
+    {
+        return Err(AppError::bad_request(
+            "a scale reading requires a carton weight",
         ));
     }
     let carton = lock_carton_tx(&mut tx, access.tenant_id, &session, command.carton_id).await?;
@@ -267,6 +277,28 @@ pub async fn close_carton(
         .close(content_count)
         .map_err(|error| AppError::conflict(error.to_string()))?;
     let closed_at = now_iso();
+    let weight_evidence = if let Some(weight_grams) = command.measurements.weight_grams() {
+        Some(
+            capture_tx(
+                &mut tx,
+                WeightEvidenceCapture {
+                    tenant_id: access.tenant_id,
+                    inventory_owner_id: session.inventory_owner_id,
+                    facility_id: session.facility_id,
+                    session_id: session.id,
+                    carton_id: command.carton_id,
+                    carton_reopen_count: carton.reopen_count,
+                    weight_grams,
+                    automation_command_id: command.weight_automation_command_id,
+                    captured_by: context.actor_id,
+                    captured_at: closed_at,
+                },
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let dimensions = command.measurements.dimensions();
     let updated = sqlx::query(
         r#"
@@ -324,6 +356,7 @@ pub async fn close_carton(
     .await?;
     let lifecycle = PackCartonLifecycle::Closed {
         measurements: command.measurements,
+        weight_evidence,
         closed_by: UserId::new(context.actor_id.get())
             .map_err(|error| AppError::internal(error.to_string()))?,
         closed_at,
@@ -372,6 +405,7 @@ pub async fn close_carton(
             "revision": revision,
             "ready_to_manifest": ready,
             "pack_policy": session.pack_policy,
+            "carton_lifecycle": &result.lifecycle,
             "closed_at": closed_at,
         }),
         closed_at,

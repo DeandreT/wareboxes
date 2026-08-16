@@ -20,6 +20,7 @@ mod identity;
 mod measurements;
 mod removal;
 mod reopening;
+mod scale;
 mod view;
 
 use self::abandonment::PackingAbandonmentDialog;
@@ -67,6 +68,7 @@ struct PackingQueueSignals {
 impl PackingSignals {
     fn blocked(self) -> bool {
         self.pending.get()
+            || self.measurements.scale_busy.get()
             || self.retry.get().is_some()
             || self.refresh_order_id.get().is_some()
             || self.removal.get().is_some()
@@ -169,6 +171,8 @@ pub(crate) fn PackingWorkspace(
     let focus_epoch = RwSignal::new(0_u64);
     let measurements = CartonMeasurementSignals {
         weight: RwSignal::new(String::new()),
+        weight_automation_command_id: RwSignal::new(None),
+        scale_busy: RwSignal::new(false),
         length: RwSignal::new(String::new()),
         width: RwSignal::new(String::new()),
         height: RwSignal::new(String::new()),
@@ -836,6 +840,10 @@ fn close_current_carton(signals: PackingSignals) {
             request: CloseCartonRequest {
                 carton_barcode: carton.carton_barcode.clone(),
                 measurements,
+                weight_automation_command_id: signals
+                    .measurements
+                    .weight_automation_command_id
+                    .get_untracked(),
                 expected_revision: current.revision,
             },
             idempotency_key: api::new_idempotency_key(),

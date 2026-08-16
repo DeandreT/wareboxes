@@ -1,17 +1,17 @@
 use sqlx::Row;
 use wareboxes_application::automation::{
     AutomationCommandReadModel, AutomationCommandStatus, AutomationDeviceReadModel,
-    AutomationHeartbeatReadModel, AutomationManualResolution,
+    AutomationHeartbeatReadModel, AutomationManualResolution, PackingScaleCommandContext,
 };
 use wareboxes_domain::{
     AutomationCommandId, AutomationCommandResult, AutomationControlMode, AutomationDeviceClass,
     AutomationDeviceId, AutomationHealthState, AutomationHeartbeatId, AutomationRecoveryPolicy,
-    FacilityId, ServiceAccountId, TenantId, UserId,
+    CartonId, FacilityId, InventoryOwnerId, PackSessionId, ServiceAccountId, TenantId, UserId,
 };
 
 use crate::error::{AppError, AppResult};
 
-pub(super) fn device(row: &sqlx::postgres::PgRow) -> AppResult<AutomationDeviceReadModel> {
+pub(crate) fn device(row: &sqlx::postgres::PgRow) -> AppResult<AutomationDeviceReadModel> {
     Ok(AutomationDeviceReadModel {
         device_id: id(row, "id", AutomationDeviceId::new)?,
         tenant_id: id(row, "tenant_id", TenantId::new)?,
@@ -32,7 +32,7 @@ pub(super) fn device(row: &sqlx::postgres::PgRow) -> AppResult<AutomationDeviceR
     })
 }
 
-pub(super) fn command(row: &sqlx::postgres::PgRow) -> AppResult<AutomationCommandReadModel> {
+pub(crate) fn command(row: &sqlx::postgres::PgRow) -> AppResult<AutomationCommandReadModel> {
     let payload: serde_json::Value = row.try_get("command_payload")?;
     let result_payload: Option<serde_json::Value> = row.try_get("result_payload")?;
     Ok(AutomationCommandReadModel {
@@ -46,6 +46,7 @@ pub(super) fn command(row: &sqlx::postgres::PgRow) -> AppResult<AutomationComman
         recovery_policy: recovery_policy(row.try_get("recovery_policy")?)?,
         command: serde_json::from_value(payload)
             .map_err(|error| AppError::internal(format!("invalid automation command: {error}")))?,
+        packing_scale_context: packing_scale_context(row)?,
         status: command_status(row.try_get("status")?)?,
         revision: revision(row, "revision")?,
         delivery_attempts: u32::try_from(row.try_get::<i32, _>("delivery_attempts")?)
@@ -79,6 +80,32 @@ pub(super) fn command(row: &sqlx::postgres::PgRow) -> AppResult<AutomationComman
         requested_by: id(row, "requested_by_user_id", UserId::new)?,
         requested_at: row.try_get("requested_at")?,
     })
+}
+
+fn packing_scale_context(
+    row: &sqlx::postgres::PgRow,
+) -> AppResult<Option<PackingScaleCommandContext>> {
+    let owner_id = row.try_get::<Option<i64>, _>("packing_inventory_owner_id")?;
+    let session_id = row.try_get::<Option<i64>, _>("packing_session_id")?;
+    let carton_id = row.try_get::<Option<i64>, _>("packing_carton_id")?;
+    let reopen_count = row.try_get::<Option<i64>, _>("packing_carton_reopen_count")?;
+    match (owner_id, session_id, carton_id, reopen_count) {
+        (None, None, None, None) => Ok(None),
+        (Some(owner_id), Some(session_id), Some(carton_id), Some(carton_reopen_count)) => {
+            Ok(Some(PackingScaleCommandContext {
+                inventory_owner_id: InventoryOwnerId::new(owner_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                session_id: PackSessionId::new(session_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                carton_id: CartonId::new(carton_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                carton_reopen_count,
+            }))
+        }
+        _ => Err(AppError::internal(
+            "automation command has incomplete packing scale context",
+        )),
+    }
 }
 
 pub(super) fn heartbeat(row: &sqlx::postgres::PgRow) -> AppResult<AutomationHeartbeatReadModel> {
@@ -180,14 +207,16 @@ pub(super) fn manual_resolution(value: &str) -> AppResult<AutomationManualResolu
     }
 }
 
-pub(super) const DEVICE_COLUMNS: &str = r#"
+pub(crate) const DEVICE_COLUMNS: &str = r#"
 id,tenant_id,facility_id,device_key,device_class,display_name,control_mode,
 control_reason,control_changed_by_user_id,control_changed_at,revision,health,
 health_message,last_heartbeat_at,registered_by_user_id,registered_at"#;
 
-pub(super) const COMMAND_COLUMNS: &str = r#"
+pub(crate) const COMMAND_COLUMNS: &str = r#"
 command.id,command.tenant_id,command.facility_id,command.device_id,device.device_key,
 command.device_class,command.correlation_id,command.recovery_policy,command.command_payload,
+command.packing_inventory_owner_id,command.packing_session_id,command.packing_carton_id,
+command.packing_carton_reopen_count,
 command.status,command.revision,command.delivery_attempts,command.assigned_service_account_id,
 command.agent_instance,command.delivered_at,command.accepted_at,command.completed_at,
 command.result_payload,command.error_code,command.error_message,command.resolved_by_user_id,

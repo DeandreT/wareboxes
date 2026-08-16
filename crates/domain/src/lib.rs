@@ -577,6 +577,7 @@ positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");
 positive_id!(CartonContentRemovalId, "carton content removal ID");
 positive_id!(CartonReopeningId, "carton reopening ID");
+positive_id!(CartonWeightEvidenceId, "carton weight evidence ID");
 positive_id!(OutboundQaPolicyId, "outbound QA policy ID");
 positive_id!(OutboundQaSessionId, "outbound QA session ID");
 positive_id!(OutboundQaCancellationId, "outbound QA cancellation ID");

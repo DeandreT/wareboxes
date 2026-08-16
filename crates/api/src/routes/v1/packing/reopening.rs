@@ -8,8 +8,8 @@ use wareboxes_application::packing::{ReopenCartonCommand, ReopenCartonResult};
 use wareboxes_domain::{CartonReopenDetails, CartonReopenNote, CartonReopenReason, OrderStatus};
 
 use super::{
-    carton_id_value, domain_validation, map_carton_lifecycle, map_progress, measurements_to_api,
-    order_revision, revision, scan, session_id_value, PERMISSION,
+    carton_id_value, domain_validation, map_carton_lifecycle, map_progress, map_weight_evidence,
+    measurements_to_api, order_revision, revision, scan, session_id_value, PERMISSION,
 };
 use crate::auth::CurrentTenant;
 use crate::error::AppError;
@@ -74,6 +74,10 @@ fn map_result(result: ReopenCartonResult) -> V1Result<ReopenCartonResponse> {
         order_status: map_order_status(result.order_status)?,
         lifecycle: map_carton_lifecycle(result.lifecycle)?,
         previous_measurements: measurements_to_api(result.previous_measurements)?,
+        previous_weight_evidence: result
+            .previous_weight_evidence
+            .map(map_weight_evidence)
+            .transpose()?,
         previous_closed_by: result.previous_closed_by.get(),
         previous_closed_at: result.previous_closed_at.to_rfc3339(),
         revision: revision(result.revision)?,

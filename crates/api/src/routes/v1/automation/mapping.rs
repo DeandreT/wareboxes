@@ -2,7 +2,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use wareboxes_api_contract::v1::{
     AutomationCommandDeliveryResponse, AutomationCommandResponse, AutomationDeviceResponse,
-    AutomationHeartbeatResponse, AutomationWorkspaceResponse, Revision,
+    AutomationHeartbeatResponse, AutomationWorkspaceResponse, PackingScaleCommandContextResponse,
+    Revision,
 };
 use wareboxes_application::automation::{
     AutomationCommandReadModel, AutomationDeliveryReadModel, AutomationDeviceReadModel,
@@ -37,7 +38,7 @@ fn revision(value: u32) -> AppResult<Revision> {
     Revision::new(i64::from(value)).map_err(|error| AppError::internal(error.to_string()))
 }
 
-pub(super) fn device(value: AutomationDeviceReadModel) -> AppResult<AutomationDeviceResponse> {
+pub(crate) fn device(value: AutomationDeviceReadModel) -> AppResult<AutomationDeviceResponse> {
     Ok(AutomationDeviceResponse {
         device_id: value.device_id.get(),
         facility_id: value.facility_id.get(),
@@ -57,7 +58,7 @@ pub(super) fn device(value: AutomationDeviceReadModel) -> AppResult<AutomationDe
     })
 }
 
-pub(super) fn command(value: AutomationCommandReadModel) -> AppResult<AutomationCommandResponse> {
+pub(crate) fn command(value: AutomationCommandReadModel) -> AppResult<AutomationCommandResponse> {
     Ok(AutomationCommandResponse {
         command_id: value.command_id.get(),
         facility_id: value.facility_id.get(),
@@ -67,6 +68,14 @@ pub(super) fn command(value: AutomationCommandReadModel) -> AppResult<Automation
         correlation_id: value.correlation_id,
         recovery_policy: transcode_response(value.recovery_policy)?,
         command: transcode_response(value.command)?,
+        packing_scale_context: value.packing_scale_context.map(|context| {
+            PackingScaleCommandContextResponse {
+                inventory_owner_id: context.inventory_owner_id.get(),
+                session_id: context.session_id.get(),
+                carton_id: context.carton_id.get(),
+                carton_reopen_count: context.carton_reopen_count,
+            }
+        }),
         status: transcode_response(value.status)?,
         revision: revision(value.revision)?,
         delivery_attempts: value.delivery_attempts,

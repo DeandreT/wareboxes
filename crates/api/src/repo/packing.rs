@@ -8,7 +8,9 @@ mod queue;
 mod read_model;
 mod removal;
 mod reopening;
+mod scale;
 mod session;
+mod weight_evidence;
 
 pub use abandonment::abandon_session;
 pub use carton::{close_carton, create_carton, void_carton};
@@ -17,6 +19,7 @@ pub use queue::{packing_queue, PackingQueueCursor, PackingQueueEntry, PackingQue
 pub use read_model::{packing_session, packing_session_for_order};
 pub use removal::remove_packed_content;
 pub use reopening::reopen_carton_command;
+pub use scale::{packing_scale_devices, packing_scale_reading, require_packing_scale_device};
 pub use session::open_session;
 
 use sqlx::Row;

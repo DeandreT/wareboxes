@@ -1,4 +1,4 @@
-mod mapping;
+pub(crate) mod mapping;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -124,6 +124,7 @@ pub async fn enqueue_command(
         correlation_id: body.correlation_id,
         recovery_policy: mapping::transcode_request(body.recovery_policy)?,
         command: mapping::transcode_request(body.command)?,
+        packing_scale_context: None,
     };
     let result = repo::automation::enqueue_command(
         &state.db,

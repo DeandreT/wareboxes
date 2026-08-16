@@ -948,6 +948,18 @@ pub fn router() -> Router<AppState> {
         .route("/orders/{order_id}/packing-sessions", post(packing::open))
         .route("/packing-sessions/{session_id}", get(packing::get))
         .route(
+            "/packing-sessions/{session_id}/scale-devices",
+            get(packing::packing_scale_devices),
+        )
+        .route(
+            "/packing-sessions/{session_id}/scale-readings",
+            post(packing::request_packing_scale_weight),
+        )
+        .route(
+            "/packing-sessions/{session_id}/scale-readings/{command_id}",
+            get(packing::packing_scale_reading),
+        )
+        .route(
             "/packing-sessions/{session_id}/abandonments",
             post(packing::abandon_session),
         )

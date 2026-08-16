@@ -2,10 +2,11 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     CartonDimensions as ApiCartonDimensions, CartonMeasurements as ApiCartonMeasurements,
-    CloseCartonRequest, CloseCartonResponse, CreateCartonRequest, CreateCartonResponse,
-    DimensionMillimeters as ApiDimensionMillimeters, OpaqueCursor, OpenPackSessionRequest,
-    OpenPackSessionResponse, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
-    PackCartonResponse, PackContentRemovalReason as ApiPackContentRemovalReason,
+    CartonWeightEvidenceResponse, CloseCartonRequest, CloseCartonResponse, CreateCartonRequest,
+    CreateCartonResponse, DimensionMillimeters as ApiDimensionMillimeters, OpaqueCursor,
+    OpenPackSessionRequest, OpenPackSessionResponse, PackAllocationDispositionResponse,
+    PackCartonLifecycleResponse, PackCartonResponse,
+    PackContentRemovalReason as ApiPackContentRemovalReason,
     PackDecisionPolicyResponse as ApiPackDecisionPolicyResponse,
     PackDecisionPolicySource as ApiPackDecisionPolicySource, PackPickedAllocationRequest,
     PackPickedAllocationResponse, PackSessionAbandonmentReason as ApiPackSessionAbandonmentReason,
@@ -17,10 +18,10 @@ use wareboxes_api_contract::v1::{
     WeightGrams as ApiWeightGrams,
 };
 use wareboxes_application::packing::{
-    CloseCartonCommand, CloseCartonResult, CreateCartonCommand, CreateCartonResult,
-    OpenPackSessionCommand, OpenPackSessionResult, PackAllocationDisposition, PackCarton,
-    PackCartonLifecycle, PackPickedAllocationCommand, PackPickedAllocationResult, PackSessionQuery,
-    PackSessionReadModel, PackableAllocation, RemovePackedContentCommand,
+    CartonWeightEvidence, CloseCartonCommand, CloseCartonResult, CreateCartonCommand,
+    CreateCartonResult, OpenPackSessionCommand, OpenPackSessionResult, PackAllocationDisposition,
+    PackCarton, PackCartonLifecycle, PackPickedAllocationCommand, PackPickedAllocationResult,
+    PackSessionQuery, PackSessionReadModel, PackableAllocation, RemovePackedContentCommand,
     RemovePackedContentResult, VoidCartonCommand, VoidCartonResult,
 };
 use wareboxes_application::packing_decision_policy::{
@@ -28,11 +29,11 @@ use wareboxes_application::packing_decision_policy::{
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    CartonContentId, CartonDimensions, CartonId, CartonMeasurements, ConfigurationScope,
-    DimensionMillimeters, FacilityId, InventoryAllocationId, LocationId, OrderId, OrderRevision,
-    OrderStatus, PackContentRemovalDetails, PackContentRemovalNote, PackContentRemovalReason,
-    PackScanValue, PackSessionAbandonmentReason, PackSessionId, PackSessionStatus, PackingProgress,
-    WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
+    AutomationCommandId, CartonContentId, CartonDimensions, CartonId, CartonMeasurements,
+    ConfigurationScope, DimensionMillimeters, FacilityId, InventoryAllocationId, LocationId,
+    OrderId, OrderRevision, OrderStatus, PackContentRemovalDetails, PackContentRemovalNote,
+    PackContentRemovalReason, PackScanValue, PackSessionAbandonmentReason, PackSessionId,
+    PackSessionStatus, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
 };
 
 use super::error::{V1Error, V1Result};
@@ -49,6 +50,8 @@ mod abandonment;
 pub use abandonment::abandon_session;
 mod reopening;
 pub use reopening::reopen_carton;
+mod scale;
+pub use scale::{packing_scale_devices, packing_scale_reading, request_packing_scale_weight};
 
 pub async fn queue(
     State(state): State<AppState>,
@@ -271,6 +274,11 @@ fn close_carton_command(
         carton_id: carton_id_value(carton_id)?,
         carton_barcode: scan(body.carton_barcode, "carton barcode")?,
         measurements: measurements_from_api(body.measurements)?,
+        weight_automation_command_id: body
+            .weight_automation_command_id
+            .map(AutomationCommandId::new)
+            .transpose()
+            .map_err(domain_validation)?,
         expected_revision: order_revision(body.expected_revision)?,
     })
 }
@@ -689,10 +697,12 @@ fn map_carton_lifecycle(lifecycle: PackCartonLifecycle) -> V1Result<PackCartonLi
         PackCartonLifecycle::Open => PackCartonLifecycleResponse::Open,
         PackCartonLifecycle::Closed {
             measurements,
+            weight_evidence,
             closed_by,
             closed_at,
         } => PackCartonLifecycleResponse::Closed {
             measurements: measurements_to_api(measurements)?,
+            weight_evidence: weight_evidence.map(map_weight_evidence).transpose()?,
             closed_by: closed_by.get(),
             closed_at: closed_at.to_rfc3339(),
         },
@@ -702,6 +712,47 @@ fn map_carton_lifecycle(lifecycle: PackCartonLifecycle) -> V1Result<PackCartonLi
         } => PackCartonLifecycleResponse::Voided {
             voided_by: voided_by.get(),
             voided_at: voided_at.to_rfc3339(),
+        },
+    })
+}
+
+pub(super) fn map_weight_evidence(
+    evidence: CartonWeightEvidence,
+) -> V1Result<CartonWeightEvidenceResponse> {
+    Ok(match evidence {
+        CartonWeightEvidence::Manual {
+            evidence_id,
+            weight_grams,
+            captured_by,
+            captured_at,
+        } => CartonWeightEvidenceResponse::Manual {
+            evidence_id: evidence_id.get(),
+            weight_grams: ApiWeightGrams::new(weight_grams.get()).map_err(domain_validation)?,
+            captured_by: captured_by.get(),
+            captured_at: captured_at.to_rfc3339(),
+        },
+        CartonWeightEvidence::AutomationScale {
+            evidence_id,
+            weight_grams,
+            automation_command_id,
+            device_id,
+            device_key,
+            requested_by,
+            requested_at,
+            completed_at,
+            captured_by,
+            captured_at,
+        } => CartonWeightEvidenceResponse::AutomationScale {
+            evidence_id: evidence_id.get(),
+            weight_grams: ApiWeightGrams::new(weight_grams.get()).map_err(domain_validation)?,
+            automation_command_id: automation_command_id.get(),
+            device_id: device_id.get(),
+            device_key,
+            requested_by: requested_by.get(),
+            requested_at: requested_at.to_rfc3339(),
+            completed_at: completed_at.to_rfc3339(),
+            captured_by: captured_by.get(),
+            captured_at: captured_at.to_rfc3339(),
         },
     })
 }
@@ -1118,6 +1169,7 @@ mod tests {
                         height_mm: ApiDimensionMillimeters::new(150).unwrap(),
                     }),
                 },
+                weight_automation_command_id: Some(42),
                 expected_revision: revision_value(6),
             },
         )
@@ -1125,6 +1177,12 @@ mod tests {
         assert_eq!(
             command.measurements.weight_grams().map(WeightGrams::get),
             Some(1_250)
+        );
+        assert_eq!(
+            command
+                .weight_automation_command_id
+                .map(AutomationCommandId::get),
+            Some(42)
         );
         assert_eq!(
             command

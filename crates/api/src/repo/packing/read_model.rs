@@ -208,12 +208,13 @@ async fn load_cartons_tx(
     tenant_id: TenantId,
     session_id: PackSessionId,
 ) -> AppResult<Vec<PackCarton>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT carton.id, plate.barcode, carton.state, carton.created_by_user_id,
                carton.created_at, carton.closed_by_user_id, carton.closed_at,
                carton.voided_by_user_id, carton.voided_at,
                carton.weight_g, carton.length_mm, carton.width_mm, carton.height_mm,
+               {},
                COUNT(position.current_carton_content_id) AS content_count
         FROM cartons carton
         INNER JOIN license_plates plate
@@ -221,6 +222,15 @@ async fn load_cartons_tx(
          AND plate.inventory_owner_id = carton.inventory_owner_id
          AND plate.facility_id = carton.facility_id
          AND plate.id = carton.license_plate_id
+        LEFT JOIN carton_weight_evidence evidence
+          ON evidence.tenant_id=carton.tenant_id AND evidence.carton_id=carton.id
+         AND evidence.carton_reopen_count=carton.reopen_count
+        LEFT JOIN automation_commands weight_command
+          ON weight_command.tenant_id=evidence.tenant_id
+         AND weight_command.id=evidence.automation_command_id
+        LEFT JOIN automation_devices weight_device
+          ON weight_device.tenant_id=weight_command.tenant_id
+         AND weight_device.id=weight_command.device_id
         LEFT JOIN carton_contents content
           ON content.tenant_id = carton.tenant_id AND content.carton_id = carton.id
         LEFT JOIN packing_allocation_positions position
@@ -232,10 +242,11 @@ async fn load_cartons_tx(
          AND position.current_carton_content_id=content.id
          AND position.state='packed'
         WHERE carton.tenant_id = $1 AND carton.packing_session_id = $2
-        GROUP BY carton.id, plate.barcode
+        GROUP BY carton.id,plate.barcode,evidence.id,weight_command.id,weight_device.id
         ORDER BY carton.id
         "#,
-    )
+        super::weight_evidence::SELECT_COLUMNS
+    ))
     .bind(tenant_id.get())
     .bind(session_id.get())
     .fetch_all(&mut **tx)
@@ -248,6 +259,7 @@ fn map_carton(row: sqlx::postgres::PgRow) -> AppResult<PackCarton> {
         "open" => PackCartonLifecycle::Open,
         "closed" => PackCartonLifecycle::Closed {
             measurements: measurements(&row)?,
+            weight_evidence: super::weight_evidence::from_row(&row)?,
             closed_by: positive(
                 row.try_get::<Option<i64>, _>("closed_by_user_id")?
                     .ok_or_else(|| AppError::internal("closed carton has no actor"))?,

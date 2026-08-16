@@ -41,7 +41,11 @@ pub use automation::{
     automation_workspace, change_automation_control, enqueue_automation_command,
     register_automation_device, resolve_automation_command,
 };
+mod packing_scale;
 pub use backorder::{configure_backorder_policy, split_order_backorder};
+pub use packing_scale::{
+    packing_scale_devices, packing_scale_reading, request_packing_scale_weight,
+};
 mod billing;
 pub use billing::{
     activate_billing_contract, billing_workspace, capture_billable_event,

@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     AutomationCommandId, AutomationCommandResult, AutomationControlMode, AutomationDeviceClass,
     AutomationDeviceCommand, AutomationDeviceId, AutomationHealthState, AutomationHeartbeatId,
-    AutomationRecoveryPolicy, FacilityId, ServiceAccountId, TenantId, Timestamp, UserId,
+    AutomationRecoveryPolicy, CartonId, FacilityId, InventoryOwnerId, PackSessionId,
+    ServiceAccountId, TenantId, Timestamp, UserId,
 };
 
 pub const REGISTER_AUTOMATION_DEVICE_OPERATION: &str = "automation.device.register.v1";
@@ -87,12 +88,21 @@ pub struct ChangeAutomationControlCommand {
     pub safety_confirmed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackingScaleCommandContext {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub session_id: PackSessionId,
+    pub carton_id: CartonId,
+    pub carton_reopen_count: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnqueueAutomationCommand {
     pub device_id: AutomationDeviceId,
     pub correlation_id: String,
     pub recovery_policy: AutomationRecoveryPolicy,
     pub command: AutomationDeviceCommand,
+    pub packing_scale_context: Option<PackingScaleCommandContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +181,7 @@ pub struct AutomationCommandReadModel {
     pub correlation_id: String,
     pub recovery_policy: AutomationRecoveryPolicy,
     pub command: AutomationDeviceCommand,
+    pub packing_scale_context: Option<PackingScaleCommandContext>,
     pub status: AutomationCommandStatus,
     pub revision: u32,
     pub delivery_attempts: u32,

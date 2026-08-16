@@ -101,6 +101,7 @@ pub async fn reopen_carton_command(
     require_no_downstream_execution_tx(&mut tx, access.tenant_id, command.session_id).await?;
 
     let previous_measurements = measurements(&carton)?;
+    let previous_weight_evidence = carton.weight_evidence.clone();
     let previous_closed_by = carton
         .closed_by
         .ok_or_else(|| AppError::internal("closed carton lacks closing actor"))?;
@@ -223,6 +224,7 @@ pub async fn reopen_carton_command(
             "note": note,
             "reopened_by": context.actor_id,
             "reopened_at": reopened_at,
+            "previous_weight_evidence": previous_weight_evidence,
         }),
         reopened_at,
     )
@@ -237,6 +239,7 @@ pub async fn reopen_carton_command(
         order_status,
         lifecycle: PackCartonLifecycle::Open,
         previous_measurements,
+        previous_weight_evidence,
         previous_closed_by,
         previous_closed_at,
         revision,
@@ -259,6 +262,7 @@ struct LockedCarton {
     length_mm: Option<i64>,
     width_mm: Option<i64>,
     height_mm: Option<i64>,
+    weight_evidence: Option<wareboxes_application::packing::CartonWeightEvidence>,
 }
 
 async fn lock_carton_tx(
@@ -266,21 +270,31 @@ async fn lock_carton_tx(
     tenant_id: TenantId,
     command: &ReopenCartonCommand,
 ) -> AppResult<LockedCarton> {
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
         SELECT carton.license_plate_id,plate.barcode,carton.state,carton.reopen_count,
                carton.closed_by_user_id,carton.closed_at,carton.weight_g,
-               carton.length_mm,carton.width_mm,carton.height_mm
+               carton.length_mm,carton.width_mm,carton.height_mm,{}
         FROM cartons carton
         INNER JOIN license_plates plate
           ON plate.tenant_id=carton.tenant_id
          AND plate.inventory_owner_id=carton.inventory_owner_id
          AND plate.facility_id=carton.facility_id
          AND plate.id=carton.license_plate_id
+        LEFT JOIN carton_weight_evidence evidence
+          ON evidence.tenant_id=carton.tenant_id AND evidence.carton_id=carton.id
+         AND evidence.carton_reopen_count=carton.reopen_count
+        LEFT JOIN automation_commands weight_command
+          ON weight_command.tenant_id=evidence.tenant_id
+         AND weight_command.id=evidence.automation_command_id
+        LEFT JOIN automation_devices weight_device
+          ON weight_device.tenant_id=weight_command.tenant_id
+         AND weight_device.id=weight_command.device_id
         WHERE carton.tenant_id=$1 AND carton.packing_session_id=$2 AND carton.id=$3
         FOR UPDATE OF carton
         "#,
-    )
+        super::weight_evidence::SELECT_COLUMNS
+    ))
     .bind(tenant_id.get())
     .bind(command.session_id.get())
     .bind(command.carton_id.get())
@@ -303,6 +317,7 @@ async fn lock_carton_tx(
         length_mm: row.try_get("length_mm")?,
         width_mm: row.try_get("width_mm")?,
         height_mm: row.try_get("height_mm")?,
+        weight_evidence: super::weight_evidence::from_row(&row)?,
     })
 }
 

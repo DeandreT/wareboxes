@@ -6,6 +6,8 @@ use wareboxes_api_contract::v1::{
 #[derive(Clone, Copy)]
 pub(super) struct CartonMeasurementSignals {
     pub(super) weight: RwSignal<String>,
+    pub(super) weight_automation_command_id: RwSignal<Option<i64>>,
+    pub(super) scale_busy: RwSignal<bool>,
     pub(super) length: RwSignal<String>,
     pub(super) width: RwSignal<String>,
     pub(super) height: RwSignal<String>,
@@ -14,6 +16,8 @@ pub(super) struct CartonMeasurementSignals {
 impl CartonMeasurementSignals {
     pub(super) fn clear(self) {
         self.weight.set(String::new());
+        self.weight_automation_command_id.set(None);
+        self.scale_busy.set(false);
         self.length.set(String::new());
         self.width.set(String::new());
         self.height.set(String::new());

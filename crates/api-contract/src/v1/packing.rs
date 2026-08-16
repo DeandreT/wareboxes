@@ -3,7 +3,9 @@ use std::fmt;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-use super::{ConfigurationScope, CursorPage, OpaqueCursor, PageLimit, Revision};
+use super::{
+    AutomationHealthState, ConfigurationScope, CursorPage, OpaqueCursor, PageLimit, Revision,
+};
 
 pub const PRODUCT_DEFAULT_PACK_DECISION_POLICY_HASH: &str =
     "a5fc7b3c670e596ce983c7ff342c1351cd95be99c889e0d12a8b26abbaa4ac57";
@@ -319,6 +321,8 @@ pub struct CloseCartonRequest {
     pub carton_barcode: String,
     #[serde(default)]
     pub measurements: CartonMeasurements,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight_automation_command_id: Option<i64>,
     pub expected_revision: Revision,
 }
 
@@ -358,6 +362,8 @@ pub enum PackCartonLifecycleResponse {
     Open,
     Closed {
         measurements: CartonMeasurements,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weight_evidence: Option<CartonWeightEvidenceResponse>,
         closed_by: i64,
         closed_at: String,
     },
@@ -365,6 +371,53 @@ pub enum PackCartonLifecycleResponse {
         voided_by: i64,
         voided_at: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum CartonWeightEvidenceResponse {
+    Manual {
+        evidence_id: i64,
+        weight_grams: WeightGrams,
+        captured_by: i64,
+        captured_at: String,
+    },
+    AutomationScale {
+        evidence_id: i64,
+        weight_grams: WeightGrams,
+        automation_command_id: i64,
+        device_id: i64,
+        device_key: String,
+        requested_by: i64,
+        requested_at: String,
+        completed_at: String,
+        captured_by: i64,
+        captured_at: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestPackingScaleWeight {
+    pub device_id: i64,
+    pub carton_id: i64,
+    pub timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackingScaleDeviceResponse {
+    pub device_id: i64,
+    pub device_key: String,
+    pub display_name: String,
+    pub health: AutomationHealthState,
+    pub last_heartbeat_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackingScaleDevicePage {
+    pub items: Vec<PackingScaleDeviceResponse>,
 }
 
 /// One carton in a resumable pack session.
@@ -580,6 +633,7 @@ pub struct ReopenCartonResponse {
     pub order_status: PackingOrderStatus,
     pub lifecycle: PackCartonLifecycleResponse,
     pub previous_measurements: CartonMeasurements,
+    pub previous_weight_evidence: Option<CartonWeightEvidenceResponse>,
     pub previous_closed_by: i64,
     pub previous_closed_at: String,
     pub revision: Revision,

@@ -10,7 +10,8 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     validate_automation_device, validate_automation_message, AutomationCommandId,
-    AutomationControlMode, AutomationDeviceId, AutomationHealthState, FacilityId, TenantId,
+    AutomationControlMode, AutomationDeviceCommand, AutomationDeviceId, AutomationHealthState,
+    AutomationScaleCommand, FacilityId, TenantId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -239,11 +240,20 @@ pub async fn enqueue_command(
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     bind_actor_tx(&mut tx, context.actor_id.get()).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    let permission = if matches!(
+        command.command,
+        AutomationDeviceCommand::Scale(AutomationScaleCommand::ReadStableWeight { .. })
+    ) && command.packing_scale_context.is_some()
+    {
+        "wms"
+    } else {
+        SUPERVISOR_PERMISSION
+    };
     require_permission_tx(
         &mut tx,
         access.tenant_id,
         context.actor_id.get(),
-        SUPERVISOR_PERMISSION,
+        permission,
     )
     .await?;
     if let Some(result) = prepared
@@ -324,8 +334,10 @@ pub async fn enqueue_command(
         r#"WITH inserted AS (
           INSERT INTO automation_commands
           (tenant_id,facility_id,device_id,device_class,correlation_id,recovery_policy,
-           command_payload,status,revision,delivery_attempts,requested_by_user_id,requested_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,'queued',1,0,$8,$9)
+           command_payload,packing_inventory_owner_id,packing_session_id,packing_carton_id,
+           packing_carton_reopen_count,status,revision,delivery_attempts,
+           requested_by_user_id,requested_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'queued',1,0,$12,$13)
           RETURNING *)
         SELECT {} FROM inserted command JOIN automation_devices device
           ON device.tenant_id=command.tenant_id AND device.id=command.device_id"#,
@@ -338,6 +350,26 @@ pub async fn enqueue_command(
     .bind(&command.correlation_id)
     .bind(command.recovery_policy.as_str())
     .bind(payload)
+    .bind(
+        command
+            .packing_scale_context
+            .map(|context| context.inventory_owner_id.get()),
+    )
+    .bind(
+        command
+            .packing_scale_context
+            .map(|context| context.session_id.get()),
+    )
+    .bind(
+        command
+            .packing_scale_context
+            .map(|context| context.carton_id.get()),
+    )
+    .bind(
+        command
+            .packing_scale_context
+            .map(|context| context.carton_reopen_count),
+    )
     .bind(context.actor_id.get())
     .bind(now)
     .fetch_one(&mut *tx)

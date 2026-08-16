@@ -52936,6 +52936,10 @@ CREATE TABLE public.automation_commands (
   correlation_id text NOT NULL,
   recovery_policy text NOT NULL,
   command_payload jsonb NOT NULL,
+  packing_inventory_owner_id bigint,
+  packing_session_id bigint,
+  packing_carton_id bigint,
+  packing_carton_reopen_count bigint,
   status text NOT NULL,
   revision integer NOT NULL,
   delivery_attempts integer NOT NULL,
@@ -52964,6 +52968,12 @@ CREATE TABLE public.automation_commands (
   CHECK(recovery_policy IN
     ('device_deduplicated_replay','probe_then_retry','manual_review')),
   CHECK(public.automation_command_payload_is_valid(device_class,command_payload)),
+  CHECK((packing_inventory_owner_id IS NULL AND packing_session_id IS NULL
+      AND packing_carton_id IS NULL AND packing_carton_reopen_count IS NULL)
+    OR (packing_inventory_owner_id IS NOT NULL AND packing_session_id IS NOT NULL
+      AND packing_carton_id IS NOT NULL AND packing_carton_reopen_count>=0
+      AND device_class='scale'
+      AND command_payload->'command'->>'operation'='read_stable_weight')),
   CHECK(status IN
     ('queued','delivered','accepted','succeeded','failed','manual_review',
       'resolved_manually','cancelled')),
@@ -53022,6 +53032,10 @@ CREATE TABLE public.automation_commands (
       AND result_payload IS NULL)),
   FOREIGN KEY(tenant_id,facility_id,device_id)
     REFERENCES public.automation_devices(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,packing_inventory_owner_id,facility_id,
+      packing_session_id,packing_carton_id)
+    REFERENCES public.cartons(
+      tenant_id,inventory_owner_id,facility_id,packing_session_id,id),
   FOREIGN KEY(tenant_id,assigned_service_account_id)
     REFERENCES public.service_accounts(tenant_id,id),
   FOREIGN KEY(tenant_id,requested_by_user_id)
@@ -53247,8 +53261,12 @@ BEGIN
   END IF;
   IF TG_OP='INSERT' THEN
     IF actor_id IS DISTINCT FROM NEW.requested_by_user_id
-      OR NOT public.automation_user_has_permission(
-        NEW.tenant_id,actor_id,'wms_supervisor')
+      OR NOT (
+        public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms_supervisor')
+        OR (NEW.device_class='scale'
+          AND NEW.command_payload->'command'->>'operation'='read_stable_weight'
+          AND NEW.packing_session_id IS NOT NULL
+          AND public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms')))
       OR NOT public.automation_interactive_user_scoped(
         NEW.tenant_id,actor_id,NEW.facility_id)
       OR device.control_mode<>'automatic' OR device.health NOT IN ('healthy','degraded')
@@ -53260,16 +53278,34 @@ BEGIN
           AND heartbeat.control_mode='automatic')
       OR EXISTS(SELECT 1 FROM public.automation_commands held
         WHERE held.tenant_id=NEW.tenant_id AND held.device_id=NEW.device_id
-          AND held.status='manual_review') THEN
+          AND held.status='manual_review')
+      OR (NEW.packing_session_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM public.cartons carton
+        JOIN public.packing_sessions session
+          ON session.tenant_id=carton.tenant_id
+         AND session.inventory_owner_id=carton.inventory_owner_id
+         AND session.facility_id=carton.facility_id
+         AND session.id=carton.packing_session_id
+        WHERE carton.tenant_id=NEW.tenant_id
+          AND carton.inventory_owner_id=NEW.packing_inventory_owner_id
+          AND carton.facility_id=NEW.facility_id
+          AND carton.packing_session_id=NEW.packing_session_id
+          AND carton.id=NEW.packing_carton_id
+          AND carton.reopen_count=NEW.packing_carton_reopen_count
+          AND carton.state='open' AND session.state='open')) THEN
       RAISE EXCEPTION 'invalid automation command enqueue' USING ERRCODE='23514';
     END IF;
     RETURN NEW;
   END IF;
   IF ROW(NEW.id,NEW.tenant_id,NEW.facility_id,NEW.device_id,NEW.device_class,
       NEW.correlation_id,NEW.recovery_policy,NEW.command_payload,
+      NEW.packing_inventory_owner_id,NEW.packing_session_id,
+      NEW.packing_carton_id,NEW.packing_carton_reopen_count,
       NEW.requested_by_user_id,NEW.requested_at) IS DISTINCT FROM
     ROW(OLD.id,OLD.tenant_id,OLD.facility_id,OLD.device_id,OLD.device_class,
       OLD.correlation_id,OLD.recovery_policy,OLD.command_payload,
+      OLD.packing_inventory_owner_id,OLD.packing_session_id,
+      OLD.packing_carton_id,OLD.packing_carton_reopen_count,
       OLD.requested_by_user_id,OLD.requested_at) THEN
     RAISE EXCEPTION 'automation command envelope is immutable' USING ERRCODE='55000';
   END IF;
@@ -53456,3 +53492,153 @@ REVOKE ALL ON FUNCTION public.validate_automation_device() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_automation_command() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_automation_command_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_automation_heartbeat() FROM PUBLIC;
+
+-- Carton weights retain append-only provenance across reopen/repack cycles. A
+-- completed scale reading is consumable once; manual entry remains an explicit
+-- fallback rather than indistinguishable asserted data.
+CREATE TABLE public.carton_weight_evidence (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  packing_session_id bigint NOT NULL,
+  carton_id bigint NOT NULL,
+  carton_reopen_count bigint NOT NULL,
+  source text NOT NULL,
+  weight_g bigint NOT NULL,
+  automation_command_id bigint,
+  captured_by_user_id bigint NOT NULL,
+  captured_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,packing_session_id,id),
+  UNIQUE(tenant_id,carton_id,carton_reopen_count),
+  UNIQUE(tenant_id,automation_command_id),
+  CHECK(carton_reopen_count>=0),
+  CHECK(weight_g>0),
+  CHECK(source IN ('manual','automation_scale')),
+  CHECK((source='manual' AND automation_command_id IS NULL)
+    OR (source='automation_scale' AND automation_command_id IS NOT NULL)),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,packing_session_id,carton_id)
+    REFERENCES public.cartons(
+      tenant_id,inventory_owner_id,facility_id,packing_session_id,id),
+  FOREIGN KEY(tenant_id,facility_id,automation_command_id)
+    REFERENCES public.automation_commands(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,captured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE FUNCTION public.validate_carton_weight_evidence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'carton weight evidence is immutable' USING ERRCODE='55000';
+  END IF;
+  IF actor_id IS DISTINCT FROM NEW.captured_by_user_id
+    OR NOT public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms')
+    OR NOT public.automation_interactive_user_scoped(
+      NEW.tenant_id,actor_id,NEW.facility_id)
+    OR NEW.captured_at NOT BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+      AND CURRENT_TIMESTAMP+INTERVAL '1 minute'
+    OR NOT EXISTS(
+      SELECT 1 FROM public.cartons carton
+      JOIN public.packing_sessions session
+        ON session.tenant_id=carton.tenant_id
+       AND session.inventory_owner_id=carton.inventory_owner_id
+       AND session.facility_id=carton.facility_id
+       AND session.id=carton.packing_session_id
+      WHERE carton.tenant_id=NEW.tenant_id
+        AND carton.inventory_owner_id=NEW.inventory_owner_id
+        AND carton.facility_id=NEW.facility_id
+        AND carton.packing_session_id=NEW.packing_session_id
+        AND carton.id=NEW.carton_id
+        AND carton.reopen_count=NEW.carton_reopen_count
+        AND carton.state='open' AND session.state='open'
+    ) THEN
+    RAISE EXCEPTION 'invalid carton weight capture scope or actor' USING ERRCODE='23514';
+  END IF;
+  IF NEW.source='automation_scale' AND NOT EXISTS(
+    SELECT 1 FROM public.automation_commands command
+    WHERE command.tenant_id=NEW.tenant_id
+      AND command.facility_id=NEW.facility_id
+      AND command.id=NEW.automation_command_id
+      AND command.device_class='scale'
+      AND command.command_payload->'command'->>'operation'='read_stable_weight'
+      AND command.status='succeeded'
+      AND command.completed_at IS NOT NULL
+      AND command.completed_at<=NEW.captured_at
+      AND command.packing_inventory_owner_id=NEW.inventory_owner_id
+      AND command.packing_session_id=NEW.packing_session_id
+      AND command.packing_carton_id=NEW.carton_id
+      AND command.packing_carton_reopen_count=NEW.carton_reopen_count
+      AND command.result_payload->'result'->>'stable'='true'
+      AND (command.result_payload->'result'->>'mass_milligrams')::bigint>0
+      AND mod((command.result_payload->'result'->>'mass_milligrams')::bigint,1000)=0
+      AND (command.result_payload->'result'->>'mass_milligrams')::numeric=
+        NEW.weight_g::numeric*1000
+  ) THEN
+    RAISE EXCEPTION 'scale evidence is not a matching completed stable reading'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_carton_weight_evidence_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_TABLE_NAME='carton_weight_evidence' THEN
+    IF NOT EXISTS(
+      SELECT 1 FROM public.cartons carton
+      WHERE carton.tenant_id=NEW.tenant_id
+        AND carton.inventory_owner_id=NEW.inventory_owner_id
+        AND carton.facility_id=NEW.facility_id
+        AND carton.packing_session_id=NEW.packing_session_id
+        AND carton.id=NEW.carton_id
+        AND carton.reopen_count=NEW.carton_reopen_count
+        AND carton.state='closed'
+        AND carton.weight_g=NEW.weight_g
+        AND carton.closed_by_user_id=NEW.captured_by_user_id
+        AND carton.closed_at=NEW.captured_at
+    ) THEN
+      RAISE EXCEPTION 'carton weight evidence has no matching closed carton'
+        USING ERRCODE='55000';
+    END IF;
+  ELSIF NEW.state='closed' AND (
+    (NEW.weight_g IS NULL AND EXISTS(
+      SELECT 1 FROM public.carton_weight_evidence evidence
+      WHERE evidence.tenant_id=NEW.tenant_id AND evidence.carton_id=NEW.id
+        AND evidence.carton_reopen_count=NEW.reopen_count))
+    OR (NEW.weight_g IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.carton_weight_evidence evidence
+      WHERE evidence.tenant_id=NEW.tenant_id AND evidence.carton_id=NEW.id
+        AND evidence.carton_reopen_count=NEW.reopen_count
+        AND evidence.weight_g=NEW.weight_g
+        AND evidence.captured_by_user_id=NEW.closed_by_user_id
+        AND evidence.captured_at=NEW.closed_at))
+  ) THEN
+    RAISE EXCEPTION 'closed carton weight lacks matching immutable evidence'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER carton_weight_evidence_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.carton_weight_evidence
+FOR EACH ROW EXECUTE FUNCTION public.validate_carton_weight_evidence();
+CREATE CONSTRAINT TRIGGER carton_weight_evidence_requires_carton
+AFTER INSERT ON public.carton_weight_evidence DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_carton_weight_evidence_consistency();
+CREATE CONSTRAINT TRIGGER cartons_require_weight_evidence
+AFTER UPDATE ON public.cartons DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_carton_weight_evidence_consistency();
+
+ALTER TABLE public.carton_weight_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.carton_weight_evidence FORCE ROW LEVEL SECURITY;
+CREATE POLICY carton_weight_evidence_tenant_isolation
+ON public.carton_weight_evidence
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+GRANT SELECT,INSERT ON public.carton_weight_evidence TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carton_weight_evidence_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_carton_weight_evidence() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_carton_weight_evidence_consistency() FROM PUBLIC;

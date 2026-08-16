@@ -3,6 +3,7 @@ mod api_v1_packing {
     mod decision_policy;
     mod removal;
     mod reopening;
+    mod scale;
 }
 
 use axum::body::{to_bytes, Body};
@@ -1933,6 +1934,7 @@ async fn packing_ledgers_are_forced_rls_and_minimally_granted() {
         ("carton_contents", true, false),
         ("packing_allocation_positions", false, false),
         ("carton_content_removals", true, false),
+        ("carton_weight_evidence", true, false),
     ] {
         let privileges: (bool, bool, bool, bool) = sqlx::query_as(
             r#"
@@ -1988,6 +1990,7 @@ async fn packing_ledgers_are_forced_rls_and_minimally_granted() {
         "cartons_id_seq",
         "carton_contents_id_seq",
         "carton_content_removals_id_seq",
+        "carton_weight_evidence_id_seq",
     ] {
         let usage: bool =
             sqlx::query_scalar("SELECT has_sequence_privilege('wareboxes_app', $1, 'USAGE')")

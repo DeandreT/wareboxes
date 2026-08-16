@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    CartonContentId, CartonContentRemovalId, CartonId, CartonMeasurements, CartonReopenDetails,
-    CartonReopeningId, FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryOwnerId,
-    ItemBatchId, LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, OrderStatus,
-    PackContentRemovalDetails, PackQuantity, PackScanValue, PackSessionAbandonmentDetails,
-    PackSessionId, PackSessionStatus, PackingProgress, Timestamp, UserId,
+    AutomationCommandId, AutomationDeviceId, CartonContentId, CartonContentRemovalId, CartonId,
+    CartonMeasurements, CartonReopenDetails, CartonReopeningId, CartonWeightEvidenceId, FacilityId,
+    InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId, LicensePlateId,
+    LocationId, OrderId, OrderLineId, OrderRevision, OrderStatus, PackContentRemovalDetails,
+    PackQuantity, PackScanValue, PackSessionAbandonmentDetails, PackSessionId, PackSessionStatus,
+    PackingProgress, Timestamp, UserId, WeightGrams,
 };
 
 use crate::packing_decision_policy::PackDecisionPolicyReadModel;
@@ -100,12 +101,37 @@ pub struct PackableAllocation {
 }
 
 /// State-specific facts for one physical carton.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum CartonWeightEvidence {
+    Manual {
+        evidence_id: CartonWeightEvidenceId,
+        weight_grams: WeightGrams,
+        captured_by: UserId,
+        captured_at: Timestamp,
+    },
+    AutomationScale {
+        evidence_id: CartonWeightEvidenceId,
+        weight_grams: WeightGrams,
+        automation_command_id: AutomationCommandId,
+        device_id: AutomationDeviceId,
+        device_key: String,
+        requested_by: UserId,
+        requested_at: Timestamp,
+        completed_at: Timestamp,
+        captured_by: UserId,
+        captured_at: Timestamp,
+    },
+}
+
+/// State-specific facts for one physical carton.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PackCartonLifecycle {
     Open,
     Closed {
         measurements: CartonMeasurements,
+        weight_evidence: Option<CartonWeightEvidence>,
         closed_by: UserId,
         closed_at: Timestamp,
     },
@@ -278,6 +304,7 @@ pub struct CloseCartonCommand {
     pub carton_id: CartonId,
     pub carton_barcode: PackScanValue,
     pub measurements: CartonMeasurements,
+    pub weight_automation_command_id: Option<AutomationCommandId>,
     pub expected_revision: OrderRevision,
 }
 
@@ -314,6 +341,7 @@ pub struct ReopenCartonResult {
     pub order_status: OrderStatus,
     pub lifecycle: PackCartonLifecycle,
     pub previous_measurements: CartonMeasurements,
+    pub previous_weight_evidence: Option<CartonWeightEvidence>,
     pub previous_closed_by: UserId,
     pub previous_closed_at: Timestamp,
     pub revision: OrderRevision,
@@ -392,6 +420,7 @@ mod tests {
                 carton_id,
                 carton_barcode: PackScanValue::new("CARTON-1").unwrap(),
                 measurements: CartonMeasurements::default(),
+                weight_automation_command_id: None,
                 expected_revision: revision,
             }
             .expected_revision,
@@ -432,6 +461,7 @@ mod tests {
             order_id: OrderId::new(3).unwrap(),
             lifecycle: PackCartonLifecycle::Closed {
                 measurements: CartonMeasurements::default(),
+                weight_evidence: None,
                 closed_by: UserId::new(4).unwrap(),
                 closed_at: "2026-08-08T20:00:00Z".parse().unwrap(),
             },

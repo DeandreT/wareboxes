@@ -515,6 +515,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'carton_reopenings_tenant_isolation'
                 ),
                 (
+                    'carton_weight_evidence',
+                    'carton_weight_evidence_tenant_isolation'
+                ),
+                (
                     'outbound_qa_policies',
                     'outbound_qa_policies_tenant_isolation'
                 ),

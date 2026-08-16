@@ -13,6 +13,7 @@ use crate::view_model::format_quantity;
 use super::measurements::CartonMeasurementSignals;
 use super::removal::PendingContentRemoval;
 use super::reopening::PendingCartonReopening;
+use super::scale::PackingScaleCapture;
 use super::{
     IdentityScanStage, PackingLocation, PackingQueueSignals, PackingSignals, PendingItemIdentity,
 };
@@ -490,10 +491,21 @@ pub(super) fn PackingActive(
                                         "Open",
                                         format!("{} contents", carton.content_count),
                                     ),
-                                    PackCartonLifecycleResponse::Closed { closed_at, .. } => (
-                                        "Closed",
-                                        format!("{} contents - {}", carton.content_count, compact_time(closed_at)),
-                                    ),
+                                    PackCartonLifecycleResponse::Closed {
+                                        closed_at,
+                                        weight_evidence,
+                                        ..
+                                    } => {
+                                        let provenance = match weight_evidence {
+                                            Some(wareboxes_api_contract::v1::CartonWeightEvidenceResponse::AutomationScale { device_key, .. }) => format!("scale {device_key}"),
+                                            Some(wareboxes_api_contract::v1::CartonWeightEvidenceResponse::Manual { .. }) => "manual weight".to_owned(),
+                                            None => "no weight".to_owned(),
+                                        };
+                                        (
+                                            "Closed",
+                                            format!("{} contents - {} - {provenance}", carton.content_count, compact_time(closed_at)),
+                                        )
+                                    },
                                     PackCartonLifecycleResponse::Voided { voided_at, .. } => (
                                         "Voided",
                                         format!("Empty - {}", compact_time(voided_at)),
@@ -593,14 +605,16 @@ fn CloseCartonPanel(
         length,
         width,
         height,
+        ..
     } = signals.measurements;
     let empty = carton.content_count == 0;
     view! {
         <div class="packing-carton-close">
             <strong>{carton.carton_barcode}</strong>
             <Show when=move || !empty>
+                <PackingScaleCapture session_id=signals.session.get_untracked().map_or(0, |session| session.session_id) carton_id=carton.carton_id measurements=signals.measurements signals/>
                 <div class="packing-measurement-grid">
-                    <label class="wide"><span>{if require_weight { "Weight (g) · required" } else { "Weight (g)" }}</span><input required=require_weight inputmode="numeric" prop:value=move || weight.get() on:input=move |event| weight.set(event_target_value(&event))/></label>
+                    <label class="wide"><span>{if require_weight { "Weight (g) · required" } else { "Weight (g)" }}</span><input required=require_weight inputmode="numeric" prop:value=move || weight.get() disabled=move || signals.measurements.scale_busy.get() on:input=move |event| { weight.set(event_target_value(&event)); signals.measurements.weight_automation_command_id.set(None); }/></label>
                     <label><span>"Length (mm)"</span><input inputmode="numeric" prop:value=move || length.get() on:input=move |event| length.set(event_target_value(&event))/></label>
                     <label><span>"Width (mm)"</span><input inputmode="numeric" prop:value=move || width.get() on:input=move |event| width.set(event_target_value(&event))/></label>
                     <label><span>"Height (mm)"</span><input inputmode="numeric" prop:value=move || height.get() on:input=move |event| height.set(event_target_value(&event))/></label>

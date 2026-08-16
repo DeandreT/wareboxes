@@ -3,7 +3,7 @@
 mod commands;
 mod edge;
 mod events;
-mod mapping;
+pub(crate) mod mapping;
 mod query;
 
 pub use commands::{change_control, enqueue_command, register_device, resolve_command};

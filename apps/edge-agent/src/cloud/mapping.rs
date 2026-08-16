@@ -236,6 +236,7 @@ mod tests {
                 correlation_id: "carton 123 weight".into(),
                 recovery_policy: AutomationRecoveryPolicy::ManualReview,
                 command: AutomationDeviceCommand::Scale(AutomationScaleCommand::Tare),
+                packing_scale_context: None,
                 status: AutomationCommandStatus::Delivered,
                 revision: Revision::new(2).unwrap(),
                 delivery_attempts: 1,

@@ -347,17 +347,18 @@ pub use outbound_qa::{
 };
 pub use packing::{
     AbandonPackSessionRequest, AbandonPackSessionResponse, CartonDimensions, CartonMeasurements,
-    CartonReopenReason, CloseCartonRequest, CloseCartonResponse, CreateCartonRequest,
-    CreateCartonResponse, DimensionMillimeters, OpenPackSessionRequest, OpenPackSessionResponse,
-    PackAllocationDispositionResponse, PackCartonLifecycleResponse, PackCartonResponse,
-    PackContentRemovalReason, PackDecisionPolicyResponse, PackDecisionPolicySource,
-    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionAbandonmentReason,
-    PackSessionAbandonmentResponse, PackSessionResponse, PackSessionStatus,
-    PackableAllocationResponse, PackingMeasurementError, PackingOrderStatus,
+    CartonReopenReason, CartonWeightEvidenceResponse, CloseCartonRequest, CloseCartonResponse,
+    CreateCartonRequest, CreateCartonResponse, DimensionMillimeters, OpenPackSessionRequest,
+    OpenPackSessionResponse, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
+    PackCartonResponse, PackContentRemovalReason, PackDecisionPolicyResponse,
+    PackDecisionPolicySource, PackPickedAllocationRequest, PackPickedAllocationResponse,
+    PackSessionAbandonmentReason, PackSessionAbandonmentResponse, PackSessionResponse,
+    PackSessionStatus, PackableAllocationResponse, PackingMeasurementError, PackingOrderStatus,
     PackingProgressResponse, PackingQueueEntryResponse, PackingQueueFacilityId,
     PackingQueueFacilityIdError, PackingQueueOrderStatus, PackingQueuePage,
-    PackingQueuePageRequest, PackingQueueSessionResponse, RemovePackedContentRequest,
-    RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse, VoidCartonRequest,
+    PackingQueuePageRequest, PackingQueueSessionResponse, PackingScaleDevicePage,
+    PackingScaleDeviceResponse, RemovePackedContentRequest, RemovePackedContentResponse,
+    ReopenCartonRequest, ReopenCartonResponse, RequestPackingScaleWeight, VoidCartonRequest,
     VoidCartonResponse, WeightGrams, PRODUCT_DEFAULT_PACK_DECISION_POLICY_HASH,
 };
 pub use pick_cluster::{
