@@ -6,7 +6,7 @@ use wareboxes_api_contract::v1::{
     WavePolicySource,
 };
 
-async fn add_membership(fixture: &Fixture, tenant_id: TenantId, user_id: i64) {
+pub(super) async fn add_membership(fixture: &Fixture, tenant_id: TenantId, user_id: i64) {
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("INSERT INTO tenant_memberships(tenant_id,user_id) VALUES ($1,$2)")
         .bind(tenant_id.get())
@@ -17,7 +17,7 @@ async fn add_membership(fixture: &Fixture, tenant_id: TenantId, user_id: i64) {
     tx.commit().await.unwrap();
 }
 
-async fn grant_permission(
+pub(super) async fn grant_permission(
     fixture: &Fixture,
     tenant_id: TenantId,
     user_id: i64,
@@ -164,7 +164,7 @@ async fn approve_policy(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn activate_policy(
+pub(super) async fn activate_policy(
     app: &axum::Router,
     operator_token: &str,
     approver_token: &str,

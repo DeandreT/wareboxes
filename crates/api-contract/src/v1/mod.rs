@@ -8,6 +8,7 @@ mod cursor;
 mod customer_portal;
 mod customer_return;
 mod cycle_count;
+mod dynamic_release;
 mod error;
 mod expected_receiving;
 mod facility_shipping_origin;
@@ -133,6 +134,10 @@ pub use cycle_count::{
     CycleCountWorkPageRequest, CycleCountWorkResponse, CycleCountWorkSort, CycleCountWorkStatus,
     DecideCycleCountVarianceRequest, DecideCycleCountVarianceResponse,
     HeartbeatCycleCountClaimRequest, ReleaseCycleCountClaimRequest,
+};
+pub use dynamic_release::{
+    DynamicReleaseCandidateResponse, DynamicReleaseReadinessRequest,
+    DynamicReleaseReadinessResponse, DynamicReleaseRunResponse, RunDynamicReleaseRequest,
 };
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};
 pub use expected_receiving::{

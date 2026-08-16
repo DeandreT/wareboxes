@@ -387,6 +387,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_wave_orders_tenant_isolation'
                 ),
                 (
+                    'dynamic_release_runs',
+                    'dynamic_release_runs_tenant_isolation'
+                ),
+                (
+                    'dynamic_release_candidates',
+                    'dynamic_release_candidates_tenant_isolation'
+                ),
+                (
                     'pick_tasks',
                     'pick_tasks_tenant_isolation'
                 ),

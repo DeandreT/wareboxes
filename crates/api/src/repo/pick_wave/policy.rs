@@ -15,7 +15,7 @@ use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
 
-pub(super) async fn resolve_policy_tx(
+pub(crate) async fn resolve_policy_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     inventory_owner_id: InventoryOwnerId,
@@ -85,7 +85,7 @@ pub(super) async fn resolve_policy_tx(
     })
 }
 
-pub(super) fn require_expected_policy(
+pub(crate) fn require_expected_policy(
     actual: &WavePolicyReadModel,
     expected: &WavePolicyExpectation,
 ) -> AppResult<()> {
@@ -299,21 +299,21 @@ pub(super) async fn require_complete_allocation_tx(
     Ok(())
 }
 
-pub(super) fn source_text(source: WavePolicySource) -> &'static str {
+pub(crate) fn source_text(source: WavePolicySource) -> &'static str {
     match source {
         WavePolicySource::ProductDefault => "product_default",
         WavePolicySource::Configuration => "configuration",
     }
 }
 
-pub(super) fn definition_json(policy: &WavePolicyReadModel) -> serde_json::Value {
+pub(crate) fn definition_json(policy: &WavePolicyReadModel) -> serde_json::Value {
     serde_json::json!({
         "max_orders": policy.max_orders,
         "require_complete_allocation": policy.require_complete_allocation,
     })
 }
 
-pub(super) fn scope_values(
+pub(crate) fn scope_values(
     scope: Option<ConfigurationScope>,
 ) -> (Option<&'static str>, Option<i64>, Option<i64>) {
     match scope {

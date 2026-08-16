@@ -3,6 +3,10 @@
 mod policy;
 
 pub use policy::resolve_policies;
+pub(crate) use policy::{
+    definition_json as policy_definition_json, require_expected_policy, resolve_policy_tx,
+    scope_values as policy_scope_values, source_text as policy_source_text,
+};
 
 use std::collections::HashMap;
 
@@ -87,22 +91,33 @@ pub async fn plan_wave(
         tx.commit().await?;
         return Ok(result);
     }
+    let result = plan_wave_tx(&mut tx, access, context, &scope, command, now_iso()).await?;
+    Ok(prepared.commit(tx, result).await?)
+}
+
+pub(crate) async fn plan_wave_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    context: &CommandContext,
+    scope: &ScopeBindings,
+    command: &PlanPickWaveCommand,
+    planned_at: wareboxes_domain::Timestamp,
+) -> AppResult<PlanPickWaveResult> {
     if !scope.includes_facility(command.facility_id.get()) {
         return Err(AppError::not_found("pick wave"));
     }
     let (facility_name, destination_name) = lock_destination_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         command.facility_id,
         command.destination_location_id,
     )
     .await?;
-    let planned_at = now_iso();
     let planned_orders = lock_plan_orders_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         command.facility_id,
-        &scope,
+        scope,
         command,
         planned_at,
     )
@@ -124,7 +139,7 @@ pub async fn plan_wave(
         )
         .bind(context.actor_id.get())
         .bind(planned_at)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?,
     )
     .map_err(internal)?;
@@ -155,7 +170,7 @@ pub async fn plan_wave(
         .bind(policy::scope_values(order.wave_policy.configuration_scope).2)
         .bind(policy::definition_json(&order.wave_policy))
         .bind(&order.wave_policy.policy_hash)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await;
         if let Err(error) = inserted {
             return Err(map_membership_insert_error(error));
@@ -202,7 +217,7 @@ pub async fn plan_wave(
     };
     ensure_consistent(&result)?;
     enqueue_wave_event_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         context.actor_id,
         &result,
@@ -210,7 +225,7 @@ pub async fn plan_wave(
         "planned",
     )
     .await?;
-    Ok(prepared.commit(tx, result).await?)
+    Ok(result)
 }
 
 pub async fn release_wave(
@@ -236,14 +251,25 @@ pub async fn release_wave(
         tx.commit().await?;
         return Ok(result);
     }
-    let wave = lock_wave_tx(&mut tx, access.tenant_id, command.wave_id, &scope).await?;
+    let result = release_wave_tx(&mut tx, access, context, &scope, command, now_iso()).await?;
+    Ok(prepared.commit(tx, result).await?)
+}
+
+pub(crate) async fn release_wave_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    context: &CommandContext,
+    scope: &ScopeBindings,
+    command: &ReleasePickWaveCommand,
+    released_at: wareboxes_domain::Timestamp,
+) -> AppResult<ReleasePickWaveResult> {
+    let wave = lock_wave_tx(tx, access.tenant_id, command.wave_id, scope).await?;
     if wave.revision != command.expected_revision {
         return Err(AppError::conflict("pick wave revision is stale"));
     }
     let resulting_revision = release_transition(wave.status, wave.revision)
         .map_err(|error| AppError::conflict(error.to_string()))?;
-    let members = lock_wave_members_tx(&mut tx, access.tenant_id, wave.wave_id, &scope).await?;
-    let released_at = now_iso();
+    let members = lock_wave_members_tx(tx, access.tenant_id, wave.wave_id, scope).await?;
     let mut release_results = Vec::with_capacity(members.len());
     let mut by_id = members.iter().collect::<Vec<_>>();
     by_id.sort_by_key(|member| member.order_id.get());
@@ -256,10 +282,10 @@ pub async fn release_wave(
         };
         release_results.push(
             release_order_tx(
-                &mut tx,
+                tx,
                 access.tenant_id,
                 context.actor_id.get(),
-                &scope,
+                scope,
                 &command,
                 OrderReleaseMode::Wave(wave.wave_id),
                 released_at,
@@ -288,7 +314,7 @@ pub async fn release_wave(
         .bind(access.tenant_id.get())
         .bind(wave.wave_id.get())
         .bind(member.order_id.get())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(AppError::conflict(
@@ -312,15 +338,15 @@ pub async fn release_wave(
     .bind(access.tenant_id.get())
     .bind(wave.wave_id.get())
     .bind(wave.revision.get())
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     if updated.rows_affected() != 1 {
         return Err(AppError::conflict("pick wave changed during release"));
     }
-    let result = load_wave_tx(&mut tx, access.tenant_id, wave.wave_id, &scope, false).await?;
+    let result = load_wave_tx(tx, access.tenant_id, wave.wave_id, scope, false).await?;
     ensure_consistent(&result)?;
     enqueue_wave_event_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         context.actor_id,
         &result,
@@ -328,7 +354,7 @@ pub async fn release_wave(
         "released",
     )
     .await?;
-    Ok(prepared.commit(tx, result).await?)
+    Ok(result)
 }
 
 pub async fn cancel_wave(
@@ -515,7 +541,7 @@ pub async fn list_waves(
     })
 }
 
-async fn lock_destination_tx(
+pub(crate) async fn lock_destination_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     facility_id: FacilityId,

@@ -11,6 +11,7 @@ pub mod configuration;
 pub mod cross_dock;
 pub mod customer_portal;
 pub mod customer_return;
+pub mod dynamic_release;
 pub mod employees;
 pub mod expected_receiving;
 pub mod facility_shipping_origin;

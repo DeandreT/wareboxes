@@ -469,6 +469,7 @@ positive_id!(ItemStoragePolicyId, "item storage policy ID");
 positive_id!(ItemTraceabilityPolicyId, "item traceability policy ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickWaveId, "pick wave ID");
+positive_id!(DynamicReleaseRunId, "dynamic release run ID");
 positive_id!(PickCartId, "pick cart ID");
 positive_id!(PickCartSlotId, "pick cart slot ID");
 positive_id!(PickClusterId, "pick cluster ID");

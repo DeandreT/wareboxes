@@ -7,6 +7,7 @@ pub(crate) mod cross_dock;
 pub(crate) mod customer_portal;
 mod customer_returns;
 pub(crate) mod cycle_count;
+mod dynamic_releases;
 mod error;
 mod expected_receiving;
 mod facility_shipping_origins;
@@ -894,6 +895,11 @@ pub fn router() -> Router<AppState> {
         )
         .route("/orders/{order_id}/releases", post(order_releases::create))
         .route("/orders/{order_id}/streams", post(order_streams::create))
+        .route(
+            "/dynamic-releases/readiness",
+            get(dynamic_releases::readiness),
+        )
+        .route("/dynamic-releases", post(dynamic_releases::run))
         .route(
             "/orders/{order_id}/packing-session",
             get(packing::for_order),

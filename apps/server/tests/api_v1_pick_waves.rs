@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_pick_waves/dynamic_release.rs"]
+mod dynamic_release;
 #[path = "api_v1_pick_waves/policy.rs"]
 mod policy;
 

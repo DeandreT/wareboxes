@@ -18,6 +18,9 @@ use crate::sorting::{SortDirection, SortableHeader};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 
+mod dynamic_release;
+use dynamic_release::DynamicReleaseControl;
+
 #[derive(Clone, Copy)]
 struct Signals {
     page: RwSignal<PickWavePage>,
@@ -82,6 +85,8 @@ pub(crate) fn PickWavesWorkspace(
 ) -> impl IntoView {
     let cluster_access = access.clone();
     let zone_access = access.clone();
+    let dynamic_access = access.clone();
+    let dynamic_locations = locations.clone();
     let signals = Signals {
         page: RwSignal::new(initial_page),
         selected: RwSignal::new(None),
@@ -113,6 +118,16 @@ pub(crate) fn PickWavesWorkspace(
     let locations = StoredValue::new(locations);
     let orders = StoredValue::new(initial_orders.page.items);
     let toasts = use_toast_bus();
+    let dynamic_completed = Callback::new(
+        move |result: wareboxes_api_contract::v1::DynamicReleaseRunResponse| {
+            if let Some(wave) = result.wave {
+                signals.selected.set(Some(wave));
+            }
+            signals.cursor.set(None);
+            signals.cursor_history.set(Vec::new());
+            request_page(signals, on_unauthorized);
+        },
+    );
 
     let refresh = move |_| {
         signals.cursor.set(None);
@@ -238,6 +253,7 @@ pub(crate) fn PickWavesWorkspace(
             <header class="page-heading pick-wave-heading">
                 <div><span class="eyebrow">"Outbound execution"</span><h1>"Pick waves"</h1></div>
                 <div class="page-actions">
+                    <DynamicReleaseControl access=dynamic_access locations=dynamic_locations on_completed=dynamic_completed on_unauthorized/>
                     <button type="button" class="icon-button" title="Refresh waves" aria-label="Refresh waves" disabled=move || signals.loading.get() on:click=refresh><RefreshCw size=16/></button>
                     <button type="button" class="button primary-action" disabled=move || signals.command_pending.get() on:click=open_plan><Plus size=15/>"Plan wave"</button>
                 </div>

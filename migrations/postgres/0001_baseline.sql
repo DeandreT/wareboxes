@@ -52256,3 +52256,487 @@ REVOKE ALL ON FUNCTION public.require_support_access_integrity() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_support_managed_membership() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_support_access_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_support_access_event_mutation() FROM PUBLIC;
+
+-- Dynamic release snapshots the allocation-ready priority queue, freezes the
+-- effective wave policy, and atomically releases the selected prefix. Manual
+-- wave planning remains the safe fallback when no eligible work is selected.
+CREATE TABLE public.dynamic_release_runs (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  destination_location_id bigint NOT NULL,
+  pick_wave_id bigint,
+  status text NOT NULL DEFAULT 'building',
+  input_snapshot_at timestamptz NOT NULL,
+  policy_source text NOT NULL,
+  policy_configuration_id bigint,
+  policy_configuration_revision bigint,
+  policy_scope_level text,
+  policy_scope_owner_id bigint,
+  policy_scope_facility_id bigint,
+  policy_definition jsonb NOT NULL,
+  policy_hash text NOT NULL,
+  eligible_order_count bigint NOT NULL,
+  selected_order_count bigint NOT NULL,
+  deferred_order_count bigint NOT NULL,
+  released_by_user_id bigint NOT NULL,
+  released_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,pick_wave_id),
+  CHECK(status IN ('building','sealed')),
+  CHECK(policy_hash~'^[0-9a-f]{64}$'),
+  CHECK(jsonb_typeof(policy_definition)='object'
+    AND policy_definition ?& ARRAY['max_orders','require_complete_allocation']
+    AND policy_definition-ARRAY['max_orders','require_complete_allocation']='{}'::jsonb
+    AND jsonb_typeof(policy_definition->'max_orders')='number'
+    AND (policy_definition->>'max_orders')::bigint BETWEEN 1 AND 10000
+    AND jsonb_typeof(policy_definition->'require_complete_allocation')='boolean'),
+  CHECK((policy_source='product_default'
+      AND policy_configuration_id IS NULL
+      AND policy_configuration_revision IS NULL
+      AND policy_scope_level IS NULL
+      AND policy_scope_owner_id IS NULL
+      AND policy_scope_facility_id IS NULL)
+    OR (policy_source='configuration'
+      AND policy_configuration_id IS NOT NULL
+      AND policy_configuration_revision>0
+      AND ((policy_scope_level='tenant'
+          AND policy_scope_owner_id IS NULL AND policy_scope_facility_id IS NULL)
+        OR (policy_scope_level='inventory_owner'
+          AND policy_scope_owner_id=inventory_owner_id AND policy_scope_facility_id IS NULL)
+        OR (policy_scope_level='facility'
+          AND policy_scope_owner_id IS NULL AND policy_scope_facility_id=facility_id)
+        OR (policy_scope_level='owner_facility'
+          AND policy_scope_owner_id=inventory_owner_id
+          AND policy_scope_facility_id=facility_id)))),
+  CHECK(eligible_order_count>=0 AND selected_order_count>=0
+    AND deferred_order_count>=0
+    AND eligible_order_count=selected_order_count+deferred_order_count
+    AND selected_order_count<=(policy_definition->>'max_orders')::bigint),
+  CHECK((selected_order_count=0 AND pick_wave_id IS NULL)
+    OR (selected_order_count>0 AND pick_wave_id IS NOT NULL)),
+  CHECK(released_at=input_snapshot_at),
+  FOREIGN KEY(tenant_id) REFERENCES public.tenants(id),
+  FOREIGN KEY(tenant_id,inventory_owner_id)
+    REFERENCES public.inventory_owners(tenant_id,id),
+  FOREIGN KEY(tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,facility_id,destination_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,facility_id,pick_wave_id)
+    REFERENCES public.pick_waves(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,policy_configuration_id)
+    REFERENCES public.configuration_versions(tenant_id,id),
+  FOREIGN KEY(tenant_id,released_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.dynamic_release_candidates (
+  tenant_id bigint NOT NULL,
+  dynamic_release_run_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  pick_wave_id bigint NOT NULL,
+  order_id bigint NOT NULL,
+  order_key text NOT NULL,
+  order_revision bigint NOT NULL,
+  selection_rank bigint NOT NULL,
+  rush boolean NOT NULL,
+  ship_by timestamptz,
+  order_created_at timestamptz NOT NULL,
+  demand_qty bigint NOT NULL,
+  allocated_qty bigint NOT NULL,
+  PRIMARY KEY(tenant_id,dynamic_release_run_id,selection_rank),
+  UNIQUE(tenant_id,dynamic_release_run_id,order_id),
+  CHECK(order_key=btrim(order_key) AND order_key<>'' AND char_length(order_key)<=200),
+  CHECK(order_revision>0 AND selection_rank>0),
+  CHECK(demand_qty>0 AND allocated_qty=demand_qty),
+  FOREIGN KEY(tenant_id,dynamic_release_run_id)
+    REFERENCES public.dynamic_release_runs(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,order_id)
+    REFERENCES public.orders(tenant_id,inventory_owner_id,id),
+  FOREIGN KEY(tenant_id,pick_wave_id,order_id)
+    REFERENCES public.pick_wave_orders(tenant_id,pick_wave_id,order_id)
+);
+
+CREATE INDEX dynamic_release_runs_scope_idx
+ON public.dynamic_release_runs(tenant_id,facility_id,inventory_owner_id,released_at DESC,id DESC);
+
+CREATE FUNCTION public.validate_dynamic_release_run() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE calculated_hash text;
+DECLARE wave_row public.pick_waves%ROWTYPE;
+DECLARE destination_row public.locations%ROWTYPE;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:wave',NEW.tenant_id),0));
+  IF NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+      IS DISTINCT FROM NEW.released_by_user_id
+    OR NOT public.work_orchestration_user_has_permission(
+      NEW.tenant_id,NEW.released_by_user_id,'wms_supervisor')
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=NEW.tenant_id
+        AND membership.user_id=NEW.released_by_user_id
+        AND membership.deleted IS NULL
+        AND (membership.all_facilities OR EXISTS(
+          SELECT 1 FROM public.user_facilities assignment
+          WHERE assignment.tenant_id=membership.tenant_id
+            AND assignment.user_id=membership.user_id
+            AND assignment.facility_id=NEW.facility_id
+            AND assignment.deleted IS NULL))
+        AND (membership.all_inventory_owners OR EXISTS(
+          SELECT 1 FROM public.user_inventory_owners assignment
+          WHERE assignment.tenant_id=membership.tenant_id
+            AND assignment.user_id=membership.user_id
+            AND assignment.inventory_owner_id=NEW.inventory_owner_id
+            AND assignment.deleted IS NULL))) THEN
+    RAISE EXCEPTION 'dynamic release actor is not authorized for its exact scope'
+      USING ERRCODE='23514';
+  END IF;
+  calculated_hash:=encode(sha256(convert_to(
+    'wave-policy-v1|'||(NEW.policy_definition->>'max_orders')||'|'||
+    (NEW.policy_definition->>'require_complete_allocation'),'UTF8')),'hex');
+  IF calculated_hash IS DISTINCT FROM NEW.policy_hash THEN
+    RAISE EXCEPTION 'dynamic release policy hash does not match its snapshot'
+      USING ERRCODE='23514';
+  END IF;
+  SELECT * INTO destination_row FROM public.locations location
+  WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+    AND location.id=NEW.destination_location_id AND location.deleted IS NULL
+  FOR SHARE;
+  IF NOT FOUND OR NOT destination_row.active OR destination_row.pickable
+    OR destination_row.receivable OR destination_row.barcode IS NULL
+    OR btrim(destination_row.barcode)='' THEN
+    RAISE EXCEPTION 'dynamic release destination is not scanner-ready staging inventory'
+      USING ERRCODE='55000';
+  END IF;
+  SELECT configuration.id INTO resolved_configuration_id
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id
+    AND configuration.kind='wave' AND configuration.status='active'
+    AND configuration.effective_from<=NEW.input_snapshot_at
+    AND (configuration.effective_until IS NULL
+      OR configuration.effective_until>NEW.input_snapshot_at)
+    AND (configuration.inventory_owner_id IS NULL
+      OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL
+      OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level
+      WHEN 'owner_facility' THEN 2 WHEN 'inventory_owner' THEN 1
+      WHEN 'facility' THEN 1 ELSE 0 END DESC,
+    configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+  IF NEW.policy_source='product_default' THEN
+    IF resolved_configuration_id IS NOT NULL
+      OR NEW.policy_definition<>jsonb_build_object(
+        'max_orders',10000,'require_complete_allocation',false) THEN
+      RAISE EXCEPTION 'dynamic release product default is not effective or exact'
+        USING ERRCODE='23514';
+    END IF;
+  ELSE
+    SELECT * INTO configuration_row FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.id=NEW.policy_configuration_id;
+    IF NOT FOUND OR resolved_configuration_id IS DISTINCT FROM configuration_row.id
+      OR configuration_row.kind<>'wave'
+      OR configuration_row.revision<>NEW.policy_configuration_revision
+      OR configuration_row.scope_level<>NEW.policy_scope_level
+      OR configuration_row.inventory_owner_id IS DISTINCT FROM NEW.policy_scope_owner_id
+      OR configuration_row.facility_id IS DISTINCT FROM NEW.policy_scope_facility_id
+      OR configuration_row.definition-'kind'<>NEW.policy_definition THEN
+      RAISE EXCEPTION 'dynamic release configuration snapshot is stale or inconsistent'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  IF NEW.pick_wave_id IS NOT NULL THEN
+    SELECT * INTO wave_row FROM public.pick_waves wave
+    WHERE wave.tenant_id=NEW.tenant_id AND wave.facility_id=NEW.facility_id
+      AND wave.id=NEW.pick_wave_id FOR SHARE;
+    IF NOT FOUND OR wave_row.status<>'planned'
+      OR wave_row.destination_location_id<>NEW.destination_location_id
+      OR wave_row.order_count<>NEW.selected_order_count
+      OR wave_row.planned_by_user_id<>NEW.released_by_user_id
+      OR wave_row.planned_at<>NEW.input_snapshot_at
+      OR EXISTS(SELECT 1 FROM public.pick_wave_orders member
+        WHERE member.tenant_id=NEW.tenant_id AND member.pick_wave_id=NEW.pick_wave_id
+          AND (member.inventory_owner_id<>NEW.inventory_owner_id
+            OR member.wave_policy_hash<>NEW.policy_hash)) THEN
+      RAISE EXCEPTION 'dynamic release wave does not match its frozen scope and policy'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_dynamic_release_candidate() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE run_row public.dynamic_release_runs%ROWTYPE;
+DECLARE order_row public.orders%ROWTYPE;
+DECLARE actual_demand bigint;
+DECLARE actual_allocated bigint;
+BEGIN
+  SELECT * INTO run_row FROM public.dynamic_release_runs run
+  WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.dynamic_release_run_id FOR SHARE;
+  SELECT * INTO order_row FROM public.orders order_header
+  WHERE order_header.tenant_id=NEW.tenant_id
+    AND order_header.inventory_owner_id=NEW.inventory_owner_id
+    AND order_header.id=NEW.order_id AND order_header.deleted IS NULL FOR SHARE;
+  SELECT COALESCE(SUM(demand.effective_qty),0)::bigint,
+    COALESCE(SUM((SELECT COALESCE(SUM(allocation.qty),0)::bigint
+      FROM public.inventory_reservations reservation
+      JOIN public.inventory_allocations allocation
+        ON allocation.tenant_id=reservation.tenant_id
+       AND allocation.inventory_owner_id=reservation.inventory_owner_id
+       AND allocation.reservation_id=reservation.id
+      WHERE reservation.tenant_id=demand.tenant_id
+        AND reservation.inventory_owner_id=demand.inventory_owner_id
+        AND reservation.order_id=demand.order_id
+        AND reservation.order_item_id=demand.order_item_id
+        AND reservation.facility_id=NEW.facility_id
+        AND reservation.status='active' AND reservation.deleted IS NULL
+        AND allocation.facility_id=NEW.facility_id
+        AND allocation.status='allocated' AND allocation.deleted IS NULL
+        AND allocation.execution_stage='pick_source')),0)::bigint
+  INTO actual_demand,actual_allocated
+  FROM public.outbound_effective_demand demand
+  WHERE demand.tenant_id=NEW.tenant_id
+    AND demand.inventory_owner_id=NEW.inventory_owner_id
+    AND demand.order_id=NEW.order_id;
+  IF run_row.id IS NULL OR run_row.status<>'building'
+    OR run_row.facility_id<>NEW.facility_id
+    OR run_row.inventory_owner_id<>NEW.inventory_owner_id
+    OR run_row.pick_wave_id<>NEW.pick_wave_id
+    OR order_row.id IS NULL OR order_row.status<>'open'
+    OR order_row.order_key<>NEW.order_key OR order_row.revision<>NEW.order_revision
+    OR order_row.rush<>NEW.rush OR order_row.ship_by IS DISTINCT FROM NEW.ship_by
+    OR order_row.created<>NEW.order_created_at
+    OR order_row.created>run_row.input_snapshot_at
+    OR actual_demand<>NEW.demand_qty OR actual_allocated<>NEW.allocated_qty
+    OR actual_demand<=0 OR actual_demand<>actual_allocated
+    OR NOT EXISTS(SELECT 1 FROM public.pick_wave_orders member
+      WHERE member.tenant_id=NEW.tenant_id AND member.pick_wave_id=NEW.pick_wave_id
+        AND member.inventory_owner_id=NEW.inventory_owner_id
+        AND member.order_id=NEW.order_id AND member.wave_sequence=NEW.selection_rank
+        AND member.expected_order_revision=NEW.order_revision AND member.active)
+  THEN
+    RAISE EXCEPTION 'dynamic release candidate is stale, unallocated, or outside its wave'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_dynamic_release_run() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_OP='DELETE' OR OLD.status<>'building' OR NEW.status<>'sealed'
+    OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.facility_id<>OLD.facility_id
+    OR NEW.inventory_owner_id<>OLD.inventory_owner_id
+    OR NEW.destination_location_id<>OLD.destination_location_id
+    OR NEW.pick_wave_id IS DISTINCT FROM OLD.pick_wave_id
+    OR NEW.input_snapshot_at<>OLD.input_snapshot_at
+    OR NEW.policy_source<>OLD.policy_source
+    OR NEW.policy_configuration_id IS DISTINCT FROM OLD.policy_configuration_id
+    OR NEW.policy_configuration_revision IS DISTINCT FROM OLD.policy_configuration_revision
+    OR NEW.policy_scope_level IS DISTINCT FROM OLD.policy_scope_level
+    OR NEW.policy_scope_owner_id IS DISTINCT FROM OLD.policy_scope_owner_id
+    OR NEW.policy_scope_facility_id IS DISTINCT FROM OLD.policy_scope_facility_id
+    OR NEW.policy_definition<>OLD.policy_definition OR NEW.policy_hash<>OLD.policy_hash
+    OR NEW.eligible_order_count<>OLD.eligible_order_count
+    OR NEW.selected_order_count<>OLD.selected_order_count
+    OR NEW.deferred_order_count<>OLD.deferred_order_count
+    OR NEW.released_by_user_id<>OLD.released_by_user_id
+    OR NEW.released_at<>OLD.released_at THEN
+    RAISE EXCEPTION 'dynamic release evidence is immutable after its one-way seal'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reject_dynamic_release_candidate_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  RAISE EXCEPTION 'dynamic release candidate evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+
+CREATE FUNCTION public.dynamic_release_eligible_orders(
+  p_tenant_id bigint,p_inventory_owner_id bigint,p_facility_id bigint,
+  p_input_snapshot_at timestamptz,p_pick_wave_id bigint
+) RETURNS TABLE(order_id bigint,selection_rank bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  SELECT order_header.id,
+    row_number() OVER(ORDER BY order_header.rush DESC,
+      order_header.ship_by ASC NULLS LAST,order_header.created,order_header.id)::bigint
+  FROM public.orders order_header
+  JOIN public.inventory_owner_facilities assignment
+    ON assignment.tenant_id=order_header.tenant_id
+   AND assignment.inventory_owner_id=order_header.inventory_owner_id
+   AND assignment.facility_id=p_facility_id AND assignment.deleted IS NULL
+  JOIN LATERAL (
+    SELECT SUM(demand.effective_qty)::bigint AS demand_qty,
+      SUM(COALESCE(allocated.qty,0))::bigint AS allocated_qty
+    FROM public.outbound_effective_demand demand
+    LEFT JOIN LATERAL (
+      SELECT SUM(allocation.qty)::bigint AS qty
+      FROM public.inventory_reservations reservation
+      JOIN public.inventory_allocations allocation
+        ON allocation.tenant_id=reservation.tenant_id
+       AND allocation.inventory_owner_id=reservation.inventory_owner_id
+       AND allocation.reservation_id=reservation.id
+      WHERE reservation.tenant_id=demand.tenant_id
+        AND reservation.inventory_owner_id=demand.inventory_owner_id
+        AND reservation.order_id=demand.order_id
+        AND reservation.order_item_id=demand.order_item_id
+        AND reservation.facility_id=p_facility_id
+        AND reservation.status='active' AND reservation.deleted IS NULL
+        AND allocation.facility_id=p_facility_id
+        AND allocation.status='allocated' AND allocation.deleted IS NULL
+        AND allocation.execution_stage='pick_source'
+    ) allocated ON true
+    WHERE demand.tenant_id=order_header.tenant_id
+      AND demand.inventory_owner_id=order_header.inventory_owner_id
+      AND demand.order_id=order_header.id
+  ) totals ON totals.demand_qty>0 AND totals.demand_qty=totals.allocated_qty
+  WHERE order_header.tenant_id=p_tenant_id
+    AND order_header.inventory_owner_id=p_inventory_owner_id
+    AND order_header.status='open' AND order_header.deleted IS NULL
+    AND order_header.created<=p_input_snapshot_at
+    AND NOT EXISTS(SELECT 1 FROM public.order_holds hold
+      WHERE hold.tenant_id=order_header.tenant_id
+        AND hold.inventory_owner_id=order_header.inventory_owner_id
+        AND hold.order_id=order_header.id AND hold.released_at IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM public.cross_dock_tasks detail
+      JOIN public.work_tasks work
+        ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id
+      WHERE detail.tenant_id=order_header.tenant_id
+        AND detail.inventory_owner_id=order_header.inventory_owner_id
+        AND detail.order_id=order_header.id AND detail.closed_at IS NULL
+        AND work.status IN ('open','assigned','in_progress'))
+    AND NOT EXISTS(SELECT 1 FROM public.pick_wave_orders member
+      WHERE member.tenant_id=order_header.tenant_id
+        AND member.order_id=order_header.id AND member.active
+        AND member.pick_wave_id IS DISTINCT FROM p_pick_wave_id)
+$$;
+
+CREATE FUNCTION public.seal_dynamic_release_selection() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actual_eligible bigint;
+DECLARE actual_selected bigint;
+BEGIN
+  IF NEW.status<>'sealed' THEN RETURN NEW; END IF;
+  SELECT count(*)::bigint,
+    count(*) FILTER(WHERE selection_rank<=(NEW.policy_definition->>'max_orders')::bigint)::bigint
+  INTO actual_eligible,actual_selected
+  FROM public.dynamic_release_eligible_orders(
+    NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,
+    NEW.input_snapshot_at,NEW.pick_wave_id);
+  IF actual_eligible<>NEW.eligible_order_count
+    OR actual_selected<>NEW.selected_order_count
+    OR (SELECT count(*) FROM public.dynamic_release_candidates candidate
+      WHERE candidate.tenant_id=NEW.tenant_id
+        AND candidate.dynamic_release_run_id=NEW.id)<>NEW.selected_order_count
+    OR EXISTS(SELECT 1
+      FROM public.dynamic_release_eligible_orders(
+        NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,
+        NEW.input_snapshot_at,NEW.pick_wave_id) eligible
+      LEFT JOIN public.dynamic_release_candidates candidate
+        ON candidate.tenant_id=NEW.tenant_id
+       AND candidate.dynamic_release_run_id=NEW.id
+       AND candidate.order_id=eligible.order_id
+       AND candidate.selection_rank=eligible.selection_rank
+      WHERE eligible.selection_rank<=(NEW.policy_definition->>'max_orders')::bigint
+        AND candidate.order_id IS NULL)
+  THEN
+    RAISE EXCEPTION 'dynamic release selection is incomplete or not the canonical priority prefix'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_dynamic_release_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE run_row public.dynamic_release_runs%ROWTYPE;
+BEGIN
+  IF TG_TABLE_NAME='dynamic_release_runs' THEN
+    SELECT * INTO run_row FROM public.dynamic_release_runs run
+    WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.id;
+  ELSE
+    SELECT * INTO run_row FROM public.dynamic_release_runs run
+    WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.dynamic_release_run_id;
+  END IF;
+  IF run_row.id IS NULL OR run_row.status<>'sealed'
+    OR (run_row.selected_order_count=0 AND run_row.pick_wave_id IS NOT NULL)
+    OR (run_row.selected_order_count>0 AND NOT EXISTS(
+      SELECT 1 FROM public.pick_waves wave
+      WHERE wave.tenant_id=run_row.tenant_id AND wave.id=run_row.pick_wave_id
+        AND wave.status='released' AND wave.order_count=run_row.selected_order_count
+        AND wave.released_by_user_id=run_row.released_by_user_id
+        AND wave.released_at=run_row.released_at))
+    OR EXISTS(SELECT 1 FROM public.dynamic_release_candidates candidate
+      LEFT JOIN public.pick_wave_orders member
+        ON member.tenant_id=candidate.tenant_id
+       AND member.pick_wave_id=candidate.pick_wave_id
+       AND member.order_id=candidate.order_id
+      WHERE candidate.tenant_id=run_row.tenant_id
+        AND candidate.dynamic_release_run_id=run_row.id
+        AND (member.order_id IS NULL OR member.active OR member.order_release_id IS NULL
+          OR member.wave_sequence<>candidate.selection_rank)) THEN
+    RAISE EXCEPTION 'dynamic release run, selection, wave, and releases do not reconcile'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER dynamic_release_runs_validate BEFORE INSERT
+ON public.dynamic_release_runs FOR EACH ROW
+EXECUTE FUNCTION public.validate_dynamic_release_run();
+CREATE TRIGGER dynamic_release_runs_guard BEFORE UPDATE OR DELETE
+ON public.dynamic_release_runs FOR EACH ROW
+EXECUTE FUNCTION public.guard_dynamic_release_run();
+CREATE TRIGGER dynamic_release_runs_seal BEFORE UPDATE OF status
+ON public.dynamic_release_runs FOR EACH ROW
+EXECUTE FUNCTION public.seal_dynamic_release_selection();
+CREATE CONSTRAINT TRIGGER dynamic_release_runs_reconcile
+AFTER INSERT OR UPDATE ON public.dynamic_release_runs DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_dynamic_release_integrity();
+CREATE TRIGGER dynamic_release_candidates_validate BEFORE INSERT
+ON public.dynamic_release_candidates FOR EACH ROW
+EXECUTE FUNCTION public.validate_dynamic_release_candidate();
+CREATE TRIGGER dynamic_release_candidates_immutable BEFORE UPDATE OR DELETE
+ON public.dynamic_release_candidates FOR EACH ROW
+EXECUTE FUNCTION public.reject_dynamic_release_candidate_mutation();
+CREATE CONSTRAINT TRIGGER dynamic_release_candidates_reconcile
+AFTER INSERT ON public.dynamic_release_candidates DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_dynamic_release_integrity();
+
+ALTER TABLE public.dynamic_release_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dynamic_release_runs FORCE ROW LEVEL SECURITY;
+CREATE POLICY dynamic_release_runs_tenant_isolation ON public.dynamic_release_runs
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.dynamic_release_candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dynamic_release_candidates FORCE ROW LEVEL SECURITY;
+CREATE POLICY dynamic_release_candidates_tenant_isolation ON public.dynamic_release_candidates
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.dynamic_release_runs TO wareboxes_app;
+GRANT UPDATE(status) ON public.dynamic_release_runs TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.dynamic_release_runs_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.dynamic_release_candidates TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_dynamic_release_run() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_dynamic_release_candidate() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_dynamic_release_run() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_dynamic_release_candidate_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.seal_dynamic_release_selection() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.dynamic_release_eligible_orders(
+  bigint,bigint,bigint,timestamptz,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_dynamic_release_integrity() FROM PUBLIC;

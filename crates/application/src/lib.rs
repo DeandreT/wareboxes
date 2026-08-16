@@ -12,6 +12,7 @@ pub mod customer_portal;
 pub mod customer_return;
 pub mod cycle_count;
 pub mod cycle_count_control;
+pub mod dynamic_release;
 mod error;
 pub mod facility_shipping_origin;
 pub mod idempotency;

@@ -133,6 +133,8 @@ pub use pick_wave::{
     cancel_pick_wave, pick_wave, pick_waves, plan_pick_wave, release_pick_wave,
     resolve_pick_wave_policies,
 };
+mod dynamic_release;
+pub use dynamic_release::{dynamic_release_readiness, run_dynamic_release};
 mod pick_cluster;
 pub use pick_cluster::{
     cancel as cancel_pick_cluster, change_cart_status as change_pick_cart_status,

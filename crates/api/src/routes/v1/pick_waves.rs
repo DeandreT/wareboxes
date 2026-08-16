@@ -248,7 +248,7 @@ fn map_page(
     Ok(ApiPickWavePage::new(entries, next_cursor))
 }
 
-fn map_wave(wave: PickWaveReadModel) -> AppResult<PickWaveResponse> {
+pub(super) fn map_wave(wave: PickWaveReadModel) -> AppResult<PickWaveResponse> {
     Ok(PickWaveResponse {
         wave_id: wave.wave_id.get(),
         facility_id: wave.facility_id.get(),
@@ -306,7 +306,9 @@ fn map_policy_resolution(resolution: PickWavePolicyResolution) -> PickWavePolicy
     }
 }
 
-fn map_policy_expectation(value: ApiWavePolicyExpectation) -> V1Result<WavePolicyExpectation> {
+pub(super) fn map_policy_expectation(
+    value: ApiWavePolicyExpectation,
+) -> V1Result<WavePolicyExpectation> {
     let expectation = WavePolicyExpectation {
         source: match value.source {
             ApiWavePolicySource::ProductDefault => WavePolicySource::ProductDefault,
@@ -326,7 +328,7 @@ fn map_policy_expectation(value: ApiWavePolicyExpectation) -> V1Result<WavePolic
     Ok(expectation)
 }
 
-fn map_wave_policy(value: WavePolicyReadModel) -> ApiWavePolicyResponse {
+pub(super) fn map_wave_policy(value: WavePolicyReadModel) -> ApiWavePolicyResponse {
     ApiWavePolicyResponse {
         source: match value.source {
             WavePolicySource::ProductDefault => ApiWavePolicySource::ProductDefault,
