@@ -957,6 +957,24 @@ pub struct LicensePlate {
     pub location_id: Option<i64>,
     pub dims_id: Option<i64>,
     #[serde(default)]
+    pub parent_license_plate_id: Option<i64>,
+    #[serde(default)]
+    pub hierarchy_revision: i64,
+    #[serde(default)]
+    pub hierarchy_depth: i32,
+    #[serde(default)]
+    pub root_license_plate_id: i64,
+    #[serde(default)]
+    pub child_license_plate_ids: Vec<i64>,
+    #[serde(default)]
+    pub descendant_license_plate_ids: Vec<i64>,
+    #[serde(default)]
+    pub contained_unit_quantity: i64,
+    #[serde(default)]
+    pub hierarchy_updated_at: Option<Timestamp>,
+    #[serde(default)]
+    pub hierarchy_updated_by_user_id: Option<i64>,
+    #[serde(default)]
     pub contents: Vec<LicensePlateContent>,
 }
 

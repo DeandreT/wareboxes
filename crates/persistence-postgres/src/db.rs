@@ -787,6 +787,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'license_plates_tenant_isolation'
                 ),
                 (
+                    'license_plate_hierarchy_events',
+                    'license_plate_hierarchy_events_tenant_isolation'
+                ),
+                (
                     'order_activity',
                     'order_activity_tenant_isolation'
                 ),

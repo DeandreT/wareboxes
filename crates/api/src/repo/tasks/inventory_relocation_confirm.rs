@@ -16,10 +16,11 @@ use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use super::inventory_relocation::{
-    lock_plate, lock_plate_contents, lock_relocation_destination, movable_quantity,
-    parse_inventory_status, require_movable_plate_contents, require_plate_destination_compatible,
-    validate_barcode, PlateContent, RelocationTarget,
+    lock_plate_contents, lock_relocation_destination, movable_quantity, parse_inventory_status,
+    require_movable_plate_contents, require_plate_destination_compatible, validate_barcode,
+    PlateContent, RelocationTarget,
 };
+use super::license_plate_tree::lock_root_tree_tx;
 use super::{insert_progress_tx, require_replayed_task_visible_tx, TaskDimensions};
 
 const CONFIRM_OPERATION: &str = "task.confirm_inventory_relocation.v1";
@@ -371,7 +372,7 @@ async fn confirm_plate(
     scanned_plate_barcode: &str,
 ) -> AppResult<InventoryRelocationConfirmation> {
     let plate_id = required(target.license_plate_id, "license plate")?;
-    let plate = lock_plate(tx, access.tenant_id, plate_id).await?;
+    let plate = lock_root_tree_tx(tx, access.tenant_id, plate_id).await?;
     if plate.inventory_owner_id != target.inventory_owner_id
         || plate.facility_id != target.facility_id
         || plate.location_id != target.source_location_id
@@ -390,7 +391,7 @@ async fn confirm_plate(
         access.tenant_id,
         target.inventory_owner_id,
         target.facility_id,
-        plate_id,
+        &plate.plate_ids,
     )
     .await?;
     let positive = require_movable_plate_contents(&contents, target.source_location_id)?;
@@ -426,7 +427,7 @@ async fn confirm_plate(
         WHERE tenant_id = $3
           AND inventory_owner_id = $4
           AND facility_id = $5
-          AND license_plate_id = $6
+          AND license_plate_id = ANY($6)
           AND id = ANY($7)
           AND deleted IS NULL
         "#,
@@ -436,7 +437,7 @@ async fn confirm_plate(
     .bind(access.tenant_id.get())
     .bind(target.inventory_owner_id)
     .bind(target.facility_id)
-    .bind(plate_id)
+    .bind(&plate.plate_ids)
     .bind(&balance_ids)
     .execute(&mut **tx)
     .await?;
@@ -452,7 +453,7 @@ async fn confirm_plate(
         WHERE tenant_id = $2
           AND inventory_owner_id = $3
           AND facility_id = $4
-          AND id = $5
+          AND id = ANY($5)
           AND location_id = $6
           AND deleted IS NULL
         "#,
@@ -461,11 +462,11 @@ async fn confirm_plate(
     .bind(access.tenant_id.get())
     .bind(target.inventory_owner_id)
     .bind(target.facility_id)
-    .bind(plate_id)
+    .bind(&plate.plate_ids)
     .bind(target.source_location_id)
     .execute(&mut **tx)
     .await?;
-    if updated_plate.rows_affected() != 1 {
+    if usize::try_from(updated_plate.rows_affected()).ok() != Some(plate.plate_ids.len()) {
         return Err(AppError::conflict(
             "license plate location changed during relocation confirmation",
         ));
@@ -478,7 +479,7 @@ async fn confirm_plate(
             transaction_id,
             content.item_batch_id,
             content.status,
-            Some(plate_id),
+            Some(content.license_plate_id),
             content.quantity,
         )
         .await?;
@@ -569,7 +570,7 @@ async fn load_planned_contents(
 ) -> AppResult<Vec<PlateContent>> {
     let rows = sqlx::query(
         r#"
-        SELECT inventory_balance_id, item_batch_id, item_id, uom,
+        SELECT inventory_balance_id, content_license_plate_id, item_batch_id, item_id, uom,
                inventory_status, planned_quantity
         FROM inventory_relocation_task_contents
         WHERE tenant_id = $1 AND task_id = $2
@@ -584,6 +585,7 @@ async fn load_planned_contents(
         .map(|row| {
             Ok(PlateContent {
                 inventory_balance_id: row.try_get("inventory_balance_id")?,
+                license_plate_id: row.try_get("content_license_plate_id")?,
                 location_id: 0,
                 item_batch_id: row.try_get("item_batch_id")?,
                 item_id: row.try_get("item_id")?,
@@ -606,6 +608,7 @@ fn require_exact_snapshot(
         || current.len() != planned.len()
         || current.iter().zip(planned).any(|(current, planned)| {
             current.inventory_balance_id != planned.inventory_balance_id
+                || current.license_plate_id != planned.license_plate_id
                 || current.item_batch_id != planned.item_batch_id
                 || current.item_id != planned.item_id
                 || current.uom != planned.uom

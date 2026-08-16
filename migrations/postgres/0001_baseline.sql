@@ -9571,7 +9571,7 @@ BEGIN
                         NEW.inventory_owner_id
                     AND balance.facility_id = NEW.facility_id
                     AND balance.license_plate_id =
-                        NEW.license_plate_id
+                        content.content_license_plate_id
                     AND balance.id = content.inventory_balance_id
                     AND balance.location_id =
                         NEW.destination_location_id
@@ -9594,7 +9594,19 @@ BEGIN
             WHERE balance.tenant_id = NEW.tenant_id
               AND balance.inventory_owner_id = NEW.inventory_owner_id
               AND balance.facility_id = NEW.facility_id
-              AND balance.license_plate_id = NEW.license_plate_id
+              AND balance.license_plate_id IN (
+                  WITH RECURSIVE tree AS (
+                    SELECT plate.id FROM public.license_plates plate
+                    WHERE plate.tenant_id=NEW.tenant_id
+                      AND plate.id=NEW.license_plate_id
+                    UNION ALL
+                    SELECT child.id FROM tree
+                    JOIN public.license_plates child
+                      ON child.tenant_id=NEW.tenant_id
+                     AND child.parent_license_plate_id=tree.id
+                     AND child.deleted IS NULL
+                  ) SELECT id FROM tree
+              )
               AND balance.deleted IS NULL
               AND balance.qty_on_hand > 0
               AND NOT EXISTS (
@@ -9603,6 +9615,7 @@ BEGIN
                   WHERE content.tenant_id = NEW.tenant_id
                     AND content.task_id = NEW.task_id
                     AND content.inventory_balance_id = balance.id
+                    AND content.content_license_plate_id = balance.license_plate_id
                     AND content.item_batch_id = balance.item_batch_id
                     AND content.item_id = balance.item_id
                     AND content.uom = balance.uom
@@ -9660,7 +9673,7 @@ BEGIN
                         AND entry.location_id =
                             NEW.source_location_id
                         AND entry.license_plate_id =
-                            NEW.license_plate_id
+                            content.content_license_plate_id
                         AND entry.item_batch_id =
                             content.item_batch_id
                         AND entry.item_id = content.item_id
@@ -9682,7 +9695,7 @@ BEGIN
                         AND entry.location_id =
                             NEW.destination_location_id
                         AND entry.license_plate_id =
-                            NEW.license_plate_id
+                            content.content_license_plate_id
                         AND entry.item_batch_id =
                             content.item_batch_id
                         AND entry.item_id = content.item_id
@@ -9751,6 +9764,7 @@ BEGIN
            plate.facility_id,
            plate.location_id,
            plate.barcode,
+           plate.parent_license_plate_id,
            plate.deleted
     INTO plate_row
     FROM public.license_plates plate
@@ -9764,6 +9778,7 @@ BEGIN
             IS DISTINCT FROM NEW.inventory_owner_id
        OR plate_row.facility_id IS DISTINCT FROM NEW.facility_id
        OR plate_row.location_id IS DISTINCT FROM NEW.source_location_id
+       OR plate_row.parent_license_plate_id IS NOT NULL
        OR plate_row.barcode IS NULL
        OR btrim(plate_row.barcode) = ''
     THEN
@@ -9817,13 +9832,20 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
-    SELECT COUNT(*)
+    WITH RECURSIVE tree AS (
+      SELECT plate.id FROM public.license_plates plate
+      WHERE plate.tenant_id=NEW.tenant_id AND plate.id=NEW.license_plate_id
+      UNION ALL
+      SELECT child.id FROM tree
+      JOIN public.license_plates child ON child.tenant_id=NEW.tenant_id
+        AND child.parent_license_plate_id=tree.id AND child.deleted IS NULL
+    ) SELECT COUNT(*)
     INTO current_balance_count
     FROM public.inventory_balances balance
+    JOIN tree ON tree.id=balance.license_plate_id
     WHERE balance.tenant_id = NEW.tenant_id
       AND balance.inventory_owner_id = NEW.inventory_owner_id
       AND balance.facility_id = NEW.facility_id
-      AND balance.license_plate_id = NEW.license_plate_id
       AND balance.deleted IS NULL
       AND balance.qty_on_hand > 0;
 
@@ -9841,7 +9863,19 @@ BEGIN
             WHERE balance.tenant_id = NEW.tenant_id
               AND balance.inventory_owner_id = NEW.inventory_owner_id
               AND balance.facility_id = NEW.facility_id
-              AND balance.license_plate_id = NEW.license_plate_id
+              AND balance.license_plate_id IN (
+                  WITH RECURSIVE tree AS (
+                    SELECT plate.id FROM public.license_plates plate
+                    WHERE plate.tenant_id=NEW.tenant_id
+                      AND plate.id=NEW.license_plate_id
+                    UNION ALL
+                    SELECT child.id FROM tree
+                    JOIN public.license_plates child
+                      ON child.tenant_id=NEW.tenant_id
+                     AND child.parent_license_plate_id=tree.id
+                     AND child.deleted IS NULL
+                  ) SELECT id FROM tree
+              )
               AND balance.deleted IS NULL
               AND balance.qty_on_hand > 0
               AND (
@@ -9859,6 +9893,8 @@ BEGIN
                         AND content.facility_id = NEW.facility_id
                         AND content.license_plate_id =
                             NEW.license_plate_id
+                        AND content.content_license_plate_id =
+                            balance.license_plate_id
                         AND content.inventory_balance_id = balance.id
                         AND content.item_batch_id = balance.item_batch_id
                         AND content.item_id = balance.item_id
@@ -9880,6 +9916,19 @@ BEGIN
                   OR content.facility_id <> NEW.facility_id
                   OR content.license_plate_id <>
                       NEW.license_plate_id
+                  OR content.content_license_plate_id NOT IN (
+                      WITH RECURSIVE tree AS (
+                        SELECT plate.id FROM public.license_plates plate
+                        WHERE plate.tenant_id=NEW.tenant_id
+                          AND plate.id=NEW.license_plate_id
+                        UNION ALL
+                        SELECT child.id FROM tree
+                        JOIN public.license_plates child
+                          ON child.tenant_id=NEW.tenant_id
+                         AND child.parent_license_plate_id=tree.id
+                         AND child.deleted IS NULL
+                      ) SELECT id FROM tree
+                  )
                   OR NOT EXISTS (
                       SELECT 1
                       FROM public.inventory_balances balance
@@ -9888,7 +9937,7 @@ BEGIN
                             NEW.inventory_owner_id
                         AND balance.facility_id = NEW.facility_id
                         AND balance.license_plate_id =
-                            NEW.license_plate_id
+                            content.content_license_plate_id
                         AND balance.id =
                             content.inventory_balance_id
                         AND balance.location_id =
@@ -11420,6 +11469,7 @@ CREATE TABLE public.inventory_relocation_task_contents (
     inventory_owner_id bigint NOT NULL,
     facility_id bigint NOT NULL,
     license_plate_id bigint NOT NULL,
+    content_license_plate_id bigint NOT NULL,
     inventory_balance_id bigint NOT NULL,
     item_batch_id bigint NOT NULL,
     item_id bigint NOT NULL,
@@ -11741,6 +11791,7 @@ CREATE TABLE public.license_plate_putaway_task_contents (
     inventory_owner_id bigint NOT NULL,
     facility_id bigint NOT NULL,
     license_plate_id bigint NOT NULL,
+    content_license_plate_id bigint NOT NULL,
     inventory_balance_id bigint NOT NULL,
     item_batch_id bigint NOT NULL,
     item_id bigint NOT NULL,
@@ -19605,6 +19656,9 @@ ALTER TABLE ONLY public.inventory_relocation_results
 ALTER TABLE ONLY public.inventory_relocation_task_contents
     ADD CONSTRAINT inventory_relocation_task_con_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
 
+ALTER TABLE ONLY public.inventory_relocation_task_contents
+    ADD CONSTRAINT inventory_relocation_task_contents_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, content_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
 
 --
 -- Name: inventory_relocation_task_contents inventory_relocation_task_contents_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
@@ -19988,6 +20042,9 @@ ALTER TABLE ONLY public.license_plate_putaway_task_contents
 
 ALTER TABLE ONLY public.license_plate_putaway_task_contents
     ADD CONSTRAINT license_plate_putaway_task_co_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents
+    ADD CONSTRAINT license_plate_putaway_task_contents_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, content_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
 
 
 --
@@ -47406,3 +47463,433 @@ REVOKE ALL ON FUNCTION public.validate_tenant_lifecycle_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_tenant_lifecycle_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_tenant_lifecycle_event_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.revoke_suspended_tenant_sessions(bigint,bigint) FROM PUBLIC;
+
+-- Nested license-plate/container hierarchy with immutable relationship evidence.
+
+ALTER TABLE public.license_plates
+  ADD COLUMN parent_license_plate_id bigint,
+  ADD COLUMN hierarchy_revision bigint NOT NULL DEFAULT 0,
+  ADD COLUMN hierarchy_updated_at timestamptz,
+  ADD COLUMN hierarchy_updated_by_user_id bigint,
+  ADD CONSTRAINT license_plates_hierarchy_revision_nonnegative
+    CHECK(hierarchy_revision>=0),
+  ADD CONSTRAINT license_plates_parent_not_self
+    CHECK(parent_license_plate_id IS NULL OR parent_license_plate_id<>id),
+  ADD CONSTRAINT license_plates_parent_scope_fkey
+    FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,parent_license_plate_id)
+    REFERENCES public.license_plates(tenant_id,inventory_owner_id,facility_id,id)
+    DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT license_plates_hierarchy_actor_fkey
+    FOREIGN KEY(tenant_id,hierarchy_updated_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id);
+
+CREATE INDEX idx_license_plates_active_parent
+ON public.license_plates(tenant_id,inventory_owner_id,facility_id,parent_license_plate_id,id)
+WHERE deleted IS NULL AND parent_license_plate_id IS NOT NULL;
+
+CREATE INDEX idx_license_plate_putaway_contents_leaf
+ON public.license_plate_putaway_task_contents(
+  tenant_id,inventory_owner_id,facility_id,content_license_plate_id,task_id);
+CREATE INDEX idx_inventory_relocation_contents_leaf
+ON public.inventory_relocation_task_contents(
+  tenant_id,inventory_owner_id,facility_id,content_license_plate_id,task_id);
+
+CREATE TABLE public.license_plate_hierarchy_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  child_license_plate_id bigint NOT NULL,
+  previous_parent_license_plate_id bigint,
+  parent_license_plate_id bigint,
+  resulting_revision bigint NOT NULL,
+  action text NOT NULL,
+  actor_user_id bigint NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  reason text NOT NULL,
+  idempotency_key text NOT NULL,
+  request_hash text NOT NULL,
+  CONSTRAINT license_plate_hierarchy_events_scope_id_unique UNIQUE(tenant_id,id),
+  CONSTRAINT license_plate_hierarchy_events_child_revision_unique
+    UNIQUE(tenant_id,child_license_plate_id,resulting_revision),
+  CONSTRAINT license_plate_hierarchy_events_idempotency_unique
+    UNIQUE(tenant_id,idempotency_key),
+  CONSTRAINT license_plate_hierarchy_events_action_check
+    CHECK(action IN ('attached','detached')),
+  CONSTRAINT license_plate_hierarchy_events_parent_shape_check CHECK(
+    (action='attached' AND previous_parent_license_plate_id IS NULL
+      AND parent_license_plate_id IS NOT NULL)
+    OR (action='detached' AND previous_parent_license_plate_id IS NOT NULL
+      AND parent_license_plate_id IS NULL)),
+  CONSTRAINT license_plate_hierarchy_events_revision_positive
+    CHECK(resulting_revision>0),
+  CONSTRAINT license_plate_hierarchy_events_reason_check
+    CHECK(reason=btrim(reason) AND char_length(reason) BETWEEN 1 AND 1000),
+  CONSTRAINT license_plate_hierarchy_events_key_check
+    CHECK(idempotency_key=btrim(idempotency_key)
+      AND char_length(idempotency_key) BETWEEN 1 AND 200),
+  CONSTRAINT license_plate_hierarchy_events_hash_check
+    CHECK(request_hash~'^[0-9a-f]{64}$'),
+  CONSTRAINT license_plate_hierarchy_events_tenant_fkey
+    FOREIGN KEY(tenant_id) REFERENCES public.tenants(id),
+  CONSTRAINT license_plate_hierarchy_events_child_fkey
+    FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,child_license_plate_id)
+    REFERENCES public.license_plates(tenant_id,inventory_owner_id,facility_id,id)
+    DEFERRABLE INITIALLY DEFERRED,
+  CONSTRAINT license_plate_hierarchy_events_previous_parent_fkey
+    FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,previous_parent_license_plate_id)
+    REFERENCES public.license_plates(tenant_id,inventory_owner_id,facility_id,id)
+    DEFERRABLE INITIALLY DEFERRED,
+  CONSTRAINT license_plate_hierarchy_events_parent_fkey
+    FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,parent_license_plate_id)
+    REFERENCES public.license_plates(tenant_id,inventory_owner_id,facility_id,id)
+    DEFERRABLE INITIALLY DEFERRED,
+  CONSTRAINT license_plate_hierarchy_events_actor_fkey
+    FOREIGN KEY(tenant_id,actor_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+ALTER TABLE public.license_plate_hierarchy_events FORCE ROW LEVEL SECURITY;
+
+CREATE FUNCTION public.license_plate_actor_has_wms_permission(
+  checked_tenant_id bigint,checked_user_id bigint
+) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+  WITH RECURSIVE granted_roles AS (
+    SELECT role.id,role.parent_id
+    FROM public.tenant_memberships membership
+    JOIN public.user_roles user_role ON user_role.tenant_id=membership.tenant_id
+      AND user_role.user_id=membership.user_id AND user_role.deleted IS NULL
+    JOIN public.roles role ON role.tenant_id=user_role.tenant_id
+      AND role.id=user_role.role_id AND role.deleted IS NULL
+    WHERE membership.tenant_id=checked_tenant_id
+      AND membership.user_id=checked_user_id AND membership.deleted IS NULL
+    UNION
+    SELECT parent.id,parent.parent_id
+    FROM granted_roles child
+    JOIN public.roles parent ON parent.tenant_id=checked_tenant_id
+      AND parent.id=child.parent_id AND parent.deleted IS NULL
+  ), role_permission AS (
+    SELECT 1
+    FROM granted_roles role
+    JOIN public.role_permissions grant_record
+      ON grant_record.tenant_id=checked_tenant_id
+      AND grant_record.role_id=role.id AND grant_record.deleted IS NULL
+    JOIN public.permissions permission
+      ON permission.tenant_id=grant_record.tenant_id
+      AND permission.id=grant_record.permission_id AND permission.deleted IS NULL
+    WHERE upper(permission.name) IN ('ADMIN','WMS')
+    LIMIT 1
+  ), service_permission AS (
+    SELECT 1
+    FROM public.service_accounts account
+    JOIN public.service_account_permissions grant_record
+      ON grant_record.tenant_id=account.tenant_id
+      AND grant_record.service_account_id=account.id
+      AND grant_record.revoked_at IS NULL
+    JOIN public.permissions permission
+      ON permission.tenant_id=grant_record.tenant_id
+      AND permission.id=grant_record.permission_id AND permission.deleted IS NULL
+    WHERE account.tenant_id=checked_tenant_id
+      AND account.principal_user_id=checked_user_id AND account.status='active'
+      AND upper(permission.name) IN ('ADMIN','WMS')
+    LIMIT 1
+  )
+  SELECT EXISTS(SELECT 1 FROM role_permission)
+    OR EXISTS(SELECT 1 FROM service_permission)
+$$;
+
+CREATE FUNCTION public.validate_license_plate_hierarchy_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'license plates cannot be physically deleted' USING ERRCODE='55000';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF NEW.parent_license_plate_id IS NOT NULL OR NEW.hierarchy_revision<>0
+      OR NEW.hierarchy_updated_at IS NOT NULL
+      OR NEW.hierarchy_updated_by_user_id IS NOT NULL THEN
+      RAISE EXCEPTION 'license plate hierarchy must be changed through a command'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.deleted IS NULL AND NEW.deleted IS NOT NULL
+    AND (OLD.parent_license_plate_id IS NOT NULL OR EXISTS(
+      SELECT 1 FROM public.license_plates child
+      WHERE child.tenant_id=OLD.tenant_id
+        AND child.parent_license_plate_id=OLD.id AND child.deleted IS NULL)) THEN
+    RAISE EXCEPTION 'nested license plates must be detached before deactivation'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.parent_license_plate_id IS NOT DISTINCT FROM OLD.parent_license_plate_id THEN
+    IF NEW.hierarchy_revision<>OLD.hierarchy_revision
+      OR NEW.hierarchy_updated_at IS DISTINCT FROM OLD.hierarchy_updated_at
+      OR NEW.hierarchy_updated_by_user_id IS DISTINCT FROM OLD.hierarchy_updated_by_user_id THEN
+      RAISE EXCEPTION 'license plate hierarchy evidence cannot change independently'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':',
+    'license-plate-hierarchy',NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id),0));
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.hierarchy_updated_by_user_id<>actor_id
+    OR NOT public.license_plate_actor_has_wms_permission(NEW.tenant_id,actor_id)
+    OR NEW.hierarchy_revision<>OLD.hierarchy_revision+1
+    OR NEW.hierarchy_updated_at IS NULL
+    OR NEW.hierarchy_updated_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.hierarchy_updated_at>clock_timestamp()+INTERVAL '1 minute'
+    OR OLD.deleted IS NOT NULL OR NEW.deleted IS NOT NULL
+    OR (OLD.parent_license_plate_id IS NOT NULL
+      AND NEW.parent_license_plate_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'invalid license plate hierarchy transition'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_license_plate_hierarchy_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE cursor_id bigint; ancestor_depth integer:=0; child_height integer:=0;
+DECLARE tree_size bigint:=0;
+DECLARE ancestor record;
+BEGIN
+  IF NEW.parent_license_plate_id IS NOT NULL THEN
+    cursor_id:=NEW.parent_license_plate_id;
+    WHILE cursor_id IS NOT NULL LOOP
+      ancestor_depth:=ancestor_depth+1;
+      IF ancestor_depth>8 THEN
+        RAISE EXCEPTION 'license plate hierarchy exceeds 8 levels'
+          USING ERRCODE='23514';
+      END IF;
+      IF cursor_id=NEW.id THEN
+        RAISE EXCEPTION 'license plate hierarchy cannot contain a cycle'
+          USING ERRCODE='23514';
+      END IF;
+      SELECT candidate.id,candidate.inventory_owner_id,candidate.facility_id,
+             candidate.location_id,candidate.parent_license_plate_id,candidate.deleted
+      INTO ancestor
+      FROM public.license_plates candidate
+      WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id=cursor_id;
+      IF NOT FOUND OR ancestor.deleted IS NOT NULL
+        OR ancestor.inventory_owner_id<>NEW.inventory_owner_id
+        OR ancestor.facility_id<>NEW.facility_id
+        OR ancestor.location_id IS DISTINCT FROM NEW.location_id THEN
+        RAISE EXCEPTION 'nested license plates must share active owner, facility, and location'
+          USING ERRCODE='23514';
+      END IF;
+      cursor_id:=ancestor.parent_license_plate_id;
+    END LOOP;
+  END IF;
+  WITH RECURSIVE descendants AS (
+    SELECT NEW.id AS id,0 AS depth
+    UNION ALL
+    SELECT child.id,descendants.depth+1
+    FROM descendants
+    JOIN public.license_plates child ON child.tenant_id=NEW.tenant_id
+      AND child.parent_license_plate_id=descendants.id AND child.deleted IS NULL
+  ) SELECT COALESCE(MAX(depth),0) INTO child_height FROM descendants;
+  IF ancestor_depth+child_height>8 THEN
+    RAISE EXCEPTION 'license plate hierarchy exceeds 8 levels'
+      USING ERRCODE='23514';
+  END IF;
+  WITH RECURSIVE ancestors AS (
+    SELECT NEW.id AS id,NEW.parent_license_plate_id AS parent_id
+    UNION ALL
+    SELECT parent.id,parent.parent_license_plate_id
+    FROM ancestors
+    JOIN public.license_plates parent ON parent.tenant_id=NEW.tenant_id
+      AND parent.id=ancestors.parent_id
+  ), root AS (
+    SELECT id FROM ancestors WHERE parent_id IS NULL LIMIT 1
+  ), tree AS (
+    SELECT root.id FROM root
+    UNION ALL
+    SELECT child.id FROM tree
+    JOIN public.license_plates child ON child.tenant_id=NEW.tenant_id
+      AND child.parent_license_plate_id=tree.id AND child.deleted IS NULL
+  ) SELECT COUNT(*) INTO tree_size FROM tree;
+  IF tree_size>1000 THEN
+    RAISE EXCEPTION 'license plate hierarchy exceeds 1000 containers'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(
+    WITH RECURSIVE descendants AS (
+      SELECT child.id
+      FROM public.license_plates child
+      WHERE child.tenant_id=NEW.tenant_id
+        AND child.parent_license_plate_id=NEW.id AND child.deleted IS NULL
+      UNION ALL
+      SELECT child.id
+      FROM descendants
+      JOIN public.license_plates child ON child.tenant_id=NEW.tenant_id
+        AND child.parent_license_plate_id=descendants.id AND child.deleted IS NULL
+    )
+    SELECT 1 FROM descendants
+    JOIN public.license_plates child ON child.tenant_id=NEW.tenant_id
+      AND child.id=descendants.id
+    WHERE child.inventory_owner_id<>NEW.inventory_owner_id
+      OR child.facility_id<>NEW.facility_id
+      OR child.location_id IS DISTINCT FROM NEW.location_id
+  ) THEN
+    RAISE EXCEPTION 'license plate descendants must share owner, facility, and location'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.parent_license_plate_id IS DISTINCT FROM OLD.parent_license_plate_id
+    AND EXISTS(
+      WITH RECURSIVE child_tree AS (
+        SELECT NEW.id AS id
+        UNION ALL
+        SELECT child.id FROM child_tree
+        JOIN public.license_plates child ON child.tenant_id=NEW.tenant_id
+          AND child.parent_license_plate_id=child_tree.id AND child.deleted IS NULL
+      ), parent_chain AS (
+        SELECT plate.id,plate.parent_license_plate_id
+        FROM public.license_plates plate
+        WHERE plate.tenant_id=NEW.tenant_id
+          AND plate.id=COALESCE(NEW.parent_license_plate_id,OLD.parent_license_plate_id)
+        UNION ALL
+        SELECT parent.id,parent.parent_license_plate_id
+        FROM parent_chain
+        JOIN public.license_plates parent ON parent.tenant_id=NEW.tenant_id
+          AND parent.id=parent_chain.parent_license_plate_id
+      ), affected AS (
+        SELECT id FROM child_tree UNION SELECT id FROM parent_chain
+      )
+      SELECT 1 FROM public.license_plate_putaway_tasks task
+      WHERE task.tenant_id=NEW.tenant_id
+        AND task.license_plate_id IN (SELECT id FROM affected)
+        AND task.closed_at IS NULL
+      UNION ALL
+      SELECT 1 FROM public.inventory_relocation_tasks task
+      WHERE task.tenant_id=NEW.tenant_id
+        AND task.license_plate_id IN (SELECT id FROM affected)
+        AND task.closed_at IS NULL
+      UNION ALL
+      SELECT 1 FROM public.packed_inventory_positions position
+      WHERE position.tenant_id=NEW.tenant_id
+        AND position.current_license_plate_id IN (SELECT id FROM affected)
+        AND position.state IN ('packed','staged','loaded')
+    ) THEN
+    RAISE EXCEPTION 'license plate hierarchy cannot change during active movement'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.parent_license_plate_id IS DISTINCT FROM OLD.parent_license_plate_id
+    AND NOT EXISTS(
+      SELECT 1 FROM public.license_plate_hierarchy_events event
+      WHERE event.tenant_id=NEW.tenant_id
+        AND event.child_license_plate_id=NEW.id
+        AND event.resulting_revision=NEW.hierarchy_revision
+        AND event.previous_parent_license_plate_id
+          IS NOT DISTINCT FROM OLD.parent_license_plate_id
+        AND event.parent_license_plate_id
+          IS NOT DISTINCT FROM NEW.parent_license_plate_id
+        AND event.actor_user_id=NEW.hierarchy_updated_by_user_id
+        AND event.occurred_at=NEW.hierarchy_updated_at) THEN
+    RAISE EXCEPTION 'license plate hierarchy transition is missing audit evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_license_plate_hierarchy_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.actor_user_id<>actor_id
+    OR NOT public.license_plate_actor_has_wms_permission(NEW.tenant_id,actor_id)
+    OR NOT EXISTS(
+      SELECT 1 FROM public.license_plates child
+      WHERE child.tenant_id=NEW.tenant_id
+        AND child.inventory_owner_id=NEW.inventory_owner_id
+        AND child.facility_id=NEW.facility_id
+        AND child.id=NEW.child_license_plate_id
+        AND child.parent_license_plate_id IS NOT DISTINCT FROM NEW.parent_license_plate_id
+        AND child.hierarchy_revision=NEW.resulting_revision
+        AND child.hierarchy_updated_at=NEW.occurred_at
+        AND child.hierarchy_updated_by_user_id=NEW.actor_user_id) THEN
+    RAISE EXCEPTION 'invalid license plate hierarchy event evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reject_license_plate_hierarchy_event_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'license plate hierarchy events are immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.guard_packed_position_license_plate_hierarchy() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE plate record;
+BEGIN
+  IF NEW.current_license_plate_id IS NULL
+    OR NEW.state NOT IN ('packed','staged','loaded') THEN
+    RETURN NEW;
+  END IF;
+  SELECT candidate.inventory_owner_id,candidate.facility_id,
+         candidate.parent_license_plate_id,candidate.deleted
+  INTO plate
+  FROM public.license_plates candidate
+  WHERE candidate.tenant_id=NEW.tenant_id
+    AND candidate.id=NEW.current_license_plate_id;
+  IF NOT FOUND OR plate.deleted IS NOT NULL THEN
+    RAISE EXCEPTION 'packed inventory requires an active license plate'
+      USING ERRCODE='23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':',
+    'license-plate-hierarchy',NEW.tenant_id,plate.inventory_owner_id,plate.facility_id),0));
+  SELECT candidate.parent_license_plate_id,candidate.deleted
+  INTO plate
+  FROM public.license_plates candidate
+  WHERE candidate.tenant_id=NEW.tenant_id
+    AND candidate.id=NEW.current_license_plate_id;
+  IF NOT FOUND OR plate.deleted IS NOT NULL
+    OR plate.parent_license_plate_id IS NOT NULL
+    OR EXISTS(SELECT 1 FROM public.license_plates child
+      WHERE child.tenant_id=NEW.tenant_id
+        AND child.parent_license_plate_id=NEW.current_license_plate_id
+        AND child.deleted IS NULL) THEN
+    RAISE EXCEPTION 'packed shipment license plates must be standalone containers'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER license_plates_validate_hierarchy_mutation
+BEFORE INSERT OR UPDATE OR DELETE ON public.license_plates FOR EACH ROW
+EXECUTE FUNCTION public.validate_license_plate_hierarchy_mutation();
+CREATE CONSTRAINT TRIGGER license_plates_require_hierarchy_integrity
+AFTER UPDATE OF parent_license_plate_id,location_id,inventory_owner_id,facility_id,deleted
+ON public.license_plates
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_license_plate_hierarchy_integrity();
+CREATE TRIGGER license_plate_hierarchy_events_validate
+BEFORE INSERT ON public.license_plate_hierarchy_events FOR EACH ROW
+EXECUTE FUNCTION public.validate_license_plate_hierarchy_event();
+CREATE TRIGGER license_plate_hierarchy_events_immutable
+BEFORE UPDATE OR DELETE ON public.license_plate_hierarchy_events FOR EACH ROW
+EXECUTE FUNCTION public.reject_license_plate_hierarchy_event_mutation();
+CREATE TRIGGER packed_inventory_positions_require_standalone_plate
+BEFORE INSERT OR UPDATE OF current_license_plate_id,state
+ON public.packed_inventory_positions FOR EACH ROW
+EXECUTE FUNCTION public.guard_packed_position_license_plate_hierarchy();
+
+ALTER TABLE public.license_plate_hierarchy_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY license_plate_hierarchy_events_tenant_isolation
+ON public.license_plate_hierarchy_events
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.license_plate_hierarchy_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.license_plate_hierarchy_events_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.license_plate_actor_has_wms_permission(bigint,bigint)
+FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_license_plate_hierarchy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_license_plate_hierarchy_integrity() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_license_plate_hierarchy_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_license_plate_hierarchy_event_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_packed_position_license_plate_hierarchy() FROM PUBLIC;

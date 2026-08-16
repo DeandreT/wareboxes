@@ -27,6 +27,7 @@ mod inventory_relocation_claim_lifecycle;
 mod inventory_relocation_confirm;
 mod leasing;
 mod license_plate_putaway;
+pub(in crate::repo) mod license_plate_tree;
 mod putaway;
 mod putaway_claim;
 mod putaway_claim_lifecycle;

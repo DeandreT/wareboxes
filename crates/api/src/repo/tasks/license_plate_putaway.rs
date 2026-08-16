@@ -17,6 +17,7 @@ use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
+use super::license_plate_tree::{lock_root_tree_tx, require_no_active_tree_movement_tx};
 use super::{
     insert_progress_tx, insert_task_tx, lock_current_task_scope_tx,
     require_replayed_task_visible_tx, task_permission, task_timeout_seconds, NewWorkTask,
@@ -25,13 +26,6 @@ use super::{
 
 const CREATE_OPERATION: &str = "task.create_license_plate_putaway.v1";
 const CONFIRM_OPERATION: &str = "task.confirm_license_plate_putaway.v1";
-
-struct PlateHeader {
-    inventory_owner_id: i64,
-    facility_id: i64,
-    location_id: i64,
-    barcode: String,
-}
 
 struct PutawayTarget {
     inventory_owner_id: i64,
@@ -45,6 +39,7 @@ struct PutawayTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ContentLine {
     inventory_balance_id: i64,
+    license_plate_id: i64,
     location_id: i64,
     item_batch_id: i64,
     item_id: i64,
@@ -60,6 +55,7 @@ struct ContentLine {
 #[derive(Debug, PartialEq, Eq)]
 struct PlannedContentLine {
     inventory_balance_id: i64,
+    license_plate_id: i64,
     item_batch_id: i64,
     item_id: i64,
     uom: String,
@@ -118,39 +114,6 @@ fn validate_scanned_barcode(value: &str, label: &str) -> AppResult<()> {
         )));
     }
     Ok(())
-}
-
-async fn lock_plate(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: wareboxes_domain::TenantId,
-    license_plate_id: i64,
-) -> AppResult<PlateHeader> {
-    let row = sqlx::query(
-        r#"
-        SELECT inventory_owner_id, facility_id, location_id, barcode
-        FROM license_plates
-        WHERE tenant_id = $1
-          AND id = $2
-          AND deleted IS NULL
-        FOR UPDATE
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(license_plate_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| AppError::not_found("license plate"))?;
-    let location_id: Option<i64> = row.try_get("location_id")?;
-    let barcode: Option<String> = row.try_get("barcode")?;
-    Ok(PlateHeader {
-        inventory_owner_id: row.try_get("inventory_owner_id")?,
-        facility_id: row.try_get("facility_id")?,
-        location_id: location_id
-            .ok_or_else(|| AppError::conflict("license plate has no current location"))?,
-        barcode: barcode
-            .filter(|barcode| !barcode.trim().is_empty())
-            .ok_or_else(|| AppError::conflict("license plate must have a scannable barcode"))?,
-    })
 }
 
 async fn lock_locations(
@@ -220,11 +183,12 @@ async fn lock_contents(
     tenant_id: wareboxes_domain::TenantId,
     inventory_owner_id: i64,
     facility_id: i64,
-    license_plate_id: i64,
+    license_plate_ids: &[i64],
 ) -> AppResult<Vec<ContentLine>> {
     let rows = sqlx::query(
         r#"
         SELECT balance.id,
+               balance.license_plate_id,
                balance.location_id,
                balance.item_batch_id,
                balance.item_id,
@@ -243,7 +207,7 @@ async fn lock_contents(
         WHERE balance.tenant_id = $1
           AND balance.inventory_owner_id = $2
           AND balance.facility_id = $3
-          AND balance.license_plate_id = $4
+          AND balance.license_plate_id = ANY($4)
           AND balance.deleted IS NULL
           AND batch.deleted IS NULL
         ORDER BY balance.id
@@ -253,13 +217,14 @@ async fn lock_contents(
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
     .bind(facility_id)
-    .bind(license_plate_id)
+    .bind(license_plate_ids)
     .fetch_all(&mut **tx)
     .await?;
     rows.iter()
         .map(|row| {
             Ok(ContentLine {
                 inventory_balance_id: row.try_get("id")?,
+                license_plate_id: row.try_get("license_plate_id")?,
                 location_id: row.try_get("location_id")?,
                 item_batch_id: row.try_get("item_batch_id")?,
                 item_id: row.try_get("item_id")?,
@@ -400,7 +365,7 @@ pub async fn create_license_plate_putaway_task_in_scope(
         return Ok(task_id);
     }
 
-    let plate = lock_plate(&mut tx, access.tenant_id, license_plate_id).await?;
+    let plate = lock_root_tree_tx(&mut tx, access.tenant_id, license_plate_id).await?;
     let dimensions = TaskDimensions {
         facility_id: Some(plate.facility_id),
         inventory_owner_id: Some(plate.inventory_owner_id),
@@ -425,7 +390,14 @@ pub async fn create_license_plate_putaway_task_in_scope(
         access.tenant_id,
         plate.inventory_owner_id,
         plate.facility_id,
-        license_plate_id,
+        &plate.plate_ids,
+    )
+    .await?;
+    require_no_active_tree_movement_tx(
+        &mut tx,
+        access.tenant_id,
+        plate.inventory_owner_id,
+        &plate.plate_ids,
     )
     .await?;
     let positive_contents = positive_contents_at_source(&contents, plate.location_id)?;
@@ -516,6 +488,7 @@ pub async fn create_license_plate_putaway_task_in_scope(
                 inventory_owner_id,
                 facility_id,
                 license_plate_id,
+                content_license_plate_id,
                 inventory_balance_id,
                 item_batch_id,
                 item_id,
@@ -523,7 +496,7 @@ pub async fn create_license_plate_putaway_task_in_scope(
                 inventory_status,
                 planned_quantity
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(access.tenant_id.get())
@@ -531,6 +504,7 @@ pub async fn create_license_plate_putaway_task_in_scope(
         .bind(plate.inventory_owner_id)
         .bind(plate.facility_id)
         .bind(license_plate_id)
+        .bind(content.license_plate_id)
         .bind(content.inventory_balance_id)
         .bind(content.item_batch_id)
         .bind(content.item_id)
@@ -618,6 +592,7 @@ async fn planned_contents(
     let rows = sqlx::query(
         r#"
         SELECT inventory_balance_id,
+               content_license_plate_id,
                item_batch_id,
                item_id,
                uom,
@@ -637,6 +612,7 @@ async fn planned_contents(
         .map(|row| {
             Ok(PlannedContentLine {
                 inventory_balance_id: row.try_get("inventory_balance_id")?,
+                license_plate_id: row.try_get("content_license_plate_id")?,
                 item_batch_id: row.try_get("item_batch_id")?,
                 item_id: row.try_get("item_id")?,
                 uom: row.try_get("uom")?,
@@ -661,6 +637,7 @@ fn require_exact_snapshot(
     }
     for (current, planned) in current.iter().zip(planned) {
         if current.inventory_balance_id != planned.inventory_balance_id
+            || current.license_plate_id != planned.license_plate_id
             || current.item_batch_id != planned.item_batch_id
             || current.item_id != planned.item_id
             || current.uom != planned.uom
@@ -717,7 +694,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
     }
 
     let target = lock_target(&mut tx, access, task_id, command.actor_id.get(), &scope).await?;
-    let plate = lock_plate(&mut tx, access.tenant_id, target.license_plate_id).await?;
+    let plate = lock_root_tree_tx(&mut tx, access.tenant_id, target.license_plate_id).await?;
     if plate.inventory_owner_id != target.inventory_owner_id
         || plate.facility_id != target.facility_id
         || plate.location_id != target.source_location_id
@@ -749,7 +726,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
         access.tenant_id,
         target.inventory_owner_id,
         target.facility_id,
-        target.license_plate_id,
+        &plate.plate_ids,
     )
     .await?;
     let positive_contents = positive_contents_at_source(&contents, target.source_location_id)?;
@@ -797,7 +774,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
         WHERE tenant_id = $3
           AND inventory_owner_id = $4
           AND facility_id = $5
-          AND license_plate_id = $6
+          AND license_plate_id = ANY($6)
           AND id = ANY($7)
           AND deleted IS NULL
         "#,
@@ -807,7 +784,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
     .bind(access.tenant_id.get())
     .bind(target.inventory_owner_id)
     .bind(target.facility_id)
-    .bind(target.license_plate_id)
+    .bind(&plate.plate_ids)
     .bind(&balance_ids)
     .execute(&mut *tx)
     .await?;
@@ -823,7 +800,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
         WHERE tenant_id = $2
           AND inventory_owner_id = $3
           AND facility_id = $4
-          AND id = $5
+          AND id = ANY($5)
           AND location_id = $6
           AND deleted IS NULL
         "#,
@@ -832,11 +809,11 @@ pub async fn confirm_license_plate_putaway_in_scope(
     .bind(access.tenant_id.get())
     .bind(target.inventory_owner_id)
     .bind(target.facility_id)
-    .bind(target.license_plate_id)
+    .bind(&plate.plate_ids)
     .bind(target.source_location_id)
     .execute(&mut *tx)
     .await?;
-    if updated_plate.rows_affected() != 1 {
+    if usize::try_from(updated_plate.rows_affected()).ok() != Some(plate.plate_ids.len()) {
         return Err(AppError::conflict(
             "license plate location changed during putaway confirmation",
         ));
@@ -854,7 +831,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
                 transaction_id,
                 &JournalEntry {
                     location_id,
-                    license_plate_id: Some(target.license_plate_id),
+                    license_plate_id: Some(content.license_plate_id),
                     item_batch_id: content.item_batch_id,
                     status: content.status,
                     quantity_delta,

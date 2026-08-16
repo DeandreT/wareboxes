@@ -13,6 +13,11 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::inventory;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
+use crate::repo::tasks::license_plate_tree::lock_root_tree_tx;
+
+#[path = "license_plates/hierarchy.rs"]
+mod hierarchy;
+pub use hierarchy::{change_parent, hierarchy};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
     InventoryStatus::parse(s)
@@ -32,6 +37,15 @@ fn map(row: &sqlx::postgres::PgRow) -> AppResult<LicensePlate> {
         facility_id: row.try_get("facility_id")?,
         location_id: row.try_get("location_id")?,
         dims_id: row.try_get("dims_id")?,
+        parent_license_plate_id: row.try_get("parent_license_plate_id")?,
+        hierarchy_revision: row.try_get("hierarchy_revision")?,
+        hierarchy_depth: 0,
+        root_license_plate_id: row.try_get("id")?,
+        child_license_plate_ids: Vec::new(),
+        descendant_license_plate_ids: Vec::new(),
+        contained_unit_quantity: 0,
+        hierarchy_updated_at: row.try_get("hierarchy_updated_at")?,
+        hierarchy_updated_by_user_id: row.try_get("hierarchy_updated_by_user_id")?,
         contents: Vec::new(),
     })
 }
@@ -50,6 +64,74 @@ fn map_content(row: &sqlx::postgres::PgRow) -> AppResult<LicensePlateContent> {
         qty_reserved: row.try_get("qty_reserved")?,
         qty_held: row.try_get("qty_held")?,
     })
+}
+
+fn decorate_hierarchy(plates: &mut [LicensePlate]) -> AppResult<()> {
+    let parent_by_id = plates
+        .iter()
+        .map(|plate| (plate.id, plate.parent_license_plate_id))
+        .collect::<std::collections::HashMap<_, _>>();
+    let direct_units = plates
+        .iter()
+        .map(|plate| {
+            let units = plate.contents.iter().try_fold(0_i64, |total, content| {
+                total
+                    .checked_add(content.qty_on_hand)
+                    .ok_or_else(|| AppError::internal("license plate quantity overflow"))
+            })?;
+            Ok((plate.id, units))
+        })
+        .collect::<AppResult<std::collections::HashMap<_, _>>>()?;
+    let ids = parent_by_id.keys().copied().collect::<Vec<_>>();
+    for plate in plates {
+        plate.child_license_plate_ids = ids
+            .iter()
+            .copied()
+            .filter(|id| parent_by_id.get(id).copied().flatten() == Some(plate.id))
+            .collect();
+        plate.child_license_plate_ids.sort_unstable();
+        let mut root_id = plate.id;
+        let mut depth = 0_i32;
+        let mut cursor = plate.parent_license_plate_id;
+        while let Some(parent_id) = cursor {
+            depth = depth
+                .checked_add(1)
+                .ok_or_else(|| AppError::internal("license plate hierarchy depth overflow"))?;
+            if depth > i32::from(wareboxes_domain::MAX_LICENSE_PLATE_HIERARCHY_DEPTH) {
+                return Err(AppError::internal(
+                    "license plate hierarchy exceeds its domain depth limit",
+                ));
+            }
+            root_id = parent_id;
+            cursor = parent_by_id.get(&parent_id).copied().flatten();
+        }
+        plate.hierarchy_depth = depth;
+        plate.root_license_plate_id = root_id;
+        plate.descendant_license_plate_ids = ids
+            .iter()
+            .copied()
+            .filter(|candidate_id| {
+                let mut candidate = Some(*candidate_id);
+                for _ in 0..=wareboxes_domain::MAX_LICENSE_PLATE_HIERARCHY_DEPTH {
+                    let Some(id) = candidate else { return false };
+                    if id == plate.id {
+                        return *candidate_id != plate.id;
+                    }
+                    candidate = parent_by_id.get(&id).copied().flatten();
+                }
+                false
+            })
+            .collect();
+        plate.descendant_license_plate_ids.sort_unstable();
+        plate.contained_unit_quantity = std::iter::once(plate.id)
+            .chain(plate.descendant_license_plate_ids.iter().copied())
+            .try_fold(0_i64, |total, id| {
+                total
+                    .checked_add(direct_units.get(&id).copied().unwrap_or_default())
+                    .ok_or_else(|| AppError::internal("license plate quantity overflow"))
+            })?;
+    }
+    Ok(())
 }
 
 async fn contents_by_license_plate(
@@ -115,7 +197,9 @@ async fn get_license_plates_with_scope(
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode,
-               facility_id, location_id, dims_id
+               facility_id, location_id, dims_id, parent_license_plate_id,
+               hierarchy_revision, hierarchy_updated_at,
+               hierarchy_updated_by_user_id
         FROM license_plates
         WHERE tenant_id = $1
           AND ($2 OR deleted IS NULL)
@@ -138,6 +222,7 @@ async fn get_license_plates_with_scope(
     for plate in &mut plates {
         plate.contents = contents.remove(&plate.id).unwrap_or_default();
     }
+    decorate_hierarchy(&mut plates)?;
     tx.commit().await?;
     Ok(plates)
 }
@@ -171,7 +256,9 @@ async fn get_license_plate_by_barcode_with_scope(
     let row = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode,
-               facility_id, location_id, dims_id
+               facility_id, location_id, dims_id, parent_license_plate_id,
+               hierarchy_revision, hierarchy_updated_at,
+               hierarchy_updated_by_user_id
         FROM license_plates
         WHERE tenant_id = $1
           AND barcode = $2
@@ -192,9 +279,37 @@ async fn get_license_plate_by_barcode_with_scope(
         tx.commit().await?;
         return Ok(None);
     };
-    let mut plate = map(&row)?;
-    let mut contents = contents_by_license_plate(&mut tx, tenant_id, &[plate.id]).await?;
-    plate.contents = contents.remove(&plate.id).unwrap_or_default();
+    let selected_id: i64 = row.try_get("id")?;
+    let selected_owner_id: i64 = row.try_get("inventory_owner_id")?;
+    let selected_facility_id: i64 = row.try_get("facility_id")?;
+    let family_rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode,
+               facility_id, location_id, dims_id, parent_license_plate_id,
+               hierarchy_revision, hierarchy_updated_at,
+               hierarchy_updated_by_user_id
+        FROM license_plates
+        WHERE tenant_id=$1 AND inventory_owner_id=$2 AND facility_id=$3
+          AND deleted IS NULL
+        ORDER BY id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(selected_owner_id)
+    .bind(selected_facility_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut family = family_rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    let ids = family.iter().map(|plate| plate.id).collect::<Vec<_>>();
+    let mut contents = contents_by_license_plate(&mut tx, tenant_id, &ids).await?;
+    for plate in &mut family {
+        plate.contents = contents.remove(&plate.id).unwrap_or_default();
+    }
+    decorate_hierarchy(&mut family)?;
+    let plate = family
+        .into_iter()
+        .find(|plate| plate.id == selected_id)
+        .ok_or_else(|| AppError::internal("selected license plate disappeared"))?;
     tx.commit().await?;
     Ok(Some(plate))
 }
@@ -409,17 +524,10 @@ pub async fn move_license_plate(
         return Ok(transaction_id);
     }
 
-    let plate = sqlx::query(
-        "SELECT inventory_owner_id, facility_id, location_id FROM license_plates WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR UPDATE",
-    )
-    .bind(tenant_id.get())
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::not_found("license plate"))?;
-    let inventory_owner_id: i64 = plate.try_get("inventory_owner_id")?;
-    let plate_facility_id: i64 = plate.try_get("facility_id")?;
-    let plate_location: Option<i64> = plate.try_get("location_id")?;
+    let tree = lock_root_tree_tx(&mut tx, tenant_id, id).await?;
+    let inventory_owner_id = tree.inventory_owner_id;
+    let plate_facility_id = tree.facility_id;
+    let plate_location = Some(tree.location_id);
     let owner_facility =
         inventory_journal::owner_facility_scope(inventory_owner_id, plate_facility_id)?;
     if !scope.includes_inventory_owner(inventory_owner_id)
@@ -427,25 +535,29 @@ pub async fn move_license_plate(
     {
         return Err(AppError::forbidden());
     }
+    let subtree_ids = tree.plate_ids;
     let active_putaway: Option<i64> = sqlx::query_scalar(
         r#"
-        SELECT task_id
-        FROM license_plate_putaway_tasks
-        WHERE tenant_id = $1
-          AND inventory_owner_id = $2
-          AND license_plate_id = $3
-          AND closed_at IS NULL
+        SELECT task_id FROM (
+          SELECT task_id FROM license_plate_putaway_tasks
+          WHERE tenant_id=$1 AND inventory_owner_id=$2
+            AND license_plate_id=ANY($3) AND closed_at IS NULL
+          UNION ALL
+          SELECT task_id FROM inventory_relocation_tasks
+          WHERE tenant_id=$1 AND inventory_owner_id=$2
+            AND license_plate_id=ANY($3) AND closed_at IS NULL
+        ) active_movement
         LIMIT 1
         "#,
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(id)
+    .bind(&subtree_ids)
     .fetch_optional(&mut *tx)
     .await?;
     if active_putaway.is_some() {
         return Err(AppError::conflict(
-            "license plate has active directed putaway work",
+            "license plate hierarchy has active directed putaway work or relocation work",
         ));
     }
 
@@ -486,7 +598,7 @@ pub async fn move_license_plate(
         FROM inventory_balances
         WHERE tenant_id = $1
           AND inventory_owner_id = $2
-          AND license_plate_id = $3
+          AND license_plate_id = ANY($3)
           AND deleted IS NULL
         ORDER BY id
         FOR UPDATE
@@ -494,18 +606,19 @@ pub async fn move_license_plate(
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(id)
+    .bind(&subtree_ids)
     .fetch_all(&mut *tx)
     .await?;
 
     let content_rows = sqlx::query(
         r#"
-        SELECT id, facility_id, location_id, item_batch_id, item_id, status,
+        SELECT id, facility_id, location_id, license_plate_id,
+               item_batch_id, item_id, status,
                qty_on_hand, qty_reserved, qty_held
         FROM inventory_balances
         WHERE tenant_id = $1
           AND inventory_owner_id = $2
-          AND license_plate_id = $3
+          AND license_plate_id = ANY($3)
           AND deleted IS NULL
           AND qty_on_hand > 0
         ORDER BY id
@@ -513,7 +626,7 @@ pub async fn move_license_plate(
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(id)
+    .bind(&subtree_ids)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -572,7 +685,7 @@ pub async fn move_license_plate(
         INNER JOIN item_batches batch_b ON batch_b.id = b.item_batch_id
         WHERE a.tenant_id = $1
           AND a.inventory_owner_id = $2
-          AND a.license_plate_id = $3
+          AND a.license_plate_id = ANY($3)
           AND a.deleted IS NULL
           AND b.deleted IS NULL
           AND a.qty_on_hand > 0
@@ -587,7 +700,7 @@ pub async fn move_license_plate(
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(id)
+    .bind(&subtree_ids)
     .fetch_optional(&mut *tx)
     .await?;
     if mixed_content.is_some() {
@@ -623,7 +736,7 @@ pub async fn move_license_plate(
         UPDATE inventory_balances
         SET facility_id = $1, location_id = $2, modified = $3
         WHERE tenant_id = $4 AND inventory_owner_id = $5
-          AND license_plate_id = $6 AND id = ANY($7) AND deleted IS NULL
+          AND license_plate_id = ANY($6) AND id = ANY($7) AND deleted IS NULL
         "#,
     )
     .bind(destination_facility_id)
@@ -631,21 +744,22 @@ pub async fn move_license_plate(
     .bind(now)
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(id)
+    .bind(&subtree_ids)
     .bind(&locked_balance_ids)
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE license_plates SET location_id = $1 WHERE tenant_id = $2 AND inventory_owner_id = $3 AND id = $4")
+    sqlx::query("UPDATE license_plates SET location_id = $1 WHERE tenant_id = $2 AND inventory_owner_id = $3 AND id = ANY($4)")
         .bind(to_location_id)
         .bind(tenant_id.get())
         .bind(inventory_owner_id)
-        .bind(id)
+        .bind(&subtree_ids)
         .execute(&mut *tx)
         .await?;
 
     for row in &content_rows {
         let item_batch_id: i64 = row.try_get("item_batch_id")?;
+        let content_license_plate_id: i64 = row.try_get("license_plate_id")?;
         let status = parse_inventory_status(&row.try_get::<String, _>("status")?)?;
         let qty: i64 = row.try_get("qty_on_hand")?;
         for (location_id, quantity_delta) in [(from_location_id, -qty), (to_location_id, qty)] {
@@ -656,7 +770,7 @@ pub async fn move_license_plate(
                 transaction_id,
                 &JournalEntry {
                     location_id,
-                    license_plate_id: Some(id),
+                    license_plate_id: Some(content_license_plate_id),
                     item_batch_id,
                     status,
                     quantity_delta,

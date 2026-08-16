@@ -13,6 +13,7 @@ use crate::repo::inventory_journal;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
+use super::license_plate_tree::{lock_root_tree_tx, require_no_active_tree_movement_tx};
 use super::{
     insert_task_tx, lock_current_task_scope_tx, require_replayed_task_visible_tx, task_permission,
     task_timeout_seconds, NewWorkTask, TaskDimensions,
@@ -35,17 +36,10 @@ struct LooseSource {
     qty_held: i64,
 }
 
-#[derive(Debug)]
-pub(super) struct PlateHeader {
-    pub(super) inventory_owner_id: i64,
-    pub(super) facility_id: i64,
-    pub(super) location_id: i64,
-    pub(super) barcode: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PlateContent {
     pub(super) inventory_balance_id: i64,
+    pub(super) license_plate_id: i64,
     pub(super) location_id: i64,
     pub(super) item_batch_id: i64,
     pub(super) item_id: i64,
@@ -265,7 +259,7 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
         return Ok(task_id);
     }
 
-    let plate = lock_plate(&mut tx, access.tenant_id, license_plate_id).await?;
+    let plate = lock_root_tree_tx(&mut tx, access.tenant_id, license_plate_id).await?;
     require_dimensions(
         &scope,
         plate.facility_id,
@@ -293,7 +287,7 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
         access.tenant_id,
         plate.inventory_owner_id,
         plate.facility_id,
-        license_plate_id,
+        &plate.plate_ids,
     )
     .await?;
     let positive_contents = require_movable_plate_contents(&contents, plate.location_id)?;
@@ -305,7 +299,13 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
         &positive_contents,
     )
     .await?;
-    require_no_active_plate_movement(&mut tx, access.tenant_id, license_plate_id).await?;
+    require_no_active_tree_movement_tx(
+        &mut tx,
+        access.tenant_id,
+        plate.inventory_owner_id,
+        &plate.plate_ids,
+    )
+    .await?;
 
     let planned_balance_count = i64::try_from(positive_contents.len())
         .map_err(|_| AppError::internal("license plate content count is out of range"))?;
@@ -354,10 +354,10 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
             r#"
             INSERT INTO inventory_relocation_task_contents (
                 tenant_id, task_id, inventory_owner_id, facility_id,
-                license_plate_id, inventory_balance_id, item_batch_id,
+                license_plate_id, content_license_plate_id, inventory_balance_id, item_batch_id,
                 item_id, uom, inventory_status, planned_quantity
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(access.tenant_id.get())
@@ -365,6 +365,7 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
         .bind(plate.inventory_owner_id)
         .bind(plate.facility_id)
         .bind(license_plate_id)
+        .bind(content.license_plate_id)
         .bind(content.inventory_balance_id)
         .bind(content.item_batch_id)
         .bind(content.item_id)
@@ -607,47 +608,16 @@ pub(in crate::repo) async fn create_advisory_loose_relocation_task_tx(
     Ok(task_id)
 }
 
-pub(super) async fn lock_plate(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    license_plate_id: i64,
-) -> AppResult<PlateHeader> {
-    let row = sqlx::query(
-        r#"
-        SELECT inventory_owner_id, facility_id, location_id, barcode
-        FROM license_plates
-        WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
-        FOR UPDATE
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(license_plate_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| AppError::not_found("license plate"))?;
-    Ok(PlateHeader {
-        inventory_owner_id: row.try_get("inventory_owner_id")?,
-        facility_id: row.try_get("facility_id")?,
-        location_id: row
-            .try_get::<Option<i64>, _>("location_id")?
-            .ok_or_else(|| AppError::conflict("license plate has no current location"))?,
-        barcode: row
-            .try_get::<Option<String>, _>("barcode")?
-            .filter(|barcode| !barcode.trim().is_empty())
-            .ok_or_else(|| AppError::conflict("license plate must have a scannable barcode"))?,
-    })
-}
-
 pub(super) async fn lock_plate_contents(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     inventory_owner_id: i64,
     facility_id: i64,
-    license_plate_id: i64,
+    license_plate_ids: &[i64],
 ) -> AppResult<Vec<PlateContent>> {
     let rows = sqlx::query(
         r#"
-        SELECT balance.id, balance.location_id, balance.item_batch_id,
+        SELECT balance.id, balance.license_plate_id, balance.location_id, balance.item_batch_id,
                balance.item_id, balance.uom, balance.status,
                balance.qty_on_hand, balance.qty_reserved, balance.qty_held
         FROM inventory_balances balance
@@ -663,7 +633,7 @@ pub(super) async fn lock_plate_contents(
         WHERE balance.tenant_id = $1
           AND balance.inventory_owner_id = $2
           AND balance.facility_id = $3
-          AND balance.license_plate_id = $4
+          AND balance.license_plate_id = ANY($4)
           AND balance.deleted IS NULL
         ORDER BY balance.id
         FOR UPDATE OF balance
@@ -672,13 +642,14 @@ pub(super) async fn lock_plate_contents(
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
     .bind(facility_id)
-    .bind(license_plate_id)
+    .bind(license_plate_ids)
     .fetch_all(&mut **tx)
     .await?;
     rows.iter()
         .map(|row| {
             Ok(PlateContent {
                 inventory_balance_id: row.try_get("id")?,
+                license_plate_id: row.try_get("license_plate_id")?,
                 location_id: row.try_get("location_id")?,
                 item_batch_id: row.try_get("item_batch_id")?,
                 item_id: row.try_get("item_id")?,
@@ -775,39 +746,6 @@ async fn require_no_active_loose_movement(
     if exists {
         Err(AppError::conflict(
             "source inventory already has active movement work",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-async fn require_no_active_plate_movement(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    license_plate_id: i64,
-) -> AppResult<()> {
-    let exists: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM license_plate_putaway_tasks
-            WHERE tenant_id = $1
-              AND license_plate_id = $2
-              AND closed_at IS NULL
-            UNION ALL
-            SELECT 1 FROM inventory_relocation_tasks
-            WHERE tenant_id = $1
-              AND license_plate_id = $2
-              AND closed_at IS NULL
-        )
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(license_plate_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    if exists {
-        Err(AppError::conflict(
-            "license plate already has active movement work",
         ))
     } else {
         Ok(())

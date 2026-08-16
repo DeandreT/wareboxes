@@ -13,6 +13,10 @@ use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{label_or_id, optional_text, CatalogStore};
 
+#[path = "catalog_license_plates/hierarchy.rs"]
+mod hierarchy;
+use hierarchy::LicensePlateHierarchyPanel;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlateSort {
     Id,
@@ -126,6 +130,7 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore, layout: SplitPaneState) -
                                 <SortableHeader label="Client" active=move || sort.get().key == PlateSort::Client direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PlateSort::Client))/>
                                 <SortableHeader label="Facility" active=move || sort.get().key == PlateSort::Facility direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PlateSort::Facility))/>
                                 <SortableHeader label="Location" active=move || sort.get().key == PlateSort::Location direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PlateSort::Location))/>
+                                <th scope="col">"Hierarchy"</th>
                                 <SortableHeader label="Units" active=move || sort.get().key == PlateSort::Units direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PlateSort::Units)) numeric=true/>
                                 <SortableHeader label="Status" active=move || sort.get().key == PlateSort::Status direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PlateSort::Status))/>
                             </tr>
@@ -144,7 +149,7 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore, layout: SplitPaneState) -
                                 );
                                 if plates.is_empty() {
                                     view! {
-                                        <tr><td class="table-empty-row" colspan="7">"No license plates match this view."</td></tr>
+                                        <tr><td class="table-empty-row" colspan="8">"No license plates match this view."</td></tr>
                                     }
                                     .into_any()
                                 } else {
@@ -172,6 +177,7 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore, layout: SplitPaneState) -
                                                     <td>{client_label(&data.clients, plate.inventory_owner_id.get())}</td>
                                                     <td>{facility_label(&data.facilities, plate.facility_id)}</td>
                                                     <td>{plate.location_id.map_or_else(|| "Not placed".to_owned(), |location_id| location_label(&data.locations, location_id))}</td>
+                                                    <td>{hierarchy_summary(&plate)}</td>
                                                     <td class="numeric">{format_quantity(plate_units(&plate))}</td>
                                                     <td><span class=if inactive { "status muted" } else { "status open" }>{if inactive { "Inactive" } else { "Active" }}</span></td>
                                                 </tr>
@@ -211,6 +217,7 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore, layout: SplitPaneState) -
                                 clients=data.clients
                                 facilities=data.facilities
                                 locations=data.locations
+                                plates=data.license_plates
                             />
                         }
                         .into_any()
@@ -348,6 +355,7 @@ fn PlateDetail(
     clients: Vec<InventoryOwner>,
     facilities: Vec<Facility>,
     locations: Vec<Location>,
+    plates: Vec<LicensePlate>,
 ) -> impl IntoView {
     let barcode = RwSignal::new(plate.barcode.clone().unwrap_or_default());
     let pending = RwSignal::new(false);
@@ -443,7 +451,7 @@ fn PlateDetail(
                 <div><dt>"Client"</dt><dd>{client}</dd></div>
                 <div><dt>"Facility"</dt><dd>{facility}</dd></div>
                 <div><dt>"Location"</dt><dd>{location}</dd></div>
-                <div><dt>"Movement"</dt><dd><span class="catalog-badge">"RF execution"</span></dd></div>
+                <div><dt>"Hierarchy"</dt><dd>{hierarchy_summary(&plate)}</dd></div>
             </dl>
             <form class="catalog-form compact-form" on:submit=save>
                 <label>
@@ -475,6 +483,8 @@ fn PlateDetail(
                     </button>
                 </div>
             </form>
+
+            <LicensePlateHierarchyPanel store plate=plate.clone() plates/>
 
             <section class="catalog-subsection">
                 <div class="catalog-subheading">
@@ -657,11 +667,20 @@ fn selected_plate(plates: &[LicensePlate], id: Option<i64>) -> Option<LicensePla
 }
 
 fn plate_units(plate: &LicensePlate) -> i64 {
-    plate
-        .contents
-        .iter()
-        .map(|content| content.qty_on_hand)
-        .sum()
+    plate.contained_unit_quantity
+}
+
+fn hierarchy_summary(plate: &LicensePlate) -> String {
+    if let Some(parent_id) = plate.parent_license_plate_id {
+        format!("Level {} · parent #{parent_id}", plate.hierarchy_depth)
+    } else if !plate.descendant_license_plate_ids.is_empty() {
+        format!(
+            "Root · {} contained",
+            plate.descendant_license_plate_ids.len()
+        )
+    } else {
+        "Standalone".into()
+    }
 }
 
 fn client_label(clients: &[InventoryOwner], id: i64) -> String {

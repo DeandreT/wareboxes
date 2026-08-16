@@ -29,6 +29,7 @@ mod item_storage_policy;
 mod item_substitution;
 mod item_traceability_policy;
 mod labor;
+mod license_plate;
 mod license_plate_putaway;
 mod order;
 mod order_allocation;
@@ -268,6 +269,11 @@ pub use labor::{
     LaborRosterPageRequest, LaborRosterPageResponse, LaborSkillResponse, LaborStandardResponse,
     LaborWorkspaceRequest, LaborWorkspaceResponse, RevokeEmployeeCertificationRequest,
     StartLaborActivityRequest,
+};
+pub use license_plate::{
+    ChangeLicensePlateParentRequest, ChangeLicensePlateParentResponse, LicensePlateHierarchyAction,
+    LicensePlateHierarchyEventResponse, LicensePlateHierarchyNodeResponse,
+    LicensePlateHierarchyResponse, MAX_LICENSE_PLATE_HIERARCHY_REASON_LENGTH,
 };
 pub use license_plate_putaway::{
     ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,

@@ -27,7 +27,18 @@ pub async fn putaway_candidate_page(
     let direction = sort_direction(query.direction);
     let sql = format!(
         r#"
-        WITH candidates AS (
+        WITH RECURSIVE plate_tree AS (
+            SELECT plate.id AS root_id,plate.id AS member_id
+            FROM license_plates plate
+            WHERE plate.tenant_id=$1 AND plate.deleted IS NULL
+              AND plate.parent_license_plate_id IS NULL
+            UNION ALL
+            SELECT plate_tree.root_id,child.id
+            FROM plate_tree
+            JOIN license_plates child ON child.tenant_id=$1
+              AND child.parent_license_plate_id=plate_tree.member_id
+              AND child.deleted IS NULL
+        ), candidates AS (
             SELECT 'loose'::text AS workflow,
                    balance.id AS anchor_id,
                    balance.inventory_owner_id,
@@ -115,10 +126,11 @@ pub async fn putaway_candidate_page(
             JOIN locations source ON source.tenant_id=plate.tenant_id
               AND source.facility_id=plate.facility_id AND source.id=plate.location_id
               AND source.deleted IS NULL AND source.active AND source.receivable
+            JOIN plate_tree ON plate_tree.root_id=plate.id
             JOIN inventory_balances balance ON balance.tenant_id=plate.tenant_id
               AND balance.inventory_owner_id=plate.inventory_owner_id
               AND balance.facility_id=plate.facility_id
-              AND balance.license_plate_id=plate.id
+              AND balance.license_plate_id=plate_tree.member_id
               AND balance.location_id=plate.location_id
               AND balance.deleted IS NULL AND balance.qty_on_hand>0
             JOIN item_batches batch ON batch.tenant_id=balance.tenant_id
@@ -135,19 +147,24 @@ pub async fn putaway_candidate_page(
                 ORDER BY barcode.id LIMIT 1
             ) primary_sku ON true
             WHERE plate.tenant_id=$1 AND plate.deleted IS NULL
+              AND plate.parent_license_plate_id IS NULL
               AND plate.location_id IS NOT NULL
               AND plate.barcode IS NOT NULL AND btrim(plate.barcode)<>''
               AND NOT EXISTS (
                 SELECT 1 FROM license_plate_putaway_tasks active
                 WHERE active.tenant_id=plate.tenant_id
                   AND active.inventory_owner_id=plate.inventory_owner_id
-                  AND active.license_plate_id=plate.id AND active.closed_at IS NULL
+                  AND active.license_plate_id IN (
+                    SELECT member_id FROM plate_tree WHERE root_id=plate.id
+                  ) AND active.closed_at IS NULL
               )
               AND NOT EXISTS (
                 SELECT 1 FROM inventory_relocation_tasks active
                 WHERE active.tenant_id=plate.tenant_id
                   AND active.inventory_owner_id=plate.inventory_owner_id
-                  AND active.license_plate_id=plate.id AND active.closed_at IS NULL
+                  AND active.license_plate_id IN (
+                    SELECT member_id FROM plate_tree WHERE root_id=plate.id
+                  ) AND active.closed_at IS NULL
               )
             GROUP BY plate.id,plate.inventory_owner_id,owner.name,plate.facility_id,
                      facility.name,plate.barcode,plate.location_id,source.barcode,source.name

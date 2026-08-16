@@ -28,6 +28,7 @@ mod item_substitutions;
 mod item_traceability_policies;
 mod labor;
 mod license_plate_putaway;
+mod license_plates;
 mod order_allocations;
 mod order_cancellations;
 mod order_holds;
@@ -180,6 +181,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/workforce/employees/{employee_id}/identity-unlinks",
             post(workforce_identity::unlink),
+        )
+        .route(
+            "/license-plates/{license_plate_id}/hierarchy",
+            get(license_plates::hierarchy),
+        )
+        .route(
+            "/license-plates/{license_plate_id}/parent-changes",
+            post(license_plates::change_parent),
         )
         .route("/labor/skills", post(labor::configure_skill))
         .route("/labor/certifications", post(labor::certify_employee))

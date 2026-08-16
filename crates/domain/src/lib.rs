@@ -18,6 +18,7 @@ mod item_storage_policy;
 mod item_substitution;
 mod item_traceability_policy;
 mod labor;
+mod license_plate;
 mod order;
 mod order_amendment;
 mod order_cancellation;
@@ -164,6 +165,10 @@ pub use item_traceability_policy::{
     TraceabilityRequirement, MAX_ITEM_TRACEABILITY_POLICY_UOM_LENGTH, MAX_MINIMUM_SHELF_LIFE_DAYS,
 };
 pub use labor::*;
+pub use license_plate::{
+    validate_license_plate_attachment, LicensePlateAttachmentError, LicensePlateAttachmentSnapshot,
+    MAX_LICENSE_PLATE_HIERARCHY_DEPTH, MAX_LICENSE_PLATE_HIERARCHY_NODES,
+};
 pub use order::{
     CatalogItemId, FulfillmentOrderDemandLine, NewFulfillmentOrder, OrderCreationError,
     OrderCreationField, OrderHoldReason, OrderHoldTransitionError, OrderKey, OrderLineKey,

@@ -883,6 +883,71 @@
   border-top: 1px solid var(--line);
 }
 
+.plate-hierarchy-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0;
+}
+
+.plate-hierarchy-facts div,
+.plate-hierarchy-history {
+  padding: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.plate-hierarchy-facts dt,
+.plate-hierarchy-facts dd {
+  margin: 0;
+}
+
+.plate-hierarchy-facts dt,
+.plate-hierarchy-history small {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.plate-hierarchy-facts dd {
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.plate-hierarchy-command {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) max-content;
+  gap: 5px;
+  align-items: end;
+}
+
+.plate-hierarchy-history ol {
+  display: grid;
+  gap: 5px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plate-hierarchy-history li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 8px;
+  padding-top: 5px;
+  border-top: 1px solid var(--line);
+}
+
+.plate-hierarchy-history span,
+.plate-hierarchy-history small {
+  display: grid;
+}
+
+.plate-hierarchy-history p {
+  margin: 0;
+  font-size: 10px;
+}
+
 .catalog-subheading {
   align-items: center;
 }

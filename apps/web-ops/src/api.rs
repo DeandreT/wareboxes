@@ -70,6 +70,8 @@ pub use item_substitution::{
     configure_item_substitution_policy, item_substitution_policies,
     retire_item_substitution_policy, substitute_pick_shortage,
 };
+mod license_plate;
+pub use license_plate::{change_license_plate_parent, license_plate_hierarchy};
 mod inbound_inspection;
 pub use inbound_inspection::dispose_inbound_inspection;
 mod inbound_asn;
