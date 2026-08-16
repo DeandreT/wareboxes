@@ -5,6 +5,7 @@ pub mod backorder;
 pub mod billing;
 pub mod configuration;
 mod context;
+pub mod count_decision_policy;
 pub mod cross_dock;
 pub mod customer_portal;
 pub mod customer_return;

@@ -8,6 +8,8 @@ use wareboxes_domain::{
     InventoryBalanceId, InventoryOwnerId, LocationId, Timestamp, UserId,
 };
 
+use crate::count_decision_policy::CountDecisionPolicyReadModel;
+
 pub const CONFIGURE_CYCLE_COUNT_POLICY_OPERATION: &str = "cycle_count.policy.configure.v1";
 pub const DECIDE_CYCLE_COUNT_VARIANCE_OPERATION: &str = "cycle_count.variance.decide.v1";
 
@@ -96,6 +98,7 @@ pub struct CycleCountVarianceReadModel {
     pub policy_id: CycleCountPolicyId,
     pub policy_revision: CycleCountPolicyRevision,
     pub policy: CycleCountTolerancePolicy,
+    pub decision_policy: CountDecisionPolicyReadModel,
     pub latest_task_id: i64,
     pub latest_attempt_sequence: u16,
     pub automatic_recounts_used: u16,

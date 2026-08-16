@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, InventoryBalanceStatus, OpaqueCursor, PageLimit, Revision};
+use super::{
+    ConfigurationScope, CursorPage, InventoryBalanceStatus, OpaqueCursor, PageLimit, Revision,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -270,6 +272,8 @@ pub struct CycleCountConfirmationResponse {
     pub inventory_transaction_id: Option<i64>,
     pub disposition: CycleCountDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_policy: Option<CountDecisionPolicyResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variance_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variance_revision: Option<Revision>,
@@ -277,6 +281,30 @@ pub struct CycleCountConfirmationResponse {
     pub next_recount_task_id: Option<i64>,
     pub confirmed_by: i64,
     pub confirmed_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountDecisionPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountDecisionPolicyResponse {
+    pub source: CountDecisionPolicySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_revision: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub absolute_tolerance_quantity: i64,
+    pub percentage_tolerance_basis_points: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_threshold_quantity: Option<i64>,
+    pub policy_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +446,7 @@ pub struct CycleCountVarianceResponse {
     pub absolute_tolerance_quantity: i64,
     pub percentage_tolerance_basis_points: u32,
     pub automatic_recount_limit: u16,
+    pub decision_policy: CountDecisionPolicyResponse,
     pub latest_task_id: i64,
     pub latest_attempt_sequence: u16,
     pub automatic_recounts_used: u16,
@@ -557,5 +586,19 @@ mod tests {
             decision.decision,
             CycleCountVarianceDecision::RequestRecount
         );
+    }
+
+    #[test]
+    fn count_decision_evidence_is_typed_and_strict() {
+        let policy = serde_json::from_str::<CountDecisionPolicyResponse>(
+            r#"{"source":"configuration","configuration_id":41,"configuration_revision":3,"configuration_scope":{"level":"facility","facility_id":7},"absolute_tolerance_quantity":2,"percentage_tolerance_basis_points":100,"approval_threshold_quantity":5,"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        )
+        .unwrap();
+        assert_eq!(policy.source, CountDecisionPolicySource::Configuration);
+        assert_eq!(policy.configuration_revision, Revision::new(3).ok());
+        assert!(serde_json::from_str::<CountDecisionPolicyResponse>(
+            r#"{"source":"product_default","absolute_tolerance_quantity":2,"percentage_tolerance_basis_points":100,"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","unknown":true}"#,
+        )
+        .is_err());
     }
 }

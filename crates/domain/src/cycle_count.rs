@@ -236,17 +236,44 @@ pub fn decide_cycle_count_disposition(
     variance_quantity: i64,
     automatic_recounts_used: u16,
 ) -> Result<CycleCountDisposition, CycleCountError> {
+    decide_cycle_count_disposition_with_approval_threshold(
+        policy,
+        system_quantity,
+        variance_quantity,
+        automatic_recounts_used,
+        None,
+    )
+}
+
+/// Applies the effective Count decision rule before the operational recount
+/// limit. A configured threshold can route a material variance directly to
+/// approval without spending time on automatic recounts.
+pub fn decide_cycle_count_disposition_with_approval_threshold(
+    policy: CycleCountTolerancePolicy,
+    system_quantity: i64,
+    variance_quantity: i64,
+    automatic_recounts_used: u16,
+    approval_threshold_quantity: Option<i64>,
+) -> Result<CycleCountDisposition, CycleCountError> {
     if automatic_recounts_used > policy.automatic_recount_limit {
         return Err(CycleCountError::RecountUsageExceedsLimit {
             used: automatic_recounts_used,
             limit: policy.automatic_recount_limit,
         });
     }
+    if let Some(threshold) = approval_threshold_quantity {
+        if threshold < 0 {
+            return Err(CycleCountError::NegativeApprovalThreshold { value: threshold });
+        }
+    }
     let magnitude = variance_quantity
         .checked_abs()
         .ok_or(CycleCountError::VarianceMagnitudeOverflow)?;
     if magnitude <= policy.allowed_variance_quantity(system_quantity)? {
         return Ok(CycleCountDisposition::Posted);
+    }
+    if approval_threshold_quantity.is_some_and(|threshold| magnitude >= threshold) {
+        return Ok(CycleCountDisposition::ApprovalRequired);
     }
     if automatic_recounts_used < policy.automatic_recount_limit {
         Ok(CycleCountDisposition::RecountRequired)
@@ -271,6 +298,8 @@ pub enum CycleCountError {
     ToleranceOverflow,
     #[error("cycle count variance magnitude is out of range")]
     VarianceMagnitudeOverflow,
+    #[error("cycle count approval threshold cannot be negative, got {value}")]
+    NegativeApprovalThreshold { value: i64 },
     #[error("cycle count recount usage {used} exceeds configured limit {limit}")]
     RecountUsageExceedsLimit { used: u16, limit: u16 },
     #[error("cycle count variance note is invalid")]
@@ -316,6 +345,23 @@ mod tests {
         assert_eq!(
             decide_cycle_count_disposition(policy, 10, -3, 1),
             Ok(CycleCountDisposition::ApprovalRequired)
+        );
+    }
+
+    #[test]
+    fn configured_threshold_routes_material_variance_directly_to_approval() {
+        let policy = CycleCountTolerancePolicy::new(1, 0, 2).unwrap();
+        assert_eq!(
+            decide_cycle_count_disposition_with_approval_threshold(policy, 10, -3, 0, Some(5),),
+            Ok(CycleCountDisposition::RecountRequired)
+        );
+        assert_eq!(
+            decide_cycle_count_disposition_with_approval_threshold(policy, 10, -5, 0, Some(5),),
+            Ok(CycleCountDisposition::ApprovalRequired)
+        );
+        assert_eq!(
+            decide_cycle_count_disposition_with_approval_threshold(policy, 10, -5, 0, Some(-1),),
+            Err(CycleCountError::NegativeApprovalThreshold { value: -1 })
         );
     }
 

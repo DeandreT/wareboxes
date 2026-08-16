@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use wareboxes_domain::{InventoryOwnerId, OwnerScope, SiteScope, TenantId, TenantStatus, UserId};
+use wareboxes_domain::{
+    ConfigurationScope, ConfigurationVersionId, InventoryOwnerId, OwnerScope, SiteScope, TenantId,
+    TenantStatus, UserId,
+};
 
 pub use wareboxes_domain::{OrderHoldReason, OrderStatus, Timestamp};
 
@@ -2088,12 +2091,32 @@ pub struct ItemLocationCycleCountConfirmation {
     pub variance_quantity: i64,
     pub inventory_transaction_id: Option<i64>,
     pub disposition: wareboxes_domain::CycleCountDisposition,
+    pub decision_policy: Option<CycleCountDecisionPolicySnapshot>,
     pub variance_id: Option<wareboxes_domain::CycleCountVarianceId>,
     pub variance_revision: Option<wareboxes_domain::CycleCountVarianceRevision>,
     pub next_recount_task_id: Option<i64>,
     pub confirmed_by: i64,
     pub confirmed_at: Timestamp,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountDecisionPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountDecisionPolicySnapshot {
+    pub source: CycleCountDecisionPolicySource,
+    pub configuration_id: Option<ConfigurationVersionId>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub absolute_tolerance_quantity: i64,
+    pub percentage_tolerance_basis_points: u32,
+    pub approval_threshold_quantity: Option<i64>,
+    pub policy_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

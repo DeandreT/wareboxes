@@ -140,6 +140,12 @@ pub async fn cycle_count_variance_page(
                variance.inventory_status, variance.policy_id,
                variance.policy_revision, variance.absolute_tolerance_qty,
                variance.percentage_tolerance_bps, variance.automatic_recount_limit,
+               variance.count_policy_source, variance.count_configuration_id,
+               variance.count_configuration_revision, variance.count_scope_level,
+               variance.count_inventory_owner_id, variance.count_facility_id,
+               variance.count_absolute_tolerance_qty,
+               variance.count_percentage_tolerance_bps,
+               variance.count_approval_threshold_qty, variance.count_policy_hash,
                variance.latest_task_id, variance.latest_attempt_sequence,
                variance.automatic_recounts_used, variance.system_qty_on_hand,
                variance.counted_qty, variance.variance_qty,
@@ -246,6 +252,7 @@ fn map_variance(row: &sqlx::postgres::PgRow) -> AppResult<CycleCountVarianceRead
         policy_id: id(row, "policy_id", CycleCountPolicyId::new)?,
         policy_revision: revision(row, "policy_revision")?,
         policy: policy(row)?,
+        decision_policy: super::decision_policy::count_decision_policy_from_row(row)?,
         latest_task_id: row.try_get("latest_task_id")?,
         latest_attempt_sequence: u16::try_from(row.try_get::<i16, _>("latest_attempt_sequence")?)
             .map_err(|_| {

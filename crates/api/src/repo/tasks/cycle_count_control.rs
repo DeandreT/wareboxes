@@ -1,6 +1,7 @@
 //! Transaction-scoped cycle-count policy and variance lifecycle support.
 
 mod decision;
+mod decision_policy;
 mod policy;
 mod read_model;
 
@@ -10,10 +11,12 @@ pub use read_model::*;
 
 use sqlx::Row;
 use wareboxes_domain::{
-    decide_cycle_count_disposition, CycleCountDisposition, CycleCountPolicyId,
-    CycleCountPolicyRevision, CycleCountTolerancePolicy, CycleCountVarianceId,
-    CycleCountVarianceRevision, CycleCountVarianceStatus,
+    decide_cycle_count_disposition_with_approval_threshold, CycleCountDisposition,
+    CycleCountPolicyId, CycleCountPolicyRevision, CycleCountTolerancePolicy, CycleCountVarianceId,
+    CycleCountVarianceRevision, CycleCountVarianceStatus, FacilityId, InventoryOwnerId,
 };
+
+use wareboxes_application::count_decision_policy::CountDecisionPolicyReadModel;
 
 use crate::error::{AppError, AppResult};
 
@@ -27,7 +30,7 @@ pub(super) struct CountPolicySnapshot {
     pub policy: CycleCountTolerancePolicy,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct PreparedCountControl {
     pub disposition: CycleCountDisposition,
     pub policy: Option<CountPolicySnapshot>,
@@ -36,6 +39,7 @@ pub(super) struct PreparedCountControl {
     pub attempt_sequence: u16,
     pub automatic_recounts_used: u16,
     pub allowed_variance_quantity: Option<i64>,
+    pub decision_policy: Option<CountDecisionPolicyReadModel>,
 }
 
 pub(super) struct AdvancedCountControl {
@@ -80,16 +84,34 @@ pub(super) async fn prepare_count_control_tx(
             attempt_sequence: target.attempt_sequence,
             automatic_recounts_used: 0,
             allowed_variance_quantity: None,
+            decision_policy: None,
         });
     };
-
-    let allowed = policy
-        .policy
+    let decision_policy = decision_policy::resolve_count_decision_policy_tx(
+        tx,
+        tenant_id,
+        InventoryOwnerId::new(target.inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        FacilityId::new(target.facility_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        occurred_at,
+        policy.policy,
+    )
+    .await?;
+    let effective_tolerance = decision_policy
+        .tolerance_policy(policy.policy.automatic_recount_limit())
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let allowed = effective_tolerance
         .allowed_variance_quantity(balance.qty_on_hand)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let disposition =
-        decide_cycle_count_disposition(policy.policy, balance.qty_on_hand, variance_quantity, 0)
-            .map_err(|error| AppError::internal(error.to_string()))?;
+    let disposition = decide_cycle_count_disposition_with_approval_threshold(
+        effective_tolerance,
+        balance.qty_on_hand,
+        variance_quantity,
+        0,
+        decision_policy.approval_threshold_quantity,
+    )
+    .map_err(|error| AppError::internal(error.to_string()))?;
     if disposition == CycleCountDisposition::Posted {
         return Ok(PreparedCountControl {
             disposition,
@@ -99,6 +121,7 @@ pub(super) async fn prepare_count_control_tx(
             attempt_sequence: target.attempt_sequence,
             automatic_recounts_used: 0,
             allowed_variance_quantity: Some(allowed),
+            decision_policy: Some(decision_policy),
         });
     }
 
@@ -107,6 +130,7 @@ pub(super) async fn prepare_count_control_tx(
         CycleCountDisposition::ApprovalRequired => "awaiting_approval",
         CycleCountDisposition::Posted => unreachable!(),
     };
+    let decision = decision_policy::count_decision_policy_bindings(&decision_policy)?;
     let row =
         sqlx::query(
             r#"
@@ -118,11 +142,16 @@ pub(super) async fn prepare_count_control_tx(
             automatic_recount_limit, latest_task_id, latest_attempt_sequence,
             automatic_recounts_used, system_qty_on_hand, system_qty_reserved,
             system_qty_held, counted_qty, variance_qty, allowed_variance_qty,
-            state, revision, created_at, modified_at
+            state, revision, created_at, modified_at, count_policy_source,
+            count_configuration_id, count_configuration_revision, count_scope_level,
+            count_inventory_owner_id, count_facility_id,
+            count_absolute_tolerance_qty, count_percentage_tolerance_bps,
+            count_approval_threshold_qty, count_policy_hash
         )
         VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,0,$21,$22,$23,$24,$25,$26,$27,1,$28,$28
+            $18,$19,$20,0,$21,$22,$23,$24,$25,$26,$27,1,$28,$28,$29,$30,
+            $31,$32,$33,$34,$35,$36,$37,$38
         )
         RETURNING id
         "#,
@@ -142,12 +171,8 @@ pub(super) async fn prepare_count_control_tx(
         .bind(balance.status.as_str())
         .bind(policy.id.get())
         .bind(policy.revision.get())
-        .bind(policy.policy.absolute_tolerance_quantity())
-        .bind(
-            i32::try_from(policy.policy.percentage_tolerance_basis_points()).map_err(|_| {
-                AppError::internal("cycle count percentage tolerance is out of database range")
-            })?,
-        )
+        .bind(decision.absolute_tolerance_quantity)
+        .bind(decision.percentage_tolerance_basis_points)
         .bind(
             i16::try_from(policy.policy.automatic_recount_limit()).map_err(|_| {
                 AppError::internal("cycle count recount limit is out of database range")
@@ -165,6 +190,16 @@ pub(super) async fn prepare_count_control_tx(
         .bind(allowed)
         .bind(state)
         .bind(occurred_at)
+        .bind(decision.source)
+        .bind(decision.configuration_id)
+        .bind(decision.configuration_revision)
+        .bind(decision.scope_level)
+        .bind(decision.inventory_owner_id)
+        .bind(decision.facility_id)
+        .bind(decision.absolute_tolerance_quantity)
+        .bind(decision.percentage_tolerance_basis_points)
+        .bind(decision.approval_threshold_quantity)
+        .bind(decision.policy_hash)
         .fetch_one(&mut **tx)
         .await?;
     let variance_id = CycleCountVarianceId::new(row.try_get("id")?)
@@ -199,6 +234,7 @@ pub(super) async fn prepare_count_control_tx(
         attempt_sequence: target.attempt_sequence,
         automatic_recounts_used: 0,
         allowed_variance_quantity: Some(allowed),
+        decision_policy: Some(decision_policy),
     })
 }
 
@@ -220,7 +256,11 @@ async fn prepare_existing_case_tx(
                absolute_tolerance_qty, percentage_tolerance_bps,
                automatic_recount_limit, inventory_balance_id, location_id,
                item_id, item_batch_id, license_plate_id, uom, lot, expiration,
-               serial, inventory_status
+               serial, inventory_status, count_policy_source,
+               count_configuration_id, count_configuration_revision,
+               count_scope_level, count_inventory_owner_id, count_facility_id,
+               count_absolute_tolerance_qty, count_percentage_tolerance_bps,
+               count_approval_threshold_qty, count_policy_hash
         FROM cycle_count_variance_cases
         WHERE tenant_id=$1 AND inventory_owner_id=$2 AND facility_id=$3 AND id=$4
         FOR UPDATE
@@ -254,10 +294,10 @@ async fn prepare_existing_case_tx(
             "cycle count recount no longer matches its variance case",
         ));
     }
+    let decision_policy = decision_policy::count_decision_policy_from_row(&row)?;
     let policy = CycleCountTolerancePolicy::new(
-        row.try_get("absolute_tolerance_qty")?,
-        u32::try_from(row.try_get::<i32, _>("percentage_tolerance_bps")?)
-            .map_err(|_| AppError::internal("stored cycle count percentage is invalid"))?,
+        decision_policy.absolute_tolerance_quantity,
+        decision_policy.percentage_tolerance_basis_points,
         u16::try_from(row.try_get::<i16, _>("automatic_recount_limit")?)
             .map_err(|_| AppError::internal("stored cycle count recount limit is invalid"))?,
     )
@@ -267,11 +307,12 @@ async fn prepare_existing_case_tx(
     let allowed = policy
         .allowed_variance_quantity(balance.qty_on_hand)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let disposition = decide_cycle_count_disposition(
+    let disposition = decide_cycle_count_disposition_with_approval_threshold(
         policy,
         balance.qty_on_hand,
         variance_quantity,
         automatic_recounts_used,
+        decision_policy.approval_threshold_quantity,
     )
     .map_err(|error| AppError::internal(error.to_string()))?;
     Ok(PreparedCountControl {
@@ -291,6 +332,7 @@ async fn prepare_existing_case_tx(
         attempt_sequence: target.attempt_sequence,
         automatic_recounts_used,
         allowed_variance_quantity: Some(allowed),
+        decision_policy: Some(decision_policy),
     })
 }
 

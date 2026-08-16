@@ -51298,3 +51298,203 @@ REVOKE ALL ON FUNCTION public.require_pick_cluster_complete_plan() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_pick_cart_slot_set() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_cluster_reservation_on_pick_claim() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reconcile_pick_cluster_task() FROM PUBLIC;
+
+-- Execute inherited Count decision rules while retaining the operational
+-- cycle-count policy as the source of the bounded automatic recount limit.
+ALTER TABLE public.cycle_count_item_location_results
+  ADD COLUMN count_policy_source text,
+  ADD COLUMN count_configuration_id bigint,
+  ADD COLUMN count_configuration_revision bigint,
+  ADD COLUMN count_scope_level text,
+  ADD COLUMN count_inventory_owner_id bigint,
+  ADD COLUMN count_facility_id bigint,
+  ADD COLUMN count_absolute_tolerance_qty bigint,
+  ADD COLUMN count_percentage_tolerance_bps integer,
+  ADD COLUMN count_approval_threshold_qty bigint,
+  ADD COLUMN count_policy_hash text,
+  ADD CONSTRAINT cycle_count_results_count_policy_shape CHECK (
+    (policy_id IS NULL AND count_policy_source IS NULL
+      AND count_configuration_id IS NULL AND count_configuration_revision IS NULL
+      AND count_scope_level IS NULL AND count_inventory_owner_id IS NULL
+      AND count_facility_id IS NULL AND count_absolute_tolerance_qty IS NULL
+      AND count_percentage_tolerance_bps IS NULL
+      AND count_approval_threshold_qty IS NULL AND count_policy_hash IS NULL)
+    OR
+    (policy_id IS NOT NULL AND count_policy_source IN ('product_default','configuration')
+      AND count_absolute_tolerance_qty=absolute_tolerance_qty
+      AND count_percentage_tolerance_bps=percentage_tolerance_bps
+      AND count_absolute_tolerance_qty>=0
+      AND count_percentage_tolerance_bps BETWEEN 0 AND 10000
+      AND count_policy_hash~'^[0-9a-f]{64}$'
+      AND ((count_policy_source='product_default'
+        AND count_configuration_id IS NULL AND count_configuration_revision IS NULL
+        AND count_scope_level IS NULL AND count_inventory_owner_id IS NULL
+        AND count_facility_id IS NULL AND count_approval_threshold_qty IS NULL)
+      OR (count_policy_source='configuration'
+        AND count_configuration_id IS NOT NULL AND count_configuration_revision>0
+        AND count_approval_threshold_qty>=count_absolute_tolerance_qty
+        AND ((count_scope_level='tenant' AND count_inventory_owner_id IS NULL
+              AND count_facility_id IS NULL)
+          OR (count_scope_level='inventory_owner' AND count_inventory_owner_id IS NOT NULL
+              AND count_facility_id IS NULL)
+          OR (count_scope_level='facility' AND count_inventory_owner_id IS NULL
+              AND count_facility_id IS NOT NULL)
+          OR (count_scope_level='owner_facility' AND count_inventory_owner_id IS NOT NULL
+              AND count_facility_id IS NOT NULL)))))),
+  ADD CONSTRAINT cycle_count_results_count_configuration_fkey
+    FOREIGN KEY(tenant_id,count_configuration_id)
+    REFERENCES public.configuration_versions(tenant_id,id);
+
+ALTER TABLE public.cycle_count_variance_cases
+  ADD COLUMN count_policy_source text NOT NULL,
+  ADD COLUMN count_configuration_id bigint,
+  ADD COLUMN count_configuration_revision bigint,
+  ADD COLUMN count_scope_level text,
+  ADD COLUMN count_inventory_owner_id bigint,
+  ADD COLUMN count_facility_id bigint,
+  ADD COLUMN count_absolute_tolerance_qty bigint NOT NULL,
+  ADD COLUMN count_percentage_tolerance_bps integer NOT NULL,
+  ADD COLUMN count_approval_threshold_qty bigint,
+  ADD COLUMN count_policy_hash text NOT NULL,
+  ADD CONSTRAINT cycle_count_variances_count_policy_shape CHECK (
+    count_policy_source IN ('product_default','configuration')
+    AND count_absolute_tolerance_qty=absolute_tolerance_qty
+    AND count_percentage_tolerance_bps=percentage_tolerance_bps
+    AND count_absolute_tolerance_qty>=0
+    AND count_percentage_tolerance_bps BETWEEN 0 AND 10000
+    AND count_policy_hash~'^[0-9a-f]{64}$'
+    AND ((count_policy_source='product_default'
+      AND count_configuration_id IS NULL AND count_configuration_revision IS NULL
+      AND count_scope_level IS NULL AND count_inventory_owner_id IS NULL
+      AND count_facility_id IS NULL AND count_approval_threshold_qty IS NULL)
+    OR (count_policy_source='configuration'
+      AND count_configuration_id IS NOT NULL AND count_configuration_revision>0
+      AND count_approval_threshold_qty>=count_absolute_tolerance_qty
+      AND ((count_scope_level='tenant' AND count_inventory_owner_id IS NULL
+            AND count_facility_id IS NULL)
+        OR (count_scope_level='inventory_owner' AND count_inventory_owner_id IS NOT NULL
+            AND count_facility_id IS NULL)
+        OR (count_scope_level='facility' AND count_inventory_owner_id IS NULL
+            AND count_facility_id IS NOT NULL)
+        OR (count_scope_level='owner_facility' AND count_inventory_owner_id IS NOT NULL
+            AND count_facility_id IS NOT NULL))))),
+  ADD CONSTRAINT cycle_count_variances_count_configuration_fkey
+    FOREIGN KEY(tenant_id,count_configuration_id)
+    REFERENCES public.configuration_versions(tenant_id,id);
+
+CREATE INDEX cycle_count_results_count_configuration_idx
+ON public.cycle_count_item_location_results(tenant_id,count_configuration_id)
+WHERE count_configuration_id IS NOT NULL;
+CREATE INDEX cycle_count_variances_count_configuration_idx
+ON public.cycle_count_variance_cases(tenant_id,count_configuration_id)
+WHERE count_configuration_id IS NOT NULL;
+
+CREATE FUNCTION public.validate_count_decision_snapshot() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE effective_at timestamptz;
+DECLARE resolved public.configuration_versions%ROWTYPE;
+DECLARE scope_component text;
+DECLARE calculated_hash text;
+BEGIN
+  IF TG_TABLE_NAME='cycle_count_variance_cases' THEN
+    effective_at:=NEW.created_at;
+  ELSE
+    effective_at:=NEW.confirmed_at;
+  END IF;
+  IF NEW.policy_id IS NULL THEN
+    IF NEW.count_policy_source IS NOT NULL THEN
+      RAISE EXCEPTION 'uncontrolled cycle count cannot carry Count policy evidence'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  SELECT configuration.* INTO resolved
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id AND configuration.kind='count'
+    AND configuration.status='active' AND configuration.activated_at<=effective_at
+    AND configuration.effective_from<=effective_at
+    AND (configuration.effective_until IS NULL OR configuration.effective_until>effective_at)
+    AND (configuration.inventory_owner_id IS NULL
+      OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level WHEN 'owner_facility' THEN 2
+    WHEN 'inventory_owner' THEN 1 WHEN 'facility' THEN 1 ELSE 0 END DESC,
+    configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+
+  IF NEW.count_policy_source='product_default' THEN
+    IF resolved.id IS NOT NULL OR NEW.count_configuration_id IS NOT NULL
+      OR NEW.count_configuration_revision IS NOT NULL OR NEW.count_scope_level IS NOT NULL
+      OR NEW.count_inventory_owner_id IS NOT NULL OR NEW.count_facility_id IS NOT NULL
+      OR NEW.count_approval_threshold_qty IS NOT NULL THEN
+      RAISE EXCEPTION 'product-default Count evidence does not match effective configuration'
+        USING ERRCODE='23514';
+    END IF;
+    scope_component:='-';
+  ELSE
+    IF resolved.id IS NULL OR NEW.count_configuration_id IS DISTINCT FROM resolved.id
+      OR NEW.count_configuration_revision IS DISTINCT FROM resolved.revision
+      OR NEW.count_scope_level IS DISTINCT FROM resolved.scope_level
+      OR NEW.count_inventory_owner_id IS DISTINCT FROM resolved.inventory_owner_id
+      OR NEW.count_facility_id IS DISTINCT FROM resolved.facility_id
+      OR NEW.count_absolute_tolerance_qty
+        IS DISTINCT FROM (resolved.definition->>'absolute_tolerance')::bigint
+      OR NEW.count_percentage_tolerance_bps
+        IS DISTINCT FROM (resolved.definition->>'percentage_tolerance_basis_points')::integer
+      OR NEW.count_approval_threshold_qty
+        IS DISTINCT FROM (resolved.definition->>'approval_threshold')::bigint THEN
+      RAISE EXCEPTION 'configured Count evidence does not match effective configuration'
+        USING ERRCODE='23514';
+    END IF;
+    scope_component:=CASE NEW.count_scope_level
+      WHEN 'tenant' THEN 'tenant'
+      WHEN 'inventory_owner' THEN 'inventory_owner:'||NEW.count_inventory_owner_id::text
+      WHEN 'facility' THEN 'facility:'||NEW.count_facility_id::text
+      WHEN 'owner_facility' THEN 'owner_facility:'||NEW.count_inventory_owner_id::text
+        ||':'||NEW.count_facility_id::text END;
+  END IF;
+
+  calculated_hash:=encode(sha256(convert_to(
+    'count-decision-policy-v1|'||NEW.count_policy_source||'|'
+    ||COALESCE(NEW.count_configuration_id::text,'-')||'|'
+    ||COALESCE(NEW.count_configuration_revision::text,'-')||'|'
+    ||scope_component||'|'||NEW.count_absolute_tolerance_qty::text||'|'
+    ||NEW.count_percentage_tolerance_bps::text||'|'
+    ||COALESCE(NEW.count_approval_threshold_qty::text,'-'),'UTF8')),'hex');
+  IF NEW.count_policy_hash IS DISTINCT FROM calculated_hash THEN
+    RAISE EXCEPTION 'Count policy hash is inconsistent' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_count_decision_snapshot() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF ROW(NEW.count_policy_source,NEW.count_configuration_id,
+      NEW.count_configuration_revision,NEW.count_scope_level,
+      NEW.count_inventory_owner_id,NEW.count_facility_id,
+      NEW.count_absolute_tolerance_qty,NEW.count_percentage_tolerance_bps,
+      NEW.count_approval_threshold_qty,NEW.count_policy_hash)
+    IS DISTINCT FROM ROW(OLD.count_policy_source,OLD.count_configuration_id,
+      OLD.count_configuration_revision,OLD.count_scope_level,
+      OLD.count_inventory_owner_id,OLD.count_facility_id,
+      OLD.count_absolute_tolerance_qty,OLD.count_percentage_tolerance_bps,
+      OLD.count_approval_threshold_qty,OLD.count_policy_hash) THEN
+    RAISE EXCEPTION 'Count decision evidence is immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER cycle_count_results_validate_count_policy
+BEFORE INSERT ON public.cycle_count_item_location_results
+FOR EACH ROW EXECUTE FUNCTION public.validate_count_decision_snapshot();
+CREATE TRIGGER cycle_count_variances_validate_count_policy
+BEFORE INSERT ON public.cycle_count_variance_cases
+FOR EACH ROW EXECUTE FUNCTION public.validate_count_decision_snapshot();
+CREATE TRIGGER cycle_count_variances_guard_count_policy
+BEFORE UPDATE ON public.cycle_count_variance_cases
+FOR EACH ROW EXECUTE FUNCTION public.guard_count_decision_snapshot();
+
+REVOKE ALL ON FUNCTION public.validate_count_decision_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_count_decision_snapshot() FROM PUBLIC;

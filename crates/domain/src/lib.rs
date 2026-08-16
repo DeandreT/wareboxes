@@ -84,11 +84,12 @@ pub use customer_return::{
     MAX_CUSTOMER_RETURN_NUMBER_LENGTH, MAX_CUSTOMER_RETURN_REFERENCE_LENGTH,
 };
 pub use cycle_count::{
-    decide_cycle_count_disposition, CycleCountDisposition, CycleCountError,
-    CycleCountPolicyRevision, CycleCountTolerancePolicy, CycleCountVarianceDecision,
-    CycleCountVarianceDecisionDetails, CycleCountVarianceNote, CycleCountVarianceReason,
-    CycleCountVarianceRevision, CycleCountVarianceStatus, MAX_CYCLE_COUNT_PERCENTAGE_BASIS_POINTS,
-    MAX_CYCLE_COUNT_RECOUNTS, MAX_CYCLE_COUNT_VARIANCE_NOTE_LENGTH,
+    decide_cycle_count_disposition, decide_cycle_count_disposition_with_approval_threshold,
+    CycleCountDisposition, CycleCountError, CycleCountPolicyRevision, CycleCountTolerancePolicy,
+    CycleCountVarianceDecision, CycleCountVarianceDecisionDetails, CycleCountVarianceNote,
+    CycleCountVarianceReason, CycleCountVarianceRevision, CycleCountVarianceStatus,
+    MAX_CYCLE_COUNT_PERCENTAGE_BASIS_POINTS, MAX_CYCLE_COUNT_RECOUNTS,
+    MAX_CYCLE_COUNT_VARIANCE_NOTE_LENGTH,
 };
 pub use facility::{
     FacilityRevision, FacilityShippingOrigin, FacilityShippingOriginError,

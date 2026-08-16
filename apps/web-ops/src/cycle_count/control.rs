@@ -3,10 +3,10 @@
 use leptos::prelude::*;
 use lucide_leptos::{Eye, Plus, RefreshCw, RotateCcw, Save, X};
 use wareboxes_api_contract::v1::{
-    ConfigureCycleCountPolicyRequest, CycleCountPolicyPage, CycleCountPolicyResponse,
-    CycleCountVarianceDecision, CycleCountVariancePage, CycleCountVarianceReason,
-    CycleCountVarianceResponse, CycleCountVarianceStatus, DecideCycleCountVarianceRequest,
-    OpaqueCursor,
+    ConfigurationScope, ConfigureCycleCountPolicyRequest, CountDecisionPolicySource,
+    CycleCountPolicyPage, CycleCountPolicyResponse, CycleCountVarianceDecision,
+    CycleCountVariancePage, CycleCountVarianceReason, CycleCountVarianceResponse,
+    CycleCountVarianceStatus, DecideCycleCountVarianceRequest, OpaqueCursor,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
@@ -308,7 +308,44 @@ fn VarianceTable(signals: VarianceSignals, layout: SplitPaneState) -> impl IntoV
 #[component]
 fn VarianceDetail(variance: CycleCountVarianceResponse, signals: VarianceSignals) -> impl IntoView {
     let action = StoredValue::new(variance.clone());
-    view! {<div class="cycle-count-panel"><header><span class="eyebrow">"Count evidence"</span><h2>{format!("Variance #{}",variance.variance_id)}</h2><span class=variance_status_class(variance.status)>{variance_status_label(variance.status)}</span></header><dl class="cycle-count-facts"><div><dt>"Client / facility"</dt><dd>{format!("{} / {}",variance.inventory_owner_name,variance.facility_name)}</dd></div><div><dt>"Location"</dt><dd>{variance.stock.location_barcode.clone()}</dd></div><div><dt>"Inventory"</dt><dd>{variance.stock.primary_sku.clone().or(variance.stock.item_description.clone()).unwrap_or_else(||format!("Item #{}",variance.stock.item_id))}</dd></div><div><dt>"Trace"</dt><dd>{trace_label(&variance)}</dd></div><div><dt>"System / counted"</dt><dd>{format!("{} / {} {}",format_quantity(variance.system_quantity),format_quantity(variance.counted_quantity),variance.stock.uom)}</dd></div><div><dt>"Variance / allowed"</dt><dd class="variance-nonzero">{format!("{:+} / ±{}",variance.variance_quantity,variance.allowed_variance_quantity)}</dd></div><div><dt>"Policy"</dt><dd>{format!("Abs {} / {:.2}% / {} recounts",variance.absolute_tolerance_quantity,f64::from(variance.percentage_tolerance_basis_points)/100.0,variance.automatic_recount_limit)}</dd></div><div><dt>"Attempt"</dt><dd>{format!("#{} / {} automatic",variance.latest_attempt_sequence,variance.automatic_recounts_used)}</dd></div><div><dt>"Revision"</dt><dd>{format!("r{}",variance.revision)}</dd></div><div><dt>"Adjustment"</dt><dd>{variance.inventory_transaction_id.map_or_else(||"Not posted".to_owned(),|id|format!("Transaction #{id}"))}</dd></div></dl><Show when=move ||action.with_value(|value|value.status==CycleCountVarianceStatus::AwaitingApproval)><footer><button type="button" class="button primary-action" on:click=move |_|signals.dialog.set(Some(action.with_value(Clone::clone)))>"Review decision"</button></footer></Show></div>}
+    let decision = count_decision_summary(&variance);
+    view! {<div class="cycle-count-panel"><header><span class="eyebrow">"Count evidence"</span><h2>{format!("Variance #{}",variance.variance_id)}</h2><span class=variance_status_class(variance.status)>{variance_status_label(variance.status)}</span></header><dl class="cycle-count-facts"><div><dt>"Client / facility"</dt><dd>{format!("{} / {}",variance.inventory_owner_name,variance.facility_name)}</dd></div><div><dt>"Location"</dt><dd>{variance.stock.location_barcode.clone()}</dd></div><div><dt>"Inventory"</dt><dd>{variance.stock.primary_sku.clone().or(variance.stock.item_description.clone()).unwrap_or_else(||format!("Item #{}",variance.stock.item_id))}</dd></div><div><dt>"Trace"</dt><dd>{trace_label(&variance)}</dd></div><div><dt>"System / counted"</dt><dd>{format!("{} / {} {}",format_quantity(variance.system_quantity),format_quantity(variance.counted_quantity),variance.stock.uom)}</dd></div><div><dt>"Variance / allowed"</dt><dd class="variance-nonzero">{format!("{:+} / ±{}",variance.variance_quantity,variance.allowed_variance_quantity)}</dd></div><div><dt>"Operational control"</dt><dd>{format!("Policy #{} r{} / {} recounts",variance.policy_id,variance.policy_revision,variance.automatic_recount_limit)}</dd></div><div><dt>"Count decision"</dt><dd>{decision}</dd></div><div><dt>"Attempt"</dt><dd>{format!("#{} / {} automatic",variance.latest_attempt_sequence,variance.automatic_recounts_used)}</dd></div><div><dt>"Revision"</dt><dd>{format!("r{}",variance.revision)}</dd></div><div><dt>"Adjustment"</dt><dd>{variance.inventory_transaction_id.map_or_else(||"Not posted".to_owned(),|id|format!("Transaction #{id}"))}</dd></div></dl><Show when=move ||action.with_value(|value|value.status==CycleCountVarianceStatus::AwaitingApproval)><footer><button type="button" class="button primary-action" on:click=move |_|signals.dialog.set(Some(action.with_value(Clone::clone)))>"Review decision"</button></footer></Show></div>}
+}
+
+fn count_decision_summary(variance: &CycleCountVarianceResponse) -> String {
+    let policy = &variance.decision_policy;
+    let source = match policy.source {
+        CountDecisionPolicySource::ProductDefault => "operational default".to_owned(),
+        CountDecisionPolicySource::Configuration => format!(
+            "configuration #{} r{} ({})",
+            policy.configuration_id.unwrap_or_default(),
+            policy
+                .configuration_revision
+                .map_or(0, wareboxes_api_contract::v1::Revision::get),
+            policy
+                .configuration_scope
+                .map(configuration_scope_label)
+                .unwrap_or("invalid scope")
+        ),
+    };
+    let threshold = policy.approval_threshold_quantity.map_or_else(
+        || "after recount limit".to_owned(),
+        |quantity| format!("at ±{quantity}"),
+    );
+    format!(
+        "{source}; tolerance {} / {:.2}%; approval {threshold}",
+        policy.absolute_tolerance_quantity,
+        f64::from(policy.percentage_tolerance_basis_points) / 100.0,
+    )
+}
+
+const fn configuration_scope_label(scope: ConfigurationScope) -> &'static str {
+    match scope {
+        ConfigurationScope::Tenant => "tenant",
+        ConfigurationScope::InventoryOwner { .. } => "client",
+        ConfigurationScope::Facility { .. } => "facility",
+        ConfigurationScope::OwnerFacility { .. } => "client + facility",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -650,6 +687,6 @@ mod tests {
         )
     }
     fn sample_variance() -> CycleCountVarianceResponse {
-        serde_json::from_value(serde_json::json!({"variance_id":1,"revision":2,"status":"awaiting_approval","inventory_owner_id":1,"inventory_owner_name":"Owner","facility_id":1,"facility_name":"DC","stock":{"inventory_balance_id":1,"location_id":1,"location_barcode":"A-1","location_name":null,"item_id":1,"item_description":null,"primary_sku":null,"license_plate_barcode":null,"uom":"each","lot":null,"serial":null,"inventory_status":"available"},"policy_id":1,"policy_revision":1,"absolute_tolerance_quantity":0,"percentage_tolerance_basis_points":0,"automatic_recount_limit":0,"latest_task_id":1,"latest_attempt_sequence":1,"automatic_recounts_used":0,"system_quantity":10,"counted_quantity":5,"variance_quantity":-5,"allowed_variance_quantity":0,"inventory_transaction_id":null,"created_at":"2026-08-09T00:00:00Z","modified_at":"2026-08-09T00:00:00Z"})).unwrap()
+        serde_json::from_value(serde_json::json!({"variance_id":1,"revision":2,"status":"awaiting_approval","inventory_owner_id":1,"inventory_owner_name":"Owner","facility_id":1,"facility_name":"DC","stock":{"inventory_balance_id":1,"location_id":1,"location_barcode":"A-1","location_name":null,"item_id":1,"item_description":null,"primary_sku":null,"license_plate_barcode":null,"uom":"each","lot":null,"serial":null,"inventory_status":"available"},"policy_id":1,"policy_revision":1,"absolute_tolerance_quantity":0,"percentage_tolerance_basis_points":0,"automatic_recount_limit":0,"decision_policy":{"source":"product_default","absolute_tolerance_quantity":0,"percentage_tolerance_basis_points":0,"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"latest_task_id":1,"latest_attempt_sequence":1,"automatic_recounts_used":0,"system_quantity":10,"counted_quantity":5,"variance_quantity":-5,"allowed_variance_quantity":0,"inventory_transaction_id":null,"created_at":"2026-08-09T00:00:00Z","modified_at":"2026-08-09T00:00:00Z"})).unwrap()
     }
 }

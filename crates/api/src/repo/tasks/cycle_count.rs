@@ -10,7 +10,13 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::lock_current_scope_tx;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
+use wareboxes_application::count_decision_policy::{
+    CountDecisionPolicyReadModel, CountDecisionPolicySource,
+};
 use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_core::models::{
+    CycleCountDecisionPolicySnapshot, CycleCountDecisionPolicySource as CoreCountPolicySource,
+};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
@@ -428,6 +434,10 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         variance_quantity,
         inventory_transaction_id,
         disposition: control.disposition,
+        decision_policy: control
+            .decision_policy
+            .as_ref()
+            .map(core_decision_policy_snapshot),
         variance_id: control.variance_id,
         variance_revision: control.variance_revision,
         next_recount_task_id: None,
@@ -447,11 +457,17 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
             disposition, variance_case_id, attempt_sequence, policy_id,
             policy_revision, absolute_tolerance_qty, percentage_tolerance_bps,
             automatic_recount_limit, allowed_variance_qty
+            , count_policy_source, count_configuration_id,
+            count_configuration_revision, count_scope_level,
+            count_inventory_owner_id, count_facility_id,
+            count_absolute_tolerance_qty, count_percentage_tolerance_bps,
+            count_approval_threshold_qty, count_policy_hash
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
             $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-            $27, $28, $29, $30, $31, $32
+            $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
+            $38, $39, $40, $41, $42
         )
         "#,
     )
@@ -492,14 +508,16 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
     .bind(control.policy.map(|policy| policy.revision.get()))
     .bind(
         control
-            .policy
-            .map(|policy| policy.policy.absolute_tolerance_quantity()),
+            .decision_policy
+            .as_ref()
+            .map(|policy| policy.absolute_tolerance_quantity),
     )
     .bind(
         control
-            .policy
+            .decision_policy
+            .as_ref()
             .map(|policy| {
-                i32::try_from(policy.policy.percentage_tolerance_basis_points()).map_err(|_| {
+                i32::try_from(policy.percentage_tolerance_basis_points).map_err(|_| {
                     AppError::internal("cycle count percentage is out of database range")
                 })
             })
@@ -516,6 +534,72 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
             .transpose()?,
     )
     .bind(control.allowed_variance_quantity)
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .map(|policy| policy.source.as_str()),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .and_then(|policy| policy.configuration_id)
+            .map(wareboxes_domain::ConfigurationVersionId::get),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .and_then(|policy| policy.configuration_revision),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .and_then(|policy| policy.configuration_scope)
+            .map(configuration_scope_level),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .and_then(|policy| policy.configuration_scope)
+            .and_then(configuration_scope_owner),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .and_then(|policy| policy.configuration_scope)
+            .and_then(configuration_scope_facility),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .map(|policy| policy.absolute_tolerance_quantity),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .map(|policy| i32::try_from(policy.percentage_tolerance_basis_points))
+            .transpose()
+            .map_err(|_| AppError::internal("Count percentage is out of database range"))?,
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .and_then(|policy| policy.approval_threshold_quantity),
+    )
+    .bind(
+        control
+            .decision_policy
+            .as_ref()
+            .map(|policy| policy.policy_hash.as_str()),
+    )
     .execute(&mut *tx)
     .await?;
 
@@ -604,6 +688,7 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
             wareboxes_domain::CycleCountDisposition::RecountRequired => "recount_required",
             wareboxes_domain::CycleCountDisposition::ApprovalRequired => "approval_required",
         },
+        "decision_policy": confirmation.decision_policy,
         "variance_id": confirmation.variance_id.map(|id| id.get()),
         "variance_revision": confirmation.variance_revision.map(|revision| revision.get()),
         "next_recount_task_id": confirmation.next_recount_task_id,
@@ -673,6 +758,55 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
     Ok(prepared
         .commit_with_inventory_transaction(tx, confirmation, inventory_transaction_id)
         .await?)
+}
+
+fn core_decision_policy_snapshot(
+    policy: &CountDecisionPolicyReadModel,
+) -> CycleCountDecisionPolicySnapshot {
+    CycleCountDecisionPolicySnapshot {
+        source: match policy.source {
+            CountDecisionPolicySource::ProductDefault => CoreCountPolicySource::ProductDefault,
+            CountDecisionPolicySource::Configuration => CoreCountPolicySource::Configuration,
+        },
+        configuration_id: policy.configuration_id,
+        configuration_revision: policy.configuration_revision,
+        configuration_scope: policy.configuration_scope,
+        absolute_tolerance_quantity: policy.absolute_tolerance_quantity,
+        percentage_tolerance_basis_points: policy.percentage_tolerance_basis_points,
+        approval_threshold_quantity: policy.approval_threshold_quantity,
+        policy_hash: policy.policy_hash.clone(),
+    }
+}
+
+const fn configuration_scope_level(scope: wareboxes_domain::ConfigurationScope) -> &'static str {
+    match scope {
+        wareboxes_domain::ConfigurationScope::Tenant => "tenant",
+        wareboxes_domain::ConfigurationScope::InventoryOwner { .. } => "inventory_owner",
+        wareboxes_domain::ConfigurationScope::Facility { .. } => "facility",
+        wareboxes_domain::ConfigurationScope::OwnerFacility { .. } => "owner_facility",
+    }
+}
+
+const fn configuration_scope_owner(scope: wareboxes_domain::ConfigurationScope) -> Option<i64> {
+    match scope {
+        wareboxes_domain::ConfigurationScope::InventoryOwner { inventory_owner_id }
+        | wareboxes_domain::ConfigurationScope::OwnerFacility {
+            inventory_owner_id, ..
+        } => Some(inventory_owner_id.get()),
+        wareboxes_domain::ConfigurationScope::Tenant
+        | wareboxes_domain::ConfigurationScope::Facility { .. } => None,
+    }
+}
+
+const fn configuration_scope_facility(scope: wareboxes_domain::ConfigurationScope) -> Option<i64> {
+    match scope {
+        wareboxes_domain::ConfigurationScope::Facility { facility_id }
+        | wareboxes_domain::ConfigurationScope::OwnerFacility { facility_id, .. } => {
+            Some(facility_id.get())
+        }
+        wareboxes_domain::ConfigurationScope::Tenant
+        | wareboxes_domain::ConfigurationScope::InventoryOwner { .. } => None,
+    }
 }
 
 async fn validate_scans_tx(

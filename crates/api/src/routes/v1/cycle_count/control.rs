@@ -376,6 +376,7 @@ fn map_variance(variance: CycleCountVarianceReadModel) -> AppResult<CycleCountVa
         absolute_tolerance_quantity: variance.policy.absolute_tolerance_quantity(),
         percentage_tolerance_basis_points: variance.policy.percentage_tolerance_basis_points(),
         automatic_recount_limit: variance.policy.automatic_recount_limit(),
+        decision_policy: super::map_count_decision_policy(variance.decision_policy)?,
         latest_task_id: variance.latest_task_id,
         latest_attempt_sequence: variance.latest_attempt_sequence,
         automatic_recounts_used: variance.automatic_recounts_used,

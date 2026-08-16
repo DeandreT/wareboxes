@@ -1,7 +1,9 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
-    ClaimCycleCountByIdRequest, ClaimNextCycleCountRequest, ConfirmCycleCountRequest,
+    ClaimCycleCountByIdRequest, ClaimNextCycleCountRequest,
+    ConfigurationScope as ApiConfigurationScope, ConfirmCycleCountRequest,
+    CountDecisionPolicyResponse, CountDecisionPolicySource as ApiCountDecisionPolicySource,
     CreateCycleCountTaskRequest, CreateCycleCountTaskResponse, CycleCountCandidatePage,
     CycleCountCandidatePageRequest, CycleCountCandidateResponse,
     CycleCountCandidateSort as ApiCandidateSort, CycleCountClaimHeartbeatResponse,
@@ -22,7 +24,9 @@ use wareboxes_application::cycle_count::{
 };
 use wareboxes_application::inventory::InventoryBalanceStatus as ApplicationInventoryStatus;
 use wareboxes_core::models::{
-    CycleCountClaim, CycleCountClaimReleaseReason as CoreReleaseReason, InventoryStatus,
+    CycleCountClaim, CycleCountClaimReleaseReason as CoreReleaseReason,
+    CycleCountDecisionPolicySnapshot,
+    CycleCountDecisionPolicySource as CoreCountDecisionPolicySource, InventoryStatus,
 };
 
 use super::error::{V1Error, V1Result};
@@ -360,6 +364,10 @@ pub async fn confirm(
                 ApiDisposition::ApprovalRequired
             }
         },
+        decision_policy: confirmation
+            .decision_policy
+            .map(map_core_count_decision_policy)
+            .transpose()?,
         variance_id: confirmation.variance_id.map(|id| id.get()),
         variance_revision: confirmation
             .variance_revision
@@ -373,6 +381,87 @@ pub async fn confirm(
         confirmed_by: confirmation.confirmed_by,
         confirmed_at: confirmation.confirmed_at.to_rfc3339(),
     }))
+}
+
+fn map_core_count_decision_policy(
+    policy: CycleCountDecisionPolicySnapshot,
+) -> AppResult<CountDecisionPolicyResponse> {
+    Ok(CountDecisionPolicyResponse {
+        source: match policy.source {
+            CoreCountDecisionPolicySource::ProductDefault => {
+                ApiCountDecisionPolicySource::ProductDefault
+            }
+            CoreCountDecisionPolicySource::Configuration => {
+                ApiCountDecisionPolicySource::Configuration
+            }
+        },
+        configuration_id: policy.configuration_id.map(|id| id.get()),
+        configuration_revision: policy
+            .configuration_revision
+            .map(|revision| {
+                Revision::new(revision)
+                    .map_err(|_| AppError::internal("Count configuration revision is invalid"))
+            })
+            .transpose()?,
+        configuration_scope: policy.configuration_scope.map(map_configuration_scope),
+        absolute_tolerance_quantity: policy.absolute_tolerance_quantity,
+        percentage_tolerance_basis_points: policy.percentage_tolerance_basis_points,
+        approval_threshold_quantity: policy.approval_threshold_quantity,
+        policy_hash: policy.policy_hash,
+    })
+}
+
+pub(super) fn map_count_decision_policy(
+    policy: wareboxes_application::count_decision_policy::CountDecisionPolicyReadModel,
+) -> AppResult<CountDecisionPolicyResponse> {
+    Ok(CountDecisionPolicyResponse {
+        source: match policy.source {
+            wareboxes_application::count_decision_policy::CountDecisionPolicySource::ProductDefault => {
+                ApiCountDecisionPolicySource::ProductDefault
+            }
+            wareboxes_application::count_decision_policy::CountDecisionPolicySource::Configuration => {
+                ApiCountDecisionPolicySource::Configuration
+            }
+        },
+        configuration_id: policy.configuration_id.map(|id| id.get()),
+        configuration_revision: policy
+            .configuration_revision
+            .map(|revision| {
+                Revision::new(revision)
+                    .map_err(|_| AppError::internal("Count configuration revision is invalid"))
+            })
+            .transpose()?,
+        configuration_scope: policy.configuration_scope.map(map_configuration_scope),
+        absolute_tolerance_quantity: policy.absolute_tolerance_quantity,
+        percentage_tolerance_basis_points: policy.percentage_tolerance_basis_points,
+        approval_threshold_quantity: policy.approval_threshold_quantity,
+        policy_hash: policy.policy_hash,
+    })
+}
+
+const fn map_configuration_scope(
+    scope: wareboxes_domain::ConfigurationScope,
+) -> ApiConfigurationScope {
+    match scope {
+        wareboxes_domain::ConfigurationScope::Tenant => ApiConfigurationScope::Tenant,
+        wareboxes_domain::ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+            ApiConfigurationScope::InventoryOwner {
+                inventory_owner_id: inventory_owner_id.get(),
+            }
+        }
+        wareboxes_domain::ConfigurationScope::Facility { facility_id } => {
+            ApiConfigurationScope::Facility {
+                facility_id: facility_id.get(),
+            }
+        }
+        wareboxes_domain::ConfigurationScope::OwnerFacility {
+            inventory_owner_id,
+            facility_id,
+        } => ApiConfigurationScope::OwnerFacility {
+            inventory_owner_id: inventory_owner_id.get(),
+            facility_id: facility_id.get(),
+        },
+    }
 }
 
 fn map_claim(claim: CycleCountClaim) -> CycleCountClaimResponse {
