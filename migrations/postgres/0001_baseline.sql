@@ -32072,6 +32072,16 @@ CREATE TABLE public.unexpected_receipts (
     inventory_hold_id bigint NOT NULL,
     confirmed_by_user_id bigint NOT NULL,
     confirmed_at timestamptz NOT NULL,
+    owner_item_mapping_id bigint NOT NULL,
+    owner_item_was_preexisting boolean NOT NULL,
+    policy_source text NOT NULL,
+    policy_configuration_id bigint,
+    policy_configuration_revision bigint,
+    policy_scope_level text,
+    policy_inventory_owner_id bigint,
+    policy_facility_id bigint,
+    policy_definition jsonb NOT NULL,
+    policy_hash text NOT NULL,
     CONSTRAINT unexpected_receipts_uom_check CHECK (uom IN ('each','case')),
     CONSTRAINT unexpected_receipts_item_barcode_check CHECK (
         observed_item_barcode = btrim(observed_item_barcode)
@@ -32092,6 +32102,50 @@ CREATE TABLE public.unexpected_receipts (
     ),
     CONSTRAINT unexpected_receipts_other_note_check CHECK (
         reason_code <> 'other' OR note IS NOT NULL
+    ),
+    CONSTRAINT unexpected_receipts_policy_source_check CHECK (
+        policy_source IN ('product_default','configuration')
+    ),
+    CONSTRAINT unexpected_receipts_policy_hash_check CHECK (
+        policy_hash ~ '^[0-9a-f]{64}$'
+    ),
+    CONSTRAINT unexpected_receipts_policy_definition_check CHECK (
+        policy_definition ?& ARRAY[
+          'kind','allow_unexpected','quarantine_unmapped_items',
+          'over_receipt_tolerance_basis_points']
+        AND policy_definition-ARRAY[
+          'kind','allow_unexpected','quarantine_unmapped_items',
+          'over_receipt_tolerance_basis_points']='{}'::jsonb
+        AND policy_definition->>'kind'='receipt'
+        AND jsonb_typeof(policy_definition->'allow_unexpected')='boolean'
+        AND jsonb_typeof(policy_definition->'quarantine_unmapped_items')='boolean'
+        AND jsonb_typeof(policy_definition->'over_receipt_tolerance_basis_points')='number'
+        AND (policy_definition->>'over_receipt_tolerance_basis_points')::bigint
+              BETWEEN 0 AND 10000
+        AND (policy_definition->>'allow_unexpected')::boolean
+    ),
+    CONSTRAINT unexpected_receipts_policy_identity_check CHECK (
+        (policy_source='product_default'
+          AND policy_configuration_id IS NULL
+          AND policy_configuration_revision IS NULL
+          AND policy_scope_level IS NULL
+          AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NULL
+          AND policy_definition=jsonb_build_object(
+            'kind','receipt','allow_unexpected',true,
+            'quarantine_unmapped_items',true,
+            'over_receipt_tolerance_basis_points',10000))
+        OR
+        (policy_source='configuration'
+          AND policy_configuration_id IS NOT NULL
+          AND policy_configuration_revision>0
+          AND ((policy_scope_level='tenant'
+                AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='inventory_owner'
+                AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='facility'
+                AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NOT NULL)
+            OR (policy_scope_level='owner_facility'
+                AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NOT NULL)))
     ),
     CONSTRAINT unexpected_receipts_tenant_id_inventory_owner_id_id_key
         UNIQUE (tenant_id, inventory_owner_id, id),
@@ -32129,11 +32183,17 @@ CREATE TABLE public.unexpected_receipts (
         REFERENCES public.inventory_holds(tenant_id, inventory_owner_id, id),
     CONSTRAINT unexpected_receipts_actor_fkey
         FOREIGN KEY (tenant_id, confirmed_by_user_id)
-        REFERENCES public.tenant_memberships(tenant_id, user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    CONSTRAINT unexpected_receipts_owner_item_mapping_fkey
+        FOREIGN KEY (owner_item_mapping_id)
+        REFERENCES public.inventory_owner_items(id)
 );
 ALTER TABLE public.unexpected_receipts FORCE ROW LEVEL SECURITY;
 CREATE INDEX unexpected_receipts_load_history_idx
 ON public.unexpected_receipts(tenant_id, load_id, confirmed_at, id);
+CREATE INDEX unexpected_receipts_policy_idx
+ON public.unexpected_receipts(tenant_id, policy_configuration_id, confirmed_at, id)
+WHERE policy_configuration_id IS NOT NULL;
 
 CREATE FUNCTION public.validate_unexpected_receipt() RETURNS trigger
     LANGUAGE plpgsql
@@ -32141,7 +32201,75 @@ CREATE FUNCTION public.validate_unexpected_receipt() RETURNS trigger
 AS $$
 DECLARE
     expected_hold_reason text;
+    configuration_row record;
+    mapping_row public.inventory_owner_items%ROWTYPE;
+    resolved_configuration_id bigint;
+    expected_quantity bigint;
+    prior_excess_quantity bigint;
+    calculated_hash text;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format(
+      'configuration-kind:%s:receipt',NEW.tenant_id),0));
+    calculated_hash:=encode(sha256(convert_to(
+      'receipt-policy-v1|'||(NEW.policy_definition->>'allow_unexpected')||'|'||
+      (NEW.policy_definition->>'quarantine_unmapped_items')||'|'||
+      (NEW.policy_definition->>'over_receipt_tolerance_basis_points'),'UTF8')),'hex');
+    IF NEW.policy_hash<>calculated_hash THEN
+        RAISE EXCEPTION 'unexpected receipt policy hash does not match its snapshot'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT configuration.id INTO resolved_configuration_id
+    FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.kind='receipt' AND configuration.status='active'
+      AND configuration.effective_from<=NEW.confirmed_at
+      AND (configuration.effective_until IS NULL
+           OR configuration.effective_until>NEW.confirmed_at)
+      AND (configuration.inventory_owner_id IS NULL
+           OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+      AND (configuration.facility_id IS NULL
+           OR configuration.facility_id=NEW.facility_id)
+    ORDER BY CASE configuration.scope_level
+               WHEN 'owner_facility' THEN 2
+               WHEN 'inventory_owner' THEN 1
+               WHEN 'facility' THEN 1
+               ELSE 0 END DESC,
+             configuration.effective_from DESC,
+             configuration.revision DESC,configuration.id DESC
+    LIMIT 1;
+    IF NEW.policy_source='product_default' THEN
+        IF resolved_configuration_id IS NOT NULL THEN
+            RAISE EXCEPTION 'unexpected receipt product default is not effective'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        SELECT * INTO configuration_row
+        FROM public.configuration_versions configuration
+        WHERE configuration.tenant_id=NEW.tenant_id
+          AND configuration.id=NEW.policy_configuration_id;
+        IF configuration_row.id IS NULL
+           OR configuration_row.kind<>'receipt'
+           OR configuration_row.status<>'active'
+           OR configuration_row.revision<>NEW.policy_configuration_revision
+           OR configuration_row.scope_level<>NEW.policy_scope_level
+           OR configuration_row.inventory_owner_id
+                IS DISTINCT FROM NEW.policy_inventory_owner_id
+           OR configuration_row.facility_id IS DISTINCT FROM NEW.policy_facility_id
+           OR configuration_row.definition<>NEW.policy_definition
+           OR configuration_row.effective_from>NEW.confirmed_at
+           OR (configuration_row.effective_until IS NOT NULL
+               AND configuration_row.effective_until<=NEW.confirmed_at)
+           OR (configuration_row.inventory_owner_id IS NOT NULL
+               AND configuration_row.inventory_owner_id<>NEW.inventory_owner_id)
+           OR (configuration_row.facility_id IS NOT NULL
+               AND configuration_row.facility_id<>NEW.facility_id)
+           OR resolved_configuration_id IS DISTINCT FROM NEW.policy_configuration_id
+        THEN
+            RAISE EXCEPTION 'unexpected receipt policy is stale or inapplicable'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
     expected_hold_reason := CASE
         WHEN NEW.reason_code = 'mis_shipped' THEN 'customer_request'
         ELSE 'inventory_discrepancy'
@@ -32166,10 +32294,29 @@ BEGIN
           AND location.deleted IS NULL
           AND location.active
           AND location.receivable
-        FOR SHARE OF load, location
+        FOR UPDATE OF load
+        FOR SHARE OF location
     ) THEN
         RAISE EXCEPTION 'unexpected receipt load and receiving dock are not executable'
             USING ERRCODE = '55000';
+    END IF;
+
+    SELECT * INTO mapping_row FROM public.inventory_owner_items mapping
+    WHERE mapping.id=NEW.owner_item_mapping_id
+      AND mapping.tenant_id=NEW.tenant_id
+      AND mapping.inventory_owner_id=NEW.inventory_owner_id
+      AND mapping.item_id=NEW.item_id
+      AND mapping.deleted IS NULL
+    FOR SHARE;
+    IF mapping_row.id IS NULL
+       OR (NEW.owner_item_was_preexisting AND mapping_row.created>NEW.confirmed_at)
+       OR (NOT NEW.owner_item_was_preexisting
+           AND mapping_row.created IS DISTINCT FROM NEW.confirmed_at)
+       OR (NOT NEW.owner_item_was_preexisting
+           AND NOT (NEW.policy_definition->>'quarantine_unmapped_items')::boolean)
+    THEN
+        RAISE EXCEPTION 'unexpected receipt owner-item mapping evidence is invalid'
+            USING ERRCODE = '23514';
     END IF;
 
     IF NOT EXISTS (
@@ -32206,6 +32353,24 @@ BEGIN
     THEN
         RAISE EXCEPTION 'unexpected receipt reason does not match the load expectation'
             USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.reason_code='excess' THEN
+        SELECT COALESCE(SUM(line.expected_qty),0)::bigint
+        INTO expected_quantity FROM public.load_lines line
+        WHERE line.tenant_id=NEW.tenant_id AND line.load_id=NEW.load_id
+          AND line.item_id=NEW.item_id AND line.deleted IS NULL;
+        SELECT COALESCE(SUM(receipt.quantity),0)::bigint
+        INTO prior_excess_quantity FROM public.unexpected_receipts receipt
+        WHERE receipt.tenant_id=NEW.tenant_id AND receipt.load_id=NEW.load_id
+          AND receipt.item_id=NEW.item_id AND receipt.reason_code='excess';
+        IF (prior_excess_quantity+NEW.quantity)::numeric >
+           expected_quantity::numeric*
+             (NEW.policy_definition->>'over_receipt_tolerance_basis_points')::numeric/10000
+        THEN
+            RAISE EXCEPTION 'unexpected receipt exceeds effective tolerance'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     IF NEW.license_plate_id IS NOT NULL AND NOT EXISTS (
@@ -32287,7 +32452,7 @@ BEGIN
           AND txn.reason = NEW.reason_code
           AND txn.reference_type = 'unexpected_receipt'
           AND txn.reference_id = NEW.id
-          AND txn.operation = 'inbound.confirm_unexpected_receipt.v1'
+          AND txn.operation = 'inbound.confirm_unexpected_receipt.v2'
           AND txn.actor_user_id = NEW.confirmed_by_user_id
           AND txn.created = NEW.confirmed_at
     ) OR (SELECT COUNT(*) FROM public.inventory_entries entry
@@ -41019,6 +41184,11 @@ REFERENCES public.configuration_versions(tenant_id,id);
 
 ALTER TABLE public.shipment_documents
 ADD CONSTRAINT shipment_documents_policy_configuration_fkey
+FOREIGN KEY (tenant_id,policy_configuration_id)
+REFERENCES public.configuration_versions(tenant_id,id);
+
+ALTER TABLE public.unexpected_receipts
+ADD CONSTRAINT unexpected_receipts_policy_configuration_fkey
 FOREIGN KEY (tenant_id,policy_configuration_id)
 REFERENCES public.configuration_versions(tenant_id,id);
 

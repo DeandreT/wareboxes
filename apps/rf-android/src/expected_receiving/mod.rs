@@ -4,6 +4,7 @@
 //! application must resolve through its durable command and transport layers.
 
 mod command;
+mod policy;
 mod recovery;
 mod reducer;
 mod unexpected;
@@ -19,6 +20,7 @@ pub use command::{
     ConfirmationMode, ContainerCapture, ExpectedReceiptCommand, ReceiptExceptionReason,
     ReceiptQuarantineReason, UnexpectedReceiptReason,
 };
+pub use policy::{ReceiptPolicy, ReceiptPolicyInput, ReceiptPolicyScope, ReceiptPolicySource};
 pub use recovery::{
     ConfirmationIntent, ConfirmationRecoverySnapshot, ConfirmationRecoverySnapshotInput,
 };
@@ -29,7 +31,7 @@ pub use unexpected::{
 pub use unloading::{UnloadingStartCommand, UnloadingStartIntent, UnloadingStartResult};
 pub use validation::ReceivingValidationError;
 
-pub const CONFIRMATION_INTENT_SCHEMA_VERSION: u16 = 2;
+pub const CONFIRMATION_INTENT_SCHEMA_VERSION: u16 = 3;
 const MAX_BARCODE_LENGTH: usize = 200;
 const MAX_DIMENSION_LENGTH: usize = 200;
 const MAX_NOTE_LENGTH: usize = 1_000;
@@ -559,6 +561,7 @@ pub struct ReceivingSessionInput {
     pub status: ReceivingLoadStatus,
     pub expected_seal: Option<SealBarcode>,
     pub dock: ReceivingDock,
+    pub receipt_policy: ReceiptPolicy,
     pub lines: Vec<ExpectedReceiptLine>,
 }
 
@@ -617,6 +620,11 @@ impl ReceivingSession {
     #[must_use]
     pub const fn dock(&self) -> &ReceivingDock {
         &self.input.dock
+    }
+
+    #[must_use]
+    pub const fn receipt_policy(&self) -> &ReceiptPolicy {
+        &self.input.receipt_policy
     }
 
     #[must_use]

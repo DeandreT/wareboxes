@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-const UNEXPECTED_RECEIPT_INTENT_SCHEMA_VERSION: u16 = 1;
+const UNEXPECTED_RECEIPT_INTENT_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +16,7 @@ pub struct UnexpectedReceiptCommand {
     pub expiration: Option<Expiration>,
     pub reason: UnexpectedReceiptReason,
     pub note: Option<ExceptionNote>,
+    pub receipt_policy: ReceiptPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +30,7 @@ pub struct UnexpectedReceiptRecoverySnapshot {
     pub status: ReceivingLoadStatus,
     pub expected_seal: Option<SealBarcode>,
     pub dock: ReceivingDock,
+    pub receipt_policy: ReceiptPolicy,
     pub lines: Vec<ExpectedReceiptLine>,
 }
 
@@ -43,6 +45,7 @@ impl UnexpectedReceiptRecoverySnapshot {
             status: active.session.status(),
             expected_seal: active.session.expected_seal().cloned(),
             dock: active.session.dock().clone(),
+            receipt_policy: active.session.receipt_policy().clone(),
             lines: active.session.lines().to_vec(),
         }
     }
@@ -56,6 +59,7 @@ impl UnexpectedReceiptRecoverySnapshot {
             status: self.status,
             expected_seal: self.expected_seal.clone(),
             dock: self.dock.clone(),
+            receipt_policy: self.receipt_policy.clone(),
             lines: self.lines.clone(),
         })
         .ok()?;
@@ -108,6 +112,7 @@ impl UnexpectedReceiptIntent {
             expiration: draft.expiration.clone(),
             reason: draft.unexpected_reason?,
             note: draft.exception_note.clone(),
+            receipt_policy: active.session.receipt_policy().clone(),
         };
         let intent = Self {
             schema_version: UNEXPECTED_RECEIPT_INTENT_SCHEMA_VERSION,
@@ -123,6 +128,7 @@ impl UnexpectedReceiptIntent {
         self.schema_version == UNEXPECTED_RECEIPT_INTENT_SCHEMA_VERSION
             && self.load_id == self.recovery.load_id
             && self.command.receiving_location_barcode == *self.recovery.dock.barcode()
+            && self.command.receipt_policy == self.recovery.receipt_policy
             && (self.command.reason != UnexpectedReceiptReason::Other
                 || self.command.note.is_some())
             && ReceivingSession::try_new(ReceivingSessionInput {
@@ -133,6 +139,7 @@ impl UnexpectedReceiptIntent {
                 status: self.recovery.status,
                 expected_seal: self.recovery.expected_seal.clone(),
                 dock: self.recovery.dock.clone(),
+                receipt_policy: self.recovery.receipt_policy.clone(),
                 lines: self.recovery.lines.clone(),
             })
             .is_ok()
@@ -237,6 +244,7 @@ pub struct UnexpectedReceiptResult {
     pub load_status: ReceivingLoadStatus,
     pub confirmed_by_user_id: i64,
     pub confirmed_at: String,
+    pub receipt_policy: ReceiptPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

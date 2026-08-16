@@ -79,6 +79,7 @@ fn session_with(
             DockBarcode::new("DOCK-1").unwrap(),
             Some("Receiving Dock 1".into()),
         ),
+        receipt_policy: ReceiptPolicy::product_default(),
         lines,
     })
     .unwrap()
@@ -101,6 +102,7 @@ fn arrived_session(expected_seal: Option<&str>) -> ReceivingSession {
             DockBarcode::new("DOCK-1").unwrap(),
             Some("Receiving Dock 1".into()),
         ),
+        receipt_policy: ReceiptPolicy::product_default(),
         lines: vec![line(1, "ITEM-1", 10, 0, 0, 0)],
     })
     .unwrap()
@@ -120,6 +122,7 @@ fn recovery_snapshot(selected_line: ExpectedReceiptLine) -> ConfirmationRecovery
             DockBarcode::new("DOCK-1").unwrap(),
             Some("Receiving Dock 1".into()),
         ),
+        receipt_policy: ReceiptPolicy::product_default(),
         selected_line,
     })
     .unwrap()
@@ -370,6 +373,7 @@ fn line_and_session_boundaries_reject_invalid_projections() {
             status: ReceivingLoadStatus::Receiving,
             expected_seal: None,
             dock: ReceivingDock::new(location_id(4), DockBarcode::new("DOCK").unwrap(), None,),
+            receipt_policy: ReceiptPolicy::product_default(),
             lines: vec![closed],
         }),
         Err(ReceivingValidationError::ClosedLineInSession)
@@ -533,7 +537,7 @@ fn received_flow_has_explicit_focus_and_exact_serializable_intent() {
     assert_eq!(
         serde_json::to_value(intent.as_expected().unwrap()).unwrap(),
         json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "load_id": 10,
             "load_line_id": 100,
             "command": {
@@ -558,6 +562,16 @@ fn received_flow_has_explicit_focus_and_exact_serializable_intent() {
                     "location_id": 90,
                     "barcode": "DOCK-1",
                     "name": "Receiving Dock 1"
+                },
+                "receipt_policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "configuration_scope": null,
+                    "allow_unexpected": true,
+                    "quarantine_unmapped_items": true,
+                    "over_receipt_tolerance_basis_points": 10000,
+                    "policy_hash": "d52ecae3b5747640fb1bcdf91c7fb3a8800fa4ccce0c220267b44da3a8808326"
                 },
                 "selected_line": {
                     "load_line_id": 100,
@@ -1310,6 +1324,7 @@ fn received_session() -> ReceivingSession {
             DockBarcode::new("DOCK-1").unwrap(),
             Some("Receiving Dock 1".into()),
         ),
+        receipt_policy: ReceiptPolicy::product_default(),
         lines: Vec::new(),
     })
     .unwrap()
@@ -1341,6 +1356,7 @@ fn unexpected_result(item_barcode: &str) -> UnexpectedReceiptResult {
         load_status: ReceivingLoadStatus::Received,
         confirmed_by_user_id: 507,
         confirmed_at: "2026-08-09T18:00:00Z".into(),
+        receipt_policy: ReceiptPolicy::product_default(),
     }
 }
 

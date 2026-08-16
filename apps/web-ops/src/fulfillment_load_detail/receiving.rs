@@ -2,7 +2,7 @@ use leptos::{html, prelude::*};
 use lucide_leptos::RefreshCw;
 use wareboxes_api_contract::v1::{
     ExpectedReceiptLine, ExpectedReceivingLoadStatus, ExpectedReceivingSessionResponse,
-    StartInboundLoadUnloadingRequest,
+    ReceiptPolicyResponse, ReceiptPolicySource, StartInboundLoadUnloadingRequest,
 };
 
 use crate::api;
@@ -86,6 +86,9 @@ pub(super) fn ReceivingExecutionPanel(
                 });
                 let location_barcode = session.receiving_location.barcode.clone();
                 let status = session.status;
+                let policy_title = receipt_policy_title(&session.receipt_policy);
+                let policy_detail = receipt_policy_detail(&session.receipt_policy);
+                let unexpected_blocked = !session.receipt_policy.allow_unexpected;
                 view! {
                     <div class="receiving-execution-context">
                         <div>
@@ -100,6 +103,11 @@ pub(super) fn ReceivingExecutionPanel(
                         <div>
                             <span>"Execution state"</span>
                             <strong class=receiving_status_class(status)>{receiving_status_label(status)}</strong>
+                        </div>
+                        <div class:receiving-policy-blocked=unexpected_blocked>
+                            <span>"Unexpected stock policy"</span>
+                            <strong>{policy_title}</strong>
+                            <small>{policy_detail}</small>
                         </div>
                     </div>
                     <Show when=move || status == ExpectedReceivingLoadStatus::Arrived && !unloading_open.get()>
@@ -404,6 +412,32 @@ fn trace_label(line: &ExpectedReceiptLine) -> String {
     }
 }
 
+fn receipt_policy_title(policy: &ReceiptPolicyResponse) -> String {
+    let source = match policy.source {
+        ReceiptPolicySource::ProductDefault => "Product default".to_owned(),
+        ReceiptPolicySource::Configuration => format!(
+            "Configuration #{} r{}",
+            policy.configuration_id.unwrap_or_default(),
+            policy.configuration_revision.unwrap_or_default()
+        ),
+    };
+    if policy.allow_unexpected {
+        format!("{source} · quarantine")
+    } else {
+        format!("{source} · blocked")
+    }
+}
+
+fn receipt_policy_detail(policy: &ReceiptPolicyResponse) -> String {
+    let mapping = if policy.quarantine_unmapped_items {
+        "unmapped items accepted"
+    } else {
+        "owner mapping required"
+    };
+    let percentage = f64::from(policy.over_receipt_tolerance_basis_points) / 100.0;
+    format!("{mapping} · excess tolerance {percentage:.2}%")
+}
+
 const fn receiving_status_label(status: ExpectedReceivingLoadStatus) -> &'static str {
     match status {
         ExpectedReceivingLoadStatus::Arrived => "Arrived",
@@ -472,6 +506,28 @@ mod tests {
         assert_eq!(
             trace_label(&line),
             "Lot LOT-A · Serial SER-9 · Exp 2027-05-04"
+        );
+    }
+
+    #[test]
+    fn receipt_policy_evidence_is_operator_readable() {
+        let policy = ReceiptPolicyResponse {
+            source: ReceiptPolicySource::Configuration,
+            configuration_id: Some(41),
+            configuration_revision: Some(3),
+            configuration_scope: None,
+            allow_unexpected: true,
+            quarantine_unmapped_items: false,
+            over_receipt_tolerance_basis_points: 250,
+            policy_hash: "a".repeat(64),
+        };
+        assert_eq!(
+            receipt_policy_title(&policy),
+            "Configuration #41 r3 · quarantine"
+        );
+        assert_eq!(
+            receipt_policy_detail(&policy),
+            "owner mapping required · excess tolerance 2.50%"
         );
     }
 }

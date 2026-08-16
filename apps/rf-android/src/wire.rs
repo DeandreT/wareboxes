@@ -6,7 +6,8 @@ use wareboxes_api_contract::v1::{
     API_PREFIX, ClaimCycleCountByIdRequest, ClaimInventoryRelocationByIdRequest,
     ClaimNextCycleCountRequest, ClaimNextInventoryRelocationRequest, ClaimNextPickRequest,
     ClaimNextPutawayRequest, ClaimPickByIdRequest, ClaimPutawayByIdRequest,
-    ConfirmCycleCountRequest, ConfirmExpectedReceiptRequest, ConfirmInventoryRelocationRequest,
+    ConfigurationScope as ApiConfigurationScope, ConfirmCycleCountRequest,
+    ConfirmExpectedReceiptRequest, ConfirmInventoryRelocationRequest,
     ConfirmLicensePlatePutawayRequest, ConfirmPickContentRequest, ConfirmPutawayRequest,
     ConfirmUnexpectedReceiptRequest, CycleCountClaimHeartbeatResponse,
     CycleCountClaimReleaseReason, CycleCountClaimResponse, CycleCountConfirmationResponse,
@@ -22,7 +23,9 @@ use wareboxes_api_contract::v1::{
     PickShortageReason as ApiPickShortageReason, PickShortageStatus as ApiPickShortageStatus,
     PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
     PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
-    PutawayWorkflow as ApiPutawayWorkflow, ReleaseCycleCountClaimRequest,
+    PutawayWorkflow as ApiPutawayWorkflow, ReceiptPolicyExpectation as ApiReceiptPolicyExpectation,
+    ReceiptPolicyResponse as ApiReceiptPolicyResponse,
+    ReceiptPolicySource as ApiReceiptPolicySource, ReleaseCycleCountClaimRequest,
     ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest, ReleasePutawayClaimRequest,
     ReportPickShortageOutcome as ApiReportPickShortageOutcome, ReportPickShortageRequest,
     ReportPickShortageResponse, StartInboundLoadUnloadingRequest,
@@ -35,9 +38,10 @@ use crate::expected_receiving::{
     ConfirmationMode, ConfirmationResult, DockBarcode, ExceptionNote, ExpectedReceiptCommand,
     ExpectedReceiptLine as DomainExpectedReceiptLine, ExpectedReceiptLineInput, Expiration,
     FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LicensePlateBarcode, LoadId, LoadLineId,
-    LocationId, NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason,
-    ReceiptQuarantineReason, ReceivingCommandIntent, ReceivingDock, ReceivingLoadStatus,
-    ReceivingSession, ReceivingSessionInput, SealBarcode, StockDimension, UnexpectedReceiptCommand,
+    LocationId, NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceiptPolicy,
+    ReceiptPolicyInput, ReceiptPolicyScope, ReceiptPolicySource, ReceiptQuarantineReason,
+    ReceivingCommandIntent, ReceivingDock, ReceivingLoadStatus, ReceivingSession,
+    ReceivingSessionInput, SealBarcode, StockDimension, UnexpectedReceiptCommand,
     UnexpectedReceiptReason, UnexpectedReceiptResult,
 };
 #[cfg(test)]
@@ -801,6 +805,73 @@ fn map_unexpected_receipt_command(
             .map(|value| value.as_str().to_owned()),
         reason: map_unexpected_receipt_reason(command.reason),
         note: command.note.as_ref().map(|value| value.as_str().to_owned()),
+        expected_policy: ApiReceiptPolicyExpectation {
+            source: map_receipt_policy_source(command.receipt_policy.source()),
+            configuration_id: command.receipt_policy.configuration_id(),
+            configuration_revision: command.receipt_policy.configuration_revision(),
+            policy_hash: command.receipt_policy.policy_hash().to_owned(),
+        },
+    }
+}
+
+const fn map_receipt_policy_source(source: ReceiptPolicySource) -> ApiReceiptPolicySource {
+    match source {
+        ReceiptPolicySource::ProductDefault => ApiReceiptPolicySource::ProductDefault,
+        ReceiptPolicySource::Configuration => ApiReceiptPolicySource::Configuration,
+    }
+}
+
+fn map_receipt_policy(
+    response: ApiReceiptPolicyResponse,
+) -> Result<ReceiptPolicy, WireResponseError> {
+    let scope = response
+        .configuration_scope
+        .map(map_receipt_policy_scope)
+        .transpose()?;
+    ReceiptPolicy::try_new(ReceiptPolicyInput {
+        source: match response.source {
+            ApiReceiptPolicySource::ProductDefault => ReceiptPolicySource::ProductDefault,
+            ApiReceiptPolicySource::Configuration => ReceiptPolicySource::Configuration,
+        },
+        configuration_id: response.configuration_id,
+        configuration_revision: response.configuration_revision,
+        configuration_scope: scope,
+        allow_unexpected: response.allow_unexpected,
+        quarantine_unmapped_items: response.quarantine_unmapped_items,
+        over_receipt_tolerance_basis_points: response.over_receipt_tolerance_basis_points,
+        policy_hash: response.policy_hash,
+    })
+    .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)
+}
+
+fn map_receipt_policy_scope(
+    scope: ApiConfigurationScope,
+) -> Result<ReceiptPolicyScope, WireResponseError> {
+    match scope {
+        ApiConfigurationScope::Tenant => Ok(ReceiptPolicyScope::Tenant),
+        ApiConfigurationScope::InventoryOwner { inventory_owner_id } => {
+            Ok(ReceiptPolicyScope::InventoryOwner {
+                inventory_owner_id: inventory_owner_id
+                    .try_into()
+                    .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
+            })
+        }
+        ApiConfigurationScope::Facility { facility_id } => Ok(ReceiptPolicyScope::Facility {
+            facility_id: facility_id
+                .try_into()
+                .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
+        }),
+        ApiConfigurationScope::OwnerFacility {
+            inventory_owner_id,
+            facility_id,
+        } => Ok(ReceiptPolicyScope::OwnerFacility {
+            inventory_owner_id: inventory_owner_id
+                .try_into()
+                .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
+            facility_id: facility_id
+                .try_into()
+                .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
+        }),
     }
 }
 
@@ -885,6 +956,8 @@ fn decode_unexpected_receipt_confirmation(
     {
         return Err(WireResponseError::InvalidUnexpectedReceiptConfirmation);
     }
+    let receipt_policy = map_receipt_policy(response.receipt_policy)
+        .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?;
     Ok(UnexpectedReceiptResult {
         unexpected_receipt_id: response.unexpected_receipt_id,
         load_id: response
@@ -957,6 +1030,7 @@ fn decode_unexpected_receipt_confirmation(
         },
         confirmed_by_user_id: response.confirmed_by_user_id,
         confirmed_at: response.confirmed_at,
+        receipt_policy,
     })
 }
 
@@ -1619,6 +1693,7 @@ fn map_receiving_session(
             .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let receipt_policy = map_receipt_policy(response.receipt_policy)?;
     ReceivingSession::try_new(ReceivingSessionInput {
         load_id: LoadId::try_from(response.load_id)
             .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
@@ -1640,6 +1715,7 @@ fn map_receiving_session(
                 .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
             response.receiving_location.name,
         ),
+        receipt_policy,
         lines,
     })
     .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)
@@ -2980,6 +3056,16 @@ mod tests {
                 "barcode": "DOCK-04",
                 "name": "Inbound Dock 4"
             },
+            "receipt_policy": {
+                "source": "product_default",
+                "configuration_id": null,
+                "configuration_revision": null,
+                "configuration_scope": null,
+                "allow_unexpected": true,
+                "quarantine_unmapped_items": true,
+                "over_receipt_tolerance_basis_points": 10000,
+                "policy_hash": "d52ecae3b5747640fb1bcdf91c7fb3a8800fa4ccce0c220267b44da3a8808326"
+            },
             "lines": [{
                 "load_line_id": 55,
                 "item_id": 66,
@@ -3137,6 +3223,7 @@ mod tests {
                     DockBarcode::new("DOCK-04").unwrap(),
                     Some("Inbound dock 4".into()),
                 ),
+                receipt_policy: ReceiptPolicy::product_default(),
                 selected_line: line,
             },
         )
@@ -3347,7 +3434,7 @@ mod tests {
     #[test]
     fn unexpected_receipt_durable_wire_contract_is_exact_and_strict() {
         let intent = crate::expected_receiving::UnexpectedReceiptIntent {
-            schema_version: 1,
+            schema_version: 2,
             load_id: LoadId::try_from(11).unwrap(),
             command: UnexpectedReceiptCommand {
                 item_barcode: ItemBarcode::new("CASE-NEW").unwrap(),
@@ -3359,6 +3446,7 @@ mod tests {
                 expiration: Some(Expiration::new("2027-08-26T00:00:00Z").unwrap()),
                 reason: UnexpectedReceiptReason::UnexpectedItem,
                 note: None,
+                receipt_policy: ReceiptPolicy::product_default(),
             },
             recovery: Box::new(
                 crate::expected_receiving::UnexpectedReceiptRecoverySnapshot {
@@ -3374,6 +3462,7 @@ mod tests {
                         DockBarcode::new("DOCK-04").unwrap(),
                         Some("Inbound dock 4".into()),
                     ),
+                    receipt_policy: ReceiptPolicy::product_default(),
                     lines: Vec::new(),
                 },
             ),
@@ -3408,7 +3497,13 @@ mod tests {
                 "serial": null,
                 "expiration": "2027-08-26T00:00:00Z",
                 "reason": "unexpected_item",
-                "note": null
+                "note": null,
+                "expected_policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "policy_hash": "d52ecae3b5747640fb1bcdf91c7fb3a8800fa4ccce0c220267b44da3a8808326"
+                }
             })
         );
 
@@ -3437,7 +3532,17 @@ mod tests {
             "note": null,
             "load_status": "received",
             "confirmed_by_user_id": 77,
-            "confirmed_at": "2026-08-09T18:00:00Z"
+            "confirmed_at": "2026-08-09T18:00:00Z",
+            "receipt_policy": {
+                "source": "product_default",
+                "configuration_id": null,
+                "configuration_revision": null,
+                "configuration_scope": null,
+                "allow_unexpected": true,
+                "quarantine_unmapped_items": true,
+                "over_receipt_tolerance_basis_points": 10000,
+                "policy_hash": "d52ecae3b5747640fb1bcdf91c7fb3a8800fa4ccce0c220267b44da3a8808326"
+            }
         }))
         .unwrap();
         let CommandOutcome::UnexpectedReceipt(result) =

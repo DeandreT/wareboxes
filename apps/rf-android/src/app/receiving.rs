@@ -1079,6 +1079,7 @@ fn debug_receiving_session(unloading: bool) -> Option<ReceivingSession> {
             crate::expected_receiving::DockBarcode::new("DOCK-04").ok()?,
             Some("Receiving Dock 04".into()),
         ),
+        receipt_policy: crate::expected_receiving::ReceiptPolicy::product_default(),
         lines: vec![first, second],
     })
     .ok()

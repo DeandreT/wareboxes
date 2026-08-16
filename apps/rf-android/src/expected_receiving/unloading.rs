@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-const UNLOADING_START_INTENT_SCHEMA_VERSION: u16 = 1;
+const UNLOADING_START_INTENT_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +22,7 @@ struct UnloadingStartRecoverySnapshot {
     reference_number: Option<String>,
     expected_seal: Option<SealBarcode>,
     dock: ReceivingDock,
+    receipt_policy: ReceiptPolicy,
     lines: Vec<ExpectedReceiptLine>,
 }
 
@@ -35,6 +36,7 @@ impl UnloadingStartRecoverySnapshot {
             reference_number: active.session.reference_number().map(str::to_owned),
             expected_seal: active.session.expected_seal().cloned(),
             dock: active.session.dock().clone(),
+            receipt_policy: active.session.receipt_policy().clone(),
             lines: active.session.lines().to_vec(),
         }
     }
@@ -48,6 +50,7 @@ impl UnloadingStartRecoverySnapshot {
             status: ReceivingLoadStatus::Arrived,
             expected_seal: self.expected_seal.clone(),
             dock: self.dock.clone(),
+            receipt_policy: self.receipt_policy.clone(),
             lines: self.lines.clone(),
         })
         .ok()?;
@@ -127,6 +130,7 @@ impl UnloadingStartIntent {
                 status: ReceivingLoadStatus::Arrived,
                 expected_seal: self.recovery.expected_seal.clone(),
                 dock: self.recovery.dock.clone(),
+                receipt_policy: self.recovery.receipt_policy.clone(),
                 lines: self.recovery.lines.clone(),
             })
             .is_ok()

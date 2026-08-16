@@ -32,6 +32,8 @@ pub enum ReceivingValidationError {
     ClosedLineInSession,
     #[error("expected receiving session contains duplicate load lines")]
     DuplicateLoadLine,
+    #[error("receipt policy identity or definition is invalid")]
+    InvalidReceiptPolicy,
     #[error("confirmation recovery snapshot requires an open selected line")]
     InvalidRecoveryLine,
     #[error("confirmation intent is inconsistent with its recovery snapshot")]

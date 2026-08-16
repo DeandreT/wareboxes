@@ -1,4 +1,6 @@
 mod common;
+#[path = "unexpected_receiving_v1/policy.rs"]
+mod policy;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -21,7 +23,7 @@ fn init_test_tracing() {
         .try_init();
 }
 
-fn command_request(
+pub(crate) fn command_request(
     token: &str,
     tenant_id: TenantId,
     load_id: i64,
@@ -61,7 +63,9 @@ fn inspection_request(
         .unwrap()
 }
 
-async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
+pub(crate) async fn response_json<T: serde::de::DeserializeOwned>(
+    response: axum::response::Response,
+) -> T {
     let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
     serde_json::from_slice(&body).unwrap()
 }
@@ -74,16 +78,17 @@ async fn assert_error(response: axum::response::Response, status: StatusCode, re
     );
 }
 
-struct Setup {
-    tenant_id: TenantId,
-    operator_id: i64,
-    facility_id: i64,
-    owner_id: i64,
-    load_id: i64,
-    line_id: i64,
+pub(crate) struct Setup {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) operator_id: i64,
+    pub(crate) facility_id: i64,
+    pub(crate) owner_id: i64,
+    pub(crate) load_id: i64,
+    pub(crate) line_id: i64,
+    pub(crate) unexpected_item_id: i64,
 }
 
-async fn setup(fixture: &Fixture, email: &str) -> Setup {
+pub(crate) async fn setup(fixture: &Fixture, email: &str) -> Setup {
     let operator = fixture.wms_user(email).await;
     let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
     let role = wareboxes_persistence_postgres::roles::add_role(
@@ -223,10 +228,11 @@ async fn setup(fixture: &Fixture, email: &str) -> Setup {
         owner_id,
         load_id,
         line_id,
+        unexpected_item_id,
     }
 }
 
-fn body(item_barcode: &str, reason: &str, quantity: i64) -> Value {
+pub(crate) fn body(item_barcode: &str, reason: &str, quantity: i64) -> Value {
     json!({
         "item_barcode": item_barcode,
         "receiving_location_barcode": "UNEXPECTED-DOCK-01",
@@ -581,7 +587,7 @@ async fn received_load_accepts_excess_without_reopening_expectations_and_evidenc
             setup.tenant_id,
             setup.load_id,
             "unexpected-late-excess",
-            &body("EXPECTED-CASE-01", "excess", 4),
+            &body("EXPECTED-CASE-01", "excess", 2),
         ))
         .await
         .unwrap();
@@ -589,7 +595,7 @@ async fn received_load_accepts_excess_without_reopening_expectations_and_evidenc
     let result: UnexpectedReceiptConfirmationResponse = response_json(response).await;
     assert_eq!(result.reason, UnexpectedReceiptReason::Excess);
     assert_eq!(result.load_status, ExpectedReceivingLoadStatus::Received);
-    assert_eq!(result.quantity, 4);
+    assert_eq!(result.quantity, 2);
 
     let mut tx = tenant_tx(&fixture.db, setup.tenant_id).await;
     let load_status: String =

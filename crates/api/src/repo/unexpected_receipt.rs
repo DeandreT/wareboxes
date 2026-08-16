@@ -3,12 +3,15 @@
 use serde::Serialize;
 use sqlx::Row;
 use wareboxes_application::idempotency::{command_request_hash, PreparedCommand};
+use wareboxes_application::receipt_policy::{
+    ReceiptPolicyExpectation, ReceiptPolicyReadModel, ReceiptPolicySource,
+};
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     ConfirmUnexpectedReceiptResult, InventoryStatus, InventoryTransactionType, LoadStatus,
     LoadType, TenantAccess, Timestamp, UnexpectedReceiptReason,
 };
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{ConfigurationScope, FacilityId, InventoryOwnerId, TenantId};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
@@ -18,7 +21,7 @@ use crate::repo::access::lock_current_scope_tx;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::{inventory, inventory_hold, license_plates};
 
-const OPERATION: &str = "inbound.confirm_unexpected_receipt.v1";
+const OPERATION: &str = "inbound.confirm_unexpected_receipt.v2";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ConfirmUnexpectedReceiptCommand<'a> {
@@ -31,6 +34,7 @@ pub struct ConfirmUnexpectedReceiptCommand<'a> {
     pub expiration: Option<Timestamp>,
     pub reason: UnexpectedReceiptReason,
     pub note: Option<&'a str>,
+    pub expected_policy: &'a ReceiptPolicyExpectation,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -44,6 +48,13 @@ struct ValidatedCommand<'a> {
     expiration: Option<Timestamp>,
     reason: UnexpectedReceiptReason,
     note: Option<&'a str>,
+    expected_policy: &'a ReceiptPolicyExpectation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmUnexpectedReceiptOutcome {
+    pub result: ConfirmUnexpectedReceiptResult,
+    pub receipt_policy: ReceiptPolicyReadModel,
 }
 
 fn required_text<'a>(value: &'a str, label: &str, maximum: usize) -> AppResult<&'a str> {
@@ -97,7 +108,72 @@ fn validate_command<'a>(
         expiration: command.expiration,
         reason: command.reason,
         note,
+        expected_policy: command.expected_policy,
     })
+}
+
+async fn enforce_excess_tolerance_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    load_id: i64,
+    item_id: i64,
+    quantity: i64,
+    tolerance_basis_points: u16,
+) -> AppResult<()> {
+    let totals = sqlx::query(
+        r#"SELECT
+             COALESCE((SELECT SUM(expected_qty) FROM load_lines
+               WHERE tenant_id=$1 AND load_id=$2 AND item_id=$3 AND deleted IS NULL),0)::bigint
+               AS expected_qty,
+             COALESCE((SELECT SUM(quantity) FROM unexpected_receipts
+               WHERE tenant_id=$1 AND load_id=$2 AND item_id=$3 AND reason_code='excess'),0)::bigint
+               AS prior_excess_qty"#,
+    )
+    .bind(tenant_id.get())
+    .bind(load_id)
+    .bind(item_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let expected_quantity: i64 = totals.try_get("expected_qty")?;
+    let prior_excess_quantity: i64 = totals.try_get("prior_excess_qty")?;
+    let allowed_excess = i128::from(expected_quantity)
+        .checked_mul(i128::from(tolerance_basis_points))
+        .ok_or_else(|| AppError::internal("receipt tolerance calculation overflow"))?
+        / 10_000;
+    let resulting_excess = i128::from(prior_excess_quantity)
+        .checked_add(i128::from(quantity))
+        .ok_or_else(|| AppError::bad_request("unexpected receipt quantity is too large"))?;
+    if resulting_excess > allowed_excess {
+        return Err(AppError::conflict(format!(
+            "excess receipt quantity exceeds the effective {tolerance_basis_points} basis-point tolerance"
+        )));
+    }
+    Ok(())
+}
+
+fn policy_scope_values(
+    scope: Option<ConfigurationScope>,
+) -> (Option<&'static str>, Option<i64>, Option<i64>) {
+    match scope {
+        None => (None, None, None),
+        Some(ConfigurationScope::Tenant) => (Some("tenant"), None, None),
+        Some(ConfigurationScope::InventoryOwner { inventory_owner_id }) => (
+            Some("inventory_owner"),
+            Some(inventory_owner_id.get()),
+            None,
+        ),
+        Some(ConfigurationScope::Facility { facility_id }) => {
+            (Some("facility"), None, Some(facility_id.get()))
+        }
+        Some(ConfigurationScope::OwnerFacility {
+            inventory_owner_id,
+            facility_id,
+        }) => (
+            Some("owner_facility"),
+            Some(inventory_owner_id.get()),
+            Some(facility_id.get()),
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -180,7 +256,7 @@ pub async fn confirm_unexpected_receipt(
     context: &CommandContext,
     load_id: i64,
     command: &ConfirmUnexpectedReceiptCommand<'_>,
-) -> AppResult<ConfirmUnexpectedReceiptResult> {
+) -> AppResult<ConfirmUnexpectedReceiptOutcome> {
     context.require_actor(access.tenant_id, access.user_id)?;
     if load_id <= 0 {
         return Err(AppError::bad_request("load ID must be positive"));
@@ -226,11 +302,32 @@ pub async fn confirm_unexpected_receipt(
     .await?
     .ok_or_else(|| AppError::not_found("inbound load"))?;
     if let Some(result) = prepared
-        .replayed::<ConfirmUnexpectedReceiptResult>(&mut tx)
+        .replayed::<ConfirmUnexpectedReceiptOutcome>(&mut tx)
         .await?
     {
         tx.commit().await?;
         return Ok(result);
+    }
+
+    let receipt_policy = crate::repo::receipt_policy::resolve_receipt_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        InventoryOwnerId::new(inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        FacilityId::new(facility_id).map_err(|error| AppError::internal(error.to_string()))?,
+        now,
+        true,
+    )
+    .await?;
+    if !receipt_policy.matches_expectation(command.expected_policy) {
+        return Err(AppError::conflict(
+            "receipt policy changed before unexpected receipt confirmation",
+        ));
+    }
+    if !receipt_policy.allow_unexpected {
+        return Err(AppError::conflict(
+            "the effective receipt policy disables unexpected receipts",
+        ));
     }
 
     let load_type = LoadType::parse(&load.try_get::<String, _>("type")?)
@@ -288,6 +385,22 @@ pub async fn confirm_unexpected_receipt(
     .ok_or_else(|| AppError::conflict("item barcode is not active in this tenant"))?;
     let item_id: i64 = item.try_get("id")?;
     let uom: String = item.try_get("packaging_unit")?;
+    let owner_item = sqlx::query(
+        r#"SELECT id,created FROM inventory_owner_items
+           WHERE tenant_id=$1 AND inventory_owner_id=$2 AND item_id=$3
+           FOR UPDATE"#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(item_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let owner_item_was_preexisting = owner_item.is_some();
+    if !owner_item_was_preexisting && !receipt_policy.quarantine_unmapped_items {
+        return Err(AppError::conflict(
+            "the effective receipt policy rejects items not mapped to this inventory owner",
+        ));
+    }
     let expected_on_load: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM load_lines WHERE tenant_id=$1 AND load_id=$2 AND item_id=$3 AND deleted IS NULL)",
     )
@@ -303,19 +416,31 @@ pub async fn confirm_unexpected_receipt(
             "unexpected receipt reason does not match the load expectation",
         ));
     }
+    if command.reason == UnexpectedReceiptReason::Excess {
+        enforce_excess_tolerance_tx(
+            &mut tx,
+            access.tenant_id,
+            load_id,
+            item_id,
+            command.quantity,
+            receipt_policy.over_receipt_tolerance_basis_points,
+        )
+        .await?;
+    }
 
-    sqlx::query(
+    let owner_item_mapping_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO inventory_owner_items(tenant_id,created,inventory_owner_id,item_id)
         VALUES ($1,$2,$3,$4)
         ON CONFLICT (tenant_id,inventory_owner_id,item_id) DO UPDATE SET deleted=NULL
+        RETURNING id
         "#,
     )
     .bind(access.tenant_id.get())
     .bind(now)
     .bind(inventory_owner_id)
     .bind(item_id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     let license_plate_id = license_plates::find_or_create_license_plate_tx(
@@ -421,6 +546,14 @@ pub async fn confirm_unexpected_receipt(
     )
     .await?;
 
+    let (policy_scope_level, policy_owner_id, policy_facility_id) =
+        policy_scope_values(receipt_policy.configuration_scope);
+    let policy_definition = serde_json::json!({
+        "kind": "receipt",
+        "allow_unexpected": receipt_policy.allow_unexpected,
+        "quarantine_unmapped_items": receipt_policy.quarantine_unmapped_items,
+        "over_receipt_tolerance_basis_points": receipt_policy.over_receipt_tolerance_basis_points,
+    });
     sqlx::query(
         r#"
         INSERT INTO unexpected_receipts
@@ -429,10 +562,13 @@ pub async fn confirm_unexpected_receipt(
              observed_receiving_location_barcode,license_plate_id,license_plate_barcode,
              item_batch_id,lot,serial,expiration,reason_code,note,
              inventory_transaction_id,inventory_balance_id,inventory_hold_id,
-             confirmed_by_user_id,confirmed_at)
+             confirmed_by_user_id,confirmed_at,owner_item_mapping_id,
+             owner_item_was_preexisting,policy_source,policy_configuration_id,
+             policy_configuration_revision,policy_scope_level,policy_inventory_owner_id,
+             policy_facility_id,policy_definition,policy_hash)
         OVERRIDING SYSTEM VALUE
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                $19,$20,$21,$22,$23,$24)
+                $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
         "#,
     )
     .bind(unexpected_receipt_id)
@@ -459,6 +595,19 @@ pub async fn confirm_unexpected_receipt(
     .bind(inventory_hold_id)
     .bind(context.actor_id.get())
     .bind(now)
+    .bind(owner_item_mapping_id)
+    .bind(owner_item_was_preexisting)
+    .bind(match receipt_policy.source {
+        ReceiptPolicySource::ProductDefault => "product_default",
+        ReceiptPolicySource::Configuration => "configuration",
+    })
+    .bind(receipt_policy.configuration_id.map(|value| value.get()))
+    .bind(receipt_policy.configuration_revision)
+    .bind(policy_scope_level)
+    .bind(policy_owner_id)
+    .bind(policy_facility_id)
+    .bind(policy_definition)
+    .bind(&receipt_policy.policy_hash)
     .execute(&mut *tx)
     .await?;
 
@@ -475,6 +624,8 @@ pub async fn confirm_unexpected_receipt(
         "inventory_transaction_id": inventory_transaction_id,
         "reason": command.reason.as_str(),
         "note": command.note,
+        "owner_item_was_preexisting": owner_item_was_preexisting,
+        "receipt_policy": receipt_policy,
     }))
     .map_err(|error| {
         AppError::internal(format!("encoding unexpected receipt activity: {error}"))
@@ -521,6 +672,10 @@ pub async fn confirm_unexpected_receipt(
         confirmed_by_user_id: context.actor_id.get(),
         confirmed_at: now,
     };
+    let outcome = ConfirmUnexpectedReceiptOutcome {
+        result,
+        receipt_policy,
+    };
     let event_identity = command_request_hash(
         prepared.actor_id(),
         prepared.operation(),
@@ -529,7 +684,7 @@ pub async fn confirm_unexpected_receipt(
     )?;
     let event_key = format!("inbound-unexpected-receipt:{}", event_identity.as_str());
     let aggregate_id = unexpected_receipt_id.to_string();
-    let payload = serde_json::to_value(&result).map_err(|error| {
+    let payload = serde_json::to_value(&outcome).map_err(|error| {
         AppError::internal(format!("encoding unexpected receipt event: {error}"))
     })?;
     outbox::enqueue(
@@ -545,7 +700,7 @@ pub async fn confirm_unexpected_receipt(
             ordering_key: &event_key,
             aggregate_sequence: 1,
             event_type: "inbound.unexpected_receipt.confirmed",
-            schema_version: 1,
+            schema_version: 2,
             payload: &payload,
             occurred_at: now,
         },
@@ -553,6 +708,6 @@ pub async fn confirm_unexpected_receipt(
     .await?;
 
     Ok(prepared
-        .commit_with_inventory_transaction(tx, result, Some(inventory_transaction_id))
+        .commit_with_inventory_transaction(tx, outcome, Some(inventory_transaction_id))
         .await?)
 }

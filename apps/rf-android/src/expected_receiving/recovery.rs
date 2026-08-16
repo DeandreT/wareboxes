@@ -13,6 +13,7 @@ pub struct ConfirmationRecoverySnapshotInput {
     pub status: ReceivingLoadStatus,
     pub expected_seal: Option<SealBarcode>,
     pub dock: ReceivingDock,
+    pub receipt_policy: ReceiptPolicy,
     pub selected_line: ExpectedReceiptLine,
 }
 
@@ -81,6 +82,11 @@ impl ConfirmationRecoverySnapshot {
         &self.input.selected_line
     }
 
+    #[must_use]
+    pub const fn receipt_policy(&self) -> &ReceiptPolicy {
+        &self.input.receipt_policy
+    }
+
     pub(super) fn capture(active: &ActiveSession, line_id: LoadLineId) -> Option<Self> {
         let selected_line = active.session.line(line_id)?.clone();
         Self::try_new(ConfirmationRecoverySnapshotInput {
@@ -92,6 +98,7 @@ impl ConfirmationRecoverySnapshot {
             status: active.session.status(),
             expected_seal: active.session.expected_seal().cloned(),
             dock: active.session.dock().clone(),
+            receipt_policy: active.session.receipt_policy().clone(),
             selected_line,
         })
         .ok()
@@ -191,6 +198,7 @@ impl ConfirmationRecoverySnapshot {
             status: self.status(),
             expected_seal: self.expected_seal().cloned(),
             dock: self.dock().clone(),
+            receipt_policy: self.receipt_policy().clone(),
             lines: vec![line.clone()],
         })
         .ok()?;

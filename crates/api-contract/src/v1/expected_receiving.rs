@@ -1,6 +1,117 @@
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
-use super::InventoryBalanceStatus;
+use super::{ConfigurationScope, InventoryBalanceStatus};
+
+pub const PRODUCT_DEFAULT_RECEIPT_POLICY_HASH: &str =
+    "d52ecae3b5747640fb1bcdf91c7fb3a8800fa4ccce0c220267b44da3a8808326";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReceiptPolicyExpectation {
+    pub source: ReceiptPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub policy_hash: String,
+}
+
+impl ReceiptPolicyExpectation {
+    pub fn product_default() -> Self {
+        Self {
+            source: ReceiptPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            policy_hash: PRODUCT_DEFAULT_RECEIPT_POLICY_HASH.to_owned(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        let identity_is_valid = match self.source {
+            ReceiptPolicySource::ProductDefault => {
+                self.configuration_id.is_none() && self.configuration_revision.is_none()
+            }
+            ReceiptPolicySource::Configuration => {
+                self.configuration_id.is_some_and(|id| id > 0)
+                    && self
+                        .configuration_revision
+                        .is_some_and(|revision| revision > 0)
+            }
+        };
+        if !identity_is_valid {
+            return Err("receipt policy identity is invalid");
+        }
+        if self.policy_hash.len() != 64
+            || !self
+                .policy_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("receipt policy hash must be lowercase SHA-256 hex");
+        }
+        Ok(())
+    }
+}
+
+impl Default for ReceiptPolicyExpectation {
+    fn default() -> Self {
+        Self::product_default()
+    }
+}
+
+impl<'de> Deserialize<'de> for ReceiptPolicyExpectation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            source: ReceiptPolicySource,
+            configuration_id: Option<i64>,
+            configuration_revision: Option<i64>,
+            policy_hash: String,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let value = Self {
+            source: raw.source,
+            configuration_id: raw.configuration_id,
+            configuration_revision: raw.configuration_revision,
+            policy_hash: raw.policy_hash,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptPolicyResponse {
+    pub source: ReceiptPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub allow_unexpected: bool,
+    pub quarantine_unmapped_items: bool,
+    pub over_receipt_tolerance_basis_points: u16,
+    pub policy_hash: String,
+}
+
+impl ReceiptPolicyResponse {
+    pub fn expectation(&self) -> ReceiptPolicyExpectation {
+        ReceiptPolicyExpectation {
+            source: self.source,
+            configuration_id: self.configuration_id,
+            configuration_revision: self.configuration_revision,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+}
 
 /// Inbound load states visible to an expected-receiving scanner session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +161,7 @@ pub struct ExpectedReceivingSessionResponse {
     pub status: ExpectedReceivingLoadStatus,
     pub expected_seal: Option<String>,
     pub receiving_location: ExpectedReceivingLocation,
+    pub receipt_policy: ReceiptPolicyResponse,
     pub lines: Vec<ExpectedReceiptLine>,
 }
 
@@ -98,6 +210,8 @@ pub struct ConfirmUnexpectedReceiptRequest {
     pub expiration: Option<String>,
     pub reason: UnexpectedReceiptReason,
     pub note: Option<String>,
+    #[serde(default)]
+    pub expected_policy: ReceiptPolicyExpectation,
 }
 
 /// Result of receiving unexpected stock into quarantine with an exact hold.
@@ -129,6 +243,7 @@ pub struct UnexpectedReceiptConfirmationResponse {
     pub load_status: ExpectedReceivingLoadStatus,
     pub confirmed_by_user_id: i64,
     pub confirmed_at: String,
+    pub receipt_policy: ReceiptPolicyResponse,
 }
 
 /// Typed reason for rejecting or marking expected inventory missing.
@@ -220,6 +335,19 @@ mod tests {
 
     use super::*;
 
+    fn product_receipt_policy() -> ReceiptPolicyResponse {
+        ReceiptPolicyResponse {
+            source: ReceiptPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            configuration_scope: None,
+            allow_unexpected: true,
+            quarantine_unmapped_items: true,
+            over_receipt_tolerance_basis_points: 10_000,
+            policy_hash: PRODUCT_DEFAULT_RECEIPT_POLICY_HASH.into(),
+        }
+    }
+
     fn session() -> ExpectedReceivingSessionResponse {
         ExpectedReceivingSessionResponse {
             load_id: 11,
@@ -233,6 +361,7 @@ mod tests {
                 barcode: "DOCK-04".into(),
                 name: Some("Inbound Dock 4".into()),
             },
+            receipt_policy: product_receipt_policy(),
             lines: vec![ExpectedReceiptLine {
                 load_line_id: 55,
                 item_id: 66,
@@ -269,6 +398,16 @@ mod tests {
                     "location_id": 44,
                     "barcode": "DOCK-04",
                     "name": "Inbound Dock 4"
+                },
+                "receipt_policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "configuration_scope": null,
+                    "allow_unexpected": true,
+                    "quarantine_unmapped_items": true,
+                    "over_receipt_tolerance_basis_points": 10000,
+                    "policy_hash": PRODUCT_DEFAULT_RECEIPT_POLICY_HASH
                 },
                 "lines": [{
                     "load_line_id": 55,
@@ -460,6 +599,7 @@ mod tests {
             expiration: Some("2027-08-26T00:00:00+00:00".into()),
             reason: UnexpectedReceiptReason::Excess,
             note: Some("Three cases above the ASN quantity".into()),
+            expected_policy: ReceiptPolicyExpectation::product_default(),
         };
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(
@@ -473,13 +613,60 @@ mod tests {
                 "serial": null,
                 "expiration": "2027-08-26T00:00:00+00:00",
                 "reason": "excess",
-                "note": "Three cases above the ASN quantity"
+                "note": "Three cases above the ASN quantity",
+                "expected_policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "policy_hash": PRODUCT_DEFAULT_RECEIPT_POLICY_HASH
+                }
             })
         );
         assert_eq!(
             serde_json::from_value::<ConfirmUnexpectedReceiptRequest>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn unexpected_receipt_policy_expectation_defaults_safely_and_rejects_malformed_identity() {
+        let mut request = serde_json::to_value(ConfirmUnexpectedReceiptRequest {
+            item_barcode: "CASE-66".into(),
+            receiving_location_barcode: "DOCK-04".into(),
+            quantity: 1,
+            license_plate_barcode: None,
+            lot: None,
+            serial: None,
+            expiration: None,
+            reason: UnexpectedReceiptReason::UnexpectedItem,
+            note: None,
+            expected_policy: ReceiptPolicyExpectation::product_default(),
+        })
+        .unwrap();
+        request.as_object_mut().unwrap().remove("expected_policy");
+        let decoded: ConfirmUnexpectedReceiptRequest =
+            serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(
+            decoded.expected_policy,
+            ReceiptPolicyExpectation::product_default()
+        );
+
+        request["expected_policy"] = json!({
+            "source": "product_default",
+            "configuration_id": 41,
+            "configuration_revision": 2,
+            "policy_hash": PRODUCT_DEFAULT_RECEIPT_POLICY_HASH
+        });
+        assert!(
+            serde_json::from_value::<ConfirmUnexpectedReceiptRequest>(request.clone()).is_err()
+        );
+        request["expected_policy"] = json!({
+            "source": "configuration",
+            "configuration_id": 41,
+            "configuration_revision": 2,
+            "policy_hash": "not-a-sha256"
+        });
+        assert!(serde_json::from_value::<ConfirmUnexpectedReceiptRequest>(request).is_err());
     }
 
     #[test]
@@ -510,6 +697,7 @@ mod tests {
             load_status: ExpectedReceivingLoadStatus::Received,
             confirmed_by_user_id: 77,
             confirmed_at: "2026-08-09T18:00:00+00:00".into(),
+            receipt_policy: product_receipt_policy(),
         };
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(
@@ -539,7 +727,17 @@ mod tests {
                 "note": "Three cases above the ASN quantity",
                 "load_status": "received",
                 "confirmed_by_user_id": 77,
-                "confirmed_at": "2026-08-09T18:00:00+00:00"
+                "confirmed_at": "2026-08-09T18:00:00+00:00",
+                "receipt_policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "configuration_scope": null,
+                    "allow_unexpected": true,
+                    "quarantine_unmapped_items": true,
+                    "over_receipt_tolerance_basis_points": 10000,
+                    "policy_hash": PRODUCT_DEFAULT_RECEIPT_POLICY_HASH
+                }
             })
         );
         assert_eq!(

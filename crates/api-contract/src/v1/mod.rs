@@ -136,8 +136,9 @@ pub use expected_receiving::{
     ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
     ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
     ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
-    ExpectedReceivingSessionResponse, UnexpectedReceiptConfirmationResponse,
-    UnexpectedReceiptReason,
+    ExpectedReceivingSessionResponse, ReceiptPolicyExpectation, ReceiptPolicyResponse,
+    ReceiptPolicySource, UnexpectedReceiptConfirmationResponse, UnexpectedReceiptReason,
+    PRODUCT_DEFAULT_RECEIPT_POLICY_HASH,
 };
 pub use facility_shipping_origin::{
     ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,

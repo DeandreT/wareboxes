@@ -3,8 +3,8 @@ use crate::expected_receiving::{
     ConfirmationIntent, ConfirmationRecoverySnapshot, ConfirmationRecoverySnapshotInput,
     DockBarcode, ExpectedReceiptCommand, ExpectedReceiptLine, ExpectedReceiptLineInput, FacilityId,
     InventoryOwnerId, ItemBarcode, ItemId, LoadBarcode, LoadId, LoadLineId, LocationId,
-    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingCommandIntent,
-    ReceivingDock, ReceivingLoadStatus, StockDimension,
+    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceiptPolicy,
+    ReceivingCommandIntent, ReceivingDock, ReceivingLoadStatus, StockDimension,
 };
 use crate::picking::{
     PickShortageCommand, PickShortageOutcome, PickShortageReason, PickingCommand,
@@ -136,6 +136,7 @@ fn expected_receipt_draft(command_id: &str, key: &str) -> DurableCommandDraft {
             DockBarcode::new("DOCK-04").unwrap(),
             Some("Inbound dock 4".into()),
         ),
+        receipt_policy: ReceiptPolicy::product_default(),
         selected_line: line,
     })
     .unwrap();

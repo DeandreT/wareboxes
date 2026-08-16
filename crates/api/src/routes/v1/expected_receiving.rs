@@ -2,18 +2,24 @@ use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use wareboxes_api_contract::v1::{
-    ConfirmExpectedReceiptRequest, ConfirmUnexpectedReceiptRequest,
-    ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
-    ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
-    ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
-    ExpectedReceivingSessionResponse, InventoryBalanceStatus,
-    UnexpectedReceiptConfirmationResponse, UnexpectedReceiptReason as ApiUnexpectedReceiptReason,
+    ConfigurationScope as ApiConfigurationScope, ConfirmExpectedReceiptRequest,
+    ConfirmUnexpectedReceiptRequest, ExpectedReceiptConfirmationResponse,
+    ExpectedReceiptDisposition, ExpectedReceiptExceptionReason, ExpectedReceiptLine,
+    ExpectedReceiptLineStatus, ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus,
+    ExpectedReceivingLocation, ExpectedReceivingSessionResponse, InventoryBalanceStatus,
+    ReceiptPolicyExpectation as ApiReceiptPolicyExpectation,
+    ReceiptPolicyResponse as ApiReceiptPolicyResponse,
+    ReceiptPolicySource as ApiReceiptPolicySource, UnexpectedReceiptConfirmationResponse,
+    UnexpectedReceiptReason as ApiUnexpectedReceiptReason,
+};
+use wareboxes_application::receipt_policy::{
+    ReceiptPolicyExpectation, ReceiptPolicyReadModel, ReceiptPolicySource,
 };
 use wareboxes_core::models::{
-    ConfirmUnexpectedReceiptResult, InboundReceiptExceptionReason, InboundReceiptQuarantineReason,
-    InventoryStatus, LoadLineStatus, LoadStatus, ReceiveExpectedInventoryResult,
-    UnexpectedReceiptReason,
+    InboundReceiptExceptionReason, InboundReceiptQuarantineReason, InventoryStatus, LoadLineStatus,
+    LoadStatus, ReceiveExpectedInventoryResult, UnexpectedReceiptReason,
 };
+use wareboxes_domain::{ConfigurationScope, ConfigurationVersionId};
 
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
@@ -100,6 +106,7 @@ pub async fn confirm_unexpected(
     require_positive(load_id, "load ID")?;
     validate_unexpected_confirmation(&body)?;
     let expiration = parse_timestamp(body.expiration.as_deref(), "expiration")?;
+    let expected_policy = map_receipt_policy_expectation(body.expected_policy.clone())?;
     let context = user.command_context(&idempotency_key);
     let result = repo::unexpected_receipt::confirm_unexpected_receipt(
         &state.db,
@@ -116,6 +123,7 @@ pub async fn confirm_unexpected(
             expiration,
             reason: map_unexpected_reason(body.reason),
             note: body.note.as_deref(),
+            expected_policy: &expected_policy,
         },
     )
     .await?;
@@ -347,8 +355,9 @@ fn map_unexpected_reason(reason: ApiUnexpectedReceiptReason) -> UnexpectedReceip
 }
 
 fn map_unexpected_result(
-    result: ConfirmUnexpectedReceiptResult,
+    outcome: repo::unexpected_receipt::ConfirmUnexpectedReceiptOutcome,
 ) -> V1Result<UnexpectedReceiptConfirmationResponse> {
+    let result = outcome.result;
     let reason = match result.reason {
         UnexpectedReceiptReason::Excess => ApiUnexpectedReceiptReason::Excess,
         UnexpectedReceiptReason::UnexpectedItem => ApiUnexpectedReceiptReason::UnexpectedItem,
@@ -382,7 +391,64 @@ fn map_unexpected_result(
         load_status: map_load_status(result.load_status)?,
         confirmed_by_user_id: result.confirmed_by_user_id,
         confirmed_at: result.confirmed_at.to_rfc3339(),
+        receipt_policy: map_receipt_policy(outcome.receipt_policy),
     })
+}
+
+fn map_receipt_policy_expectation(
+    value: ApiReceiptPolicyExpectation,
+) -> V1Result<ReceiptPolicyExpectation> {
+    let expectation = ReceiptPolicyExpectation {
+        source: match value.source {
+            ApiReceiptPolicySource::ProductDefault => ReceiptPolicySource::ProductDefault,
+            ApiReceiptPolicySource::Configuration => ReceiptPolicySource::Configuration,
+        },
+        configuration_id: value
+            .configuration_id
+            .map(ConfigurationVersionId::new)
+            .transpose()
+            .map_err(|error| AppError::bad_request(error.to_string()))?,
+        configuration_revision: value.configuration_revision,
+        policy_hash: value.policy_hash,
+    };
+    if expectation.is_well_formed() {
+        Ok(expectation)
+    } else {
+        Err(AppError::bad_request("receipt policy expectation is invalid").into())
+    }
+}
+
+fn map_receipt_policy(value: ReceiptPolicyReadModel) -> ApiReceiptPolicyResponse {
+    ApiReceiptPolicyResponse {
+        source: match value.source {
+            ReceiptPolicySource::ProductDefault => ApiReceiptPolicySource::ProductDefault,
+            ReceiptPolicySource::Configuration => ApiReceiptPolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id.map(|id| id.get()),
+        configuration_revision: value.configuration_revision,
+        configuration_scope: value.configuration_scope.map(|scope| match scope {
+            ConfigurationScope::Tenant => ApiConfigurationScope::Tenant,
+            ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                ApiConfigurationScope::InventoryOwner {
+                    inventory_owner_id: inventory_owner_id.get(),
+                }
+            }
+            ConfigurationScope::Facility { facility_id } => ApiConfigurationScope::Facility {
+                facility_id: facility_id.get(),
+            },
+            ConfigurationScope::OwnerFacility {
+                inventory_owner_id,
+                facility_id,
+            } => ApiConfigurationScope::OwnerFacility {
+                inventory_owner_id: inventory_owner_id.get(),
+                facility_id: facility_id.get(),
+            },
+        }),
+        allow_unexpected: value.allow_unexpected,
+        quarantine_unmapped_items: value.quarantine_unmapped_items,
+        over_receipt_tolerance_basis_points: value.over_receipt_tolerance_basis_points,
+        policy_hash: value.policy_hash,
+    }
 }
 
 fn validate_unexpected_confirmation(body: &ConfirmUnexpectedReceiptRequest) -> V1Result<()> {
@@ -508,6 +574,7 @@ fn map_session(
             barcode: session.receiving_location.barcode,
             name: session.receiving_location.name,
         },
+        receipt_policy: map_receipt_policy(session.receipt_policy),
         lines: session.lines.into_iter().map(map_line).collect(),
     }
 }

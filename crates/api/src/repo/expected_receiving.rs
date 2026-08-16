@@ -1,7 +1,9 @@
 //! Read model for scanner-first expected receiving sessions.
 
 use sqlx::Row;
+use wareboxes_application::receipt_policy::ReceiptPolicyReadModel;
 use wareboxes_core::models::TenantAccess;
+use wareboxes_domain::{FacilityId, InventoryOwnerId};
 
 use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
@@ -47,6 +49,7 @@ pub struct ExpectedReceivingSession {
     pub status: ExpectedReceivingLoadStatus,
     pub expected_seal: Option<String>,
     pub receiving_location: ExpectedReceivingLocation,
+    pub receipt_policy: ReceiptPolicyReadModel,
     pub lines: Vec<ExpectedReceiptLine>,
 }
 
@@ -210,16 +213,29 @@ pub async fn get_expected_receiving_session(
         ));
     }
     let lines = rows.iter().map(map_line).collect::<AppResult<Vec<_>>>()?;
+    let inventory_owner_id_raw = load.try_get("inventory_owner_id")?;
+    let facility_id_raw = load.try_get("facility_id")?;
+    let receipt_policy = crate::repo::receipt_policy::resolve_receipt_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        InventoryOwnerId::new(inventory_owner_id_raw)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        FacilityId::new(facility_id_raw).map_err(|error| AppError::internal(error.to_string()))?,
+        crate::db::now_iso(),
+        false,
+    )
+    .await?;
     tx.commit().await?;
 
     Ok(ExpectedReceivingSession {
         load_id: load.try_get("id")?,
-        inventory_owner_id: load.try_get("inventory_owner_id")?,
-        facility_id: load.try_get("facility_id")?,
+        inventory_owner_id: inventory_owner_id_raw,
+        facility_id: facility_id_raw,
         reference_number: load.try_get("reference_number")?,
         status,
         expected_seal: load.try_get("seal_number")?,
         receiving_location,
+        receipt_policy,
         lines,
     })
 }
