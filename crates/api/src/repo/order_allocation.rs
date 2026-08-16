@@ -204,12 +204,10 @@ pub(crate) async fn plan_order_allocation_tx(
     command: &PlanOrderAllocationCommand,
     occurred_at: Timestamp,
 ) -> AppResult<PlanOrderAllocationResult> {
-    let mut tx = tx;
-
     if !scope.includes_facility(command.facility_id.get()) {
         return Err(AppError::forbidden());
     }
-    let order = lock_order_tx(&mut tx, access.tenant_id, command.order_id).await?;
+    let order = lock_order_tx(tx, access.tenant_id, command.order_id).await?;
     if !scope.includes_inventory_owner(order.inventory_owner_id.get()) {
         return Err(AppError::not_found("order"));
     }
@@ -219,14 +217,14 @@ pub(crate) async fn plan_order_allocation_tx(
         ));
     }
     lock_active_owner_facility_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.facility_id,
     )
     .await?;
     let policy = resolve_allocation_policy_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.facility_id,
@@ -241,7 +239,7 @@ pub(crate) async fn plan_order_allocation_tx(
     }
 
     let lines = lock_order_lines_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.order_id,
@@ -251,21 +249,21 @@ pub(crate) async fn plan_order_allocation_tx(
         return Err(AppError::internal("order has no active demand lines"));
     }
     let active_hold_count = lock_active_order_holds_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.order_id,
     )
     .await?;
     let mut reservations = lock_active_reservations_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.order_id,
     )
     .await?;
     if lock_active_cross_dock_work_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.order_id,
@@ -280,7 +278,7 @@ pub(crate) async fn plan_order_allocation_tx(
     validate_existing_reservations(&lines, &reservations, command.facility_id)?;
 
     create_missing_full_demand_reservations_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command,
@@ -290,7 +288,7 @@ pub(crate) async fn plan_order_allocation_tx(
         &mut reservations,
     )
     .await?;
-    load_allocated_quantities_tx(&mut tx, access.tenant_id, &mut reservations).await?;
+    load_allocated_quantities_tx(tx, access.tenant_id, &mut reservations).await?;
 
     let demand_quantity = sum_line_demand(&lines)?;
     let previously_allocated_quantity = reservations
@@ -326,7 +324,7 @@ pub(crate) async fn plan_order_allocation_tx(
     }
 
     let candidates = lock_candidate_inventory_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.facility_id,
@@ -356,7 +354,7 @@ pub(crate) async fn plan_order_allocation_tx(
         .checked_next()
         .ok_or_else(|| AppError::conflict("order revision cannot be incremented"))?;
     let allocation_run_id = insert_allocation_run_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         context.actor_id.get(),
@@ -372,7 +370,7 @@ pub(crate) async fn plan_order_allocation_tx(
     .await?;
 
     persist_planned_lines_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         context.actor_id.get(),
@@ -385,7 +383,7 @@ pub(crate) async fn plan_order_allocation_tx(
     )
     .await?;
     update_order_revision_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         command.order_id,
         command.expected_revision,
@@ -393,7 +391,7 @@ pub(crate) async fn plan_order_allocation_tx(
     )
     .await?;
     insert_order_activity_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.order_id.get(),
@@ -402,7 +400,7 @@ pub(crate) async fn plan_order_allocation_tx(
     )
     .await?;
     enqueue_order_allocation_event_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         context.actor_id.get(),
@@ -420,7 +418,7 @@ pub(crate) async fn plan_order_allocation_tx(
     .await?;
 
     let lines = load_line_states_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id,
         command.order_id,
