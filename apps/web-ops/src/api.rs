@@ -128,7 +128,10 @@ pub use order::{
     replace_fulfillment_order_lines,
 };
 mod pick_wave;
-pub use pick_wave::{cancel_pick_wave, pick_wave, pick_waves, plan_pick_wave, release_pick_wave};
+pub use pick_wave::{
+    cancel_pick_wave, pick_wave, pick_waves, plan_pick_wave, release_pick_wave,
+    resolve_pick_wave_policies,
+};
 mod putaway;
 pub use putaway::{create_license_plate_putaway, create_putaway, putaway_candidates, putaway_work};
 mod purchase_order;

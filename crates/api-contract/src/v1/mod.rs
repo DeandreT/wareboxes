@@ -349,8 +349,11 @@ pub use packing::{
 };
 pub use pick_wave::{
     CancelPickWaveRequest, PickWaveCancellationReason, PickWaveOrderResponse, PickWavePage,
-    PickWavePageRequest, PickWaveResponse, PickWaveSort, PickWaveSortDirection, PickWaveStatus,
+    PickWavePageRequest, PickWavePolicyResolutionResponse, PickWavePolicyResolutionsResponse,
+    PickWaveResponse, PickWaveSort, PickWaveSortDirection, PickWaveStatus,
     PlanPickWaveOrderRequest, PlanPickWaveRequest, ReleasePickWaveRequest,
+    ResolvePickWavePoliciesRequest, ResolvePickWavePolicyOrderRequest, WavePolicyExpectation,
+    WavePolicyResponse, WavePolicySource, PRODUCT_DEFAULT_WAVE_POLICY_HASH,
 };
 pub use picking::{
     AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,

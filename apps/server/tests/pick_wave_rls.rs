@@ -91,16 +91,18 @@ async fn typed_pick_wave_ledgers_force_tenant_rls_and_expose_only_workflow_privi
             ("pick_waves".to_owned(), true, true, 1),
         ]
     );
-    let column_updates: (bool, bool, bool, bool) = sqlx::query_as(
+    let column_updates: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"SELECT has_column_privilege(current_user,'pick_waves','status','UPDATE'),
                   has_column_privilege(current_user,'pick_waves','name','UPDATE'),
                   has_column_privilege(current_user,'pick_wave_orders','active','UPDATE'),
-                  has_column_privilege(current_user,'pick_wave_orders','order_id','UPDATE')"#,
+                  has_column_privilege(current_user,'pick_wave_orders','order_id','UPDATE'),
+                  has_column_privilege(current_user,'pick_wave_orders','wave_policy_hash','UPDATE'),
+                  has_function_privilege(current_user,'public.validate_wave_policy_snapshot()','EXECUTE')"#,
     )
     .fetch_one(&fixture.db)
     .await
     .unwrap();
-    assert_eq!(column_updates, (true, false, true, false));
+    assert_eq!(column_updates, (true, false, true, false, false, false));
 }
 
 #[tokio::test]

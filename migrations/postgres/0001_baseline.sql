@@ -49295,3 +49295,219 @@ EXECUTE FUNCTION public.require_putaway_policy_destination();
 REVOKE ALL ON FUNCTION public.validate_putaway_policy_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_putaway_policy_evidence_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_putaway_policy_destination() FROM PUBLIC;
+
+-- Effective wave policy is resolved independently for every client represented
+-- in a multi-client wave. Membership freezes exact policy evidence so release,
+-- replay, and audit cannot silently adopt a later configuration revision.
+ALTER TABLE public.pick_wave_orders
+  ADD COLUMN wave_policy_source text NOT NULL,
+  ADD COLUMN wave_policy_configuration_id bigint,
+  ADD COLUMN wave_policy_configuration_revision bigint,
+  ADD COLUMN wave_policy_scope_level text,
+  ADD COLUMN wave_policy_scope_owner_id bigint,
+  ADD COLUMN wave_policy_scope_facility_id bigint,
+  ADD COLUMN wave_policy_definition jsonb NOT NULL,
+  ADD COLUMN wave_policy_hash text NOT NULL,
+  ADD CONSTRAINT pick_wave_orders_policy_configuration_fkey
+    FOREIGN KEY (tenant_id,wave_policy_configuration_id)
+    REFERENCES public.configuration_versions(tenant_id,id),
+  ADD CONSTRAINT pick_wave_orders_policy_shape_check CHECK (
+    wave_policy_hash~'^[0-9a-f]{64}$'
+    AND jsonb_typeof(wave_policy_definition)='object'
+    AND wave_policy_definition ?& ARRAY['max_orders','require_complete_allocation']
+    AND wave_policy_definition-ARRAY['max_orders','require_complete_allocation']='{}'::jsonb
+    AND jsonb_typeof(wave_policy_definition->'max_orders')='number'
+    AND (wave_policy_definition->>'max_orders')::bigint BETWEEN 1 AND 10000
+    AND jsonb_typeof(wave_policy_definition->'require_complete_allocation')='boolean'
+    AND ((wave_policy_source='product_default'
+          AND wave_policy_configuration_id IS NULL
+          AND wave_policy_configuration_revision IS NULL
+          AND wave_policy_scope_level IS NULL
+          AND wave_policy_scope_owner_id IS NULL
+          AND wave_policy_scope_facility_id IS NULL)
+      OR (wave_policy_source='configuration'
+          AND wave_policy_configuration_id IS NOT NULL
+          AND wave_policy_configuration_revision>0
+          AND ((wave_policy_scope_level='tenant'
+                AND wave_policy_scope_owner_id IS NULL
+                AND wave_policy_scope_facility_id IS NULL)
+            OR (wave_policy_scope_level='inventory_owner'
+                AND wave_policy_scope_owner_id=inventory_owner_id
+                AND wave_policy_scope_facility_id IS NULL)
+            OR (wave_policy_scope_level='facility'
+                AND wave_policy_scope_owner_id IS NULL
+                AND wave_policy_scope_facility_id=facility_id)
+            OR (wave_policy_scope_level='owner_facility'
+                AND wave_policy_scope_owner_id=inventory_owner_id
+                AND wave_policy_scope_facility_id=facility_id)))));
+
+CREATE INDEX pick_wave_orders_policy_configuration_idx
+ON public.pick_wave_orders(tenant_id,wave_policy_configuration_id)
+WHERE wave_policy_configuration_id IS NOT NULL;
+
+CREATE FUNCTION public.validate_wave_policy_snapshot() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE wave_planned_at timestamp with time zone;
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE calculated_hash text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:wave',NEW.tenant_id),0));
+  SELECT wave.planned_at INTO wave_planned_at FROM public.pick_waves wave
+  WHERE wave.tenant_id=NEW.tenant_id AND wave.facility_id=NEW.facility_id
+    AND wave.id=NEW.pick_wave_id;
+  IF wave_planned_at IS NULL THEN
+    RAISE EXCEPTION 'wave policy requires its wave header' USING ERRCODE='23514';
+  END IF;
+  calculated_hash:=encode(sha256(convert_to(
+    'wave-policy-v1|'||(NEW.wave_policy_definition->>'max_orders')||'|'||
+    (NEW.wave_policy_definition->>'require_complete_allocation'),'UTF8')),'hex');
+  IF calculated_hash IS DISTINCT FROM NEW.wave_policy_hash THEN
+    RAISE EXCEPTION 'wave policy hash does not match its snapshot' USING ERRCODE='23514';
+  END IF;
+
+  SELECT configuration.id INTO resolved_configuration_id
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id
+    AND configuration.kind='wave' AND configuration.status='active'
+    AND configuration.effective_from<=wave_planned_at
+    AND (configuration.effective_until IS NULL OR configuration.effective_until>wave_planned_at)
+    AND (configuration.inventory_owner_id IS NULL
+         OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level
+             WHEN 'owner_facility' THEN 2
+             WHEN 'inventory_owner' THEN 1
+             WHEN 'facility' THEN 1 ELSE 0 END DESC,
+           configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+
+  IF NEW.wave_policy_source='product_default' THEN
+    IF resolved_configuration_id IS NOT NULL
+       OR NEW.wave_policy_definition<>jsonb_build_object(
+         'max_orders',10000,'require_complete_allocation',false) THEN
+      RAISE EXCEPTION 'wave product default is not effective or exact' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  SELECT * INTO configuration_row FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id
+    AND configuration.id=NEW.wave_policy_configuration_id;
+  IF NOT FOUND OR resolved_configuration_id IS DISTINCT FROM configuration_row.id
+     OR configuration_row.kind<>'wave'
+     OR configuration_row.revision<>NEW.wave_policy_configuration_revision
+     OR configuration_row.scope_level<>NEW.wave_policy_scope_level
+     OR configuration_row.inventory_owner_id IS DISTINCT FROM NEW.wave_policy_scope_owner_id
+     OR configuration_row.facility_id IS DISTINCT FROM NEW.wave_policy_scope_facility_id
+     OR configuration_row.definition-'kind'<>NEW.wave_policy_definition THEN
+    RAISE EXCEPTION 'wave configuration snapshot is stale or inconsistent'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_wave_policy_evidence_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.wave_policy_source IS DISTINCT FROM OLD.wave_policy_source
+     OR NEW.wave_policy_configuration_id IS DISTINCT FROM OLD.wave_policy_configuration_id
+     OR NEW.wave_policy_configuration_revision IS DISTINCT FROM OLD.wave_policy_configuration_revision
+     OR NEW.wave_policy_scope_level IS DISTINCT FROM OLD.wave_policy_scope_level
+     OR NEW.wave_policy_scope_owner_id IS DISTINCT FROM OLD.wave_policy_scope_owner_id
+     OR NEW.wave_policy_scope_facility_id IS DISTINCT FROM OLD.wave_policy_scope_facility_id
+     OR NEW.wave_policy_definition IS DISTINCT FROM OLD.wave_policy_definition
+     OR NEW.wave_policy_hash IS DISTINCT FROM OLD.wave_policy_hash THEN
+    RAISE EXCEPTION 'wave policy evidence is immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_wave_policy_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE require_complete boolean;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.pick_wave_orders member
+    WHERE member.tenant_id=NEW.tenant_id AND member.pick_wave_id=NEW.pick_wave_id
+      AND member.inventory_owner_id=NEW.inventory_owner_id
+      AND (member.wave_policy_hash IS DISTINCT FROM NEW.wave_policy_hash
+        OR member.wave_policy_configuration_id IS DISTINCT FROM NEW.wave_policy_configuration_id
+        OR member.wave_policy_configuration_revision IS DISTINCT FROM NEW.wave_policy_configuration_revision)
+  ) THEN
+    RAISE EXCEPTION 'one client resolved multiple policies in a wave' USING ERRCODE='23514';
+  END IF;
+  IF (SELECT count(*) FROM public.pick_wave_orders member
+      WHERE member.tenant_id=NEW.tenant_id AND member.pick_wave_id=NEW.pick_wave_id
+        AND member.inventory_owner_id=NEW.inventory_owner_id)>
+      (NEW.wave_policy_definition->>'max_orders')::bigint THEN
+    RAISE EXCEPTION 'wave client order count exceeds its frozen policy' USING ERRCODE='23514';
+  END IF;
+
+  require_complete:=(NEW.wave_policy_definition->>'require_complete_allocation')::boolean;
+  IF require_complete THEN
+    PERFORM reservation.id FROM public.inventory_reservations reservation
+    WHERE reservation.tenant_id=NEW.tenant_id
+      AND reservation.inventory_owner_id=NEW.inventory_owner_id
+      AND reservation.facility_id=NEW.facility_id
+      AND reservation.order_id=NEW.order_id
+    ORDER BY reservation.id FOR SHARE;
+    PERFORM allocation.id FROM public.inventory_allocations allocation
+    JOIN public.inventory_reservations reservation
+      ON reservation.tenant_id=allocation.tenant_id
+     AND reservation.inventory_owner_id=allocation.inventory_owner_id
+     AND reservation.id=allocation.reservation_id
+    WHERE allocation.tenant_id=NEW.tenant_id
+      AND allocation.inventory_owner_id=NEW.inventory_owner_id
+      AND allocation.facility_id=NEW.facility_id
+      AND reservation.order_id=NEW.order_id
+    ORDER BY allocation.id FOR SHARE OF allocation;
+    IF NOT EXISTS (
+      SELECT 1 FROM public.order_items line
+      WHERE line.tenant_id=NEW.tenant_id
+        AND line.inventory_owner_id=NEW.inventory_owner_id
+        AND line.order_id=NEW.order_id AND line.deleted IS NULL)
+      OR EXISTS (
+      SELECT 1 FROM public.order_items line
+      JOIN public.outbound_effective_demand demand
+        ON demand.tenant_id=line.tenant_id
+       AND demand.inventory_owner_id=line.inventory_owner_id
+       AND demand.order_id=line.order_id AND demand.order_item_id=line.id
+      WHERE line.tenant_id=NEW.tenant_id
+        AND line.inventory_owner_id=NEW.inventory_owner_id
+        AND line.order_id=NEW.order_id AND line.deleted IS NULL
+        AND demand.effective_qty IS DISTINCT FROM COALESCE((
+          SELECT SUM(allocation.qty) FROM public.inventory_reservations reservation
+          JOIN public.inventory_allocations allocation
+            ON allocation.tenant_id=reservation.tenant_id
+           AND allocation.inventory_owner_id=reservation.inventory_owner_id
+           AND allocation.reservation_id=reservation.id
+          WHERE reservation.tenant_id=line.tenant_id
+            AND reservation.inventory_owner_id=line.inventory_owner_id
+            AND reservation.order_id=line.order_id
+            AND reservation.order_item_id=line.id
+            AND reservation.facility_id=NEW.facility_id
+            AND reservation.status='active' AND reservation.deleted IS NULL
+            AND allocation.facility_id=NEW.facility_id
+            AND allocation.status='allocated' AND allocation.deleted IS NULL
+            AND allocation.execution_stage='pick_source'),0)) THEN
+      RAISE EXCEPTION 'wave policy requires complete allocation' USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER pick_wave_orders_validate_policy_snapshot
+BEFORE INSERT ON public.pick_wave_orders FOR EACH ROW
+EXECUTE FUNCTION public.validate_wave_policy_snapshot();
+CREATE TRIGGER pick_wave_orders_guard_policy_evidence
+BEFORE UPDATE ON public.pick_wave_orders FOR EACH ROW
+EXECUTE FUNCTION public.guard_wave_policy_evidence_mutation();
+CREATE CONSTRAINT TRIGGER pick_wave_orders_require_policy_consistency
+AFTER INSERT ON public.pick_wave_orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_wave_policy_consistency();
+
+REVOKE ALL ON FUNCTION public.validate_wave_policy_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_wave_policy_evidence_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_wave_policy_consistency() FROM PUBLIC;

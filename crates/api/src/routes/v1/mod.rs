@@ -912,6 +912,10 @@ pub fn router() -> Router<AppState> {
             post(pick_shortages::report),
         )
         .route("/pick-waves", get(pick_waves::list).post(pick_waves::plan))
+        .route(
+            "/pick-waves/policy-resolutions",
+            post(pick_waves::resolve_policies),
+        )
         .route("/pick-waves/{wave_id}", get(pick_waves::get))
         .route("/pick-waves/{wave_id}/releases", post(pick_waves::release))
         .route(

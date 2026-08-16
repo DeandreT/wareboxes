@@ -2,18 +2,24 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     CancelPickWaveRequest, OpaqueCursor, PickWaveCancellationReason as ApiCancellationReason,
-    PickWaveOrderResponse, PickWavePage as ApiPickWavePage, PickWavePageRequest, PickWaveResponse,
+    PickWaveOrderResponse, PickWavePage as ApiPickWavePage, PickWavePageRequest,
+    PickWavePolicyResolutionResponse, PickWavePolicyResolutionsResponse, PickWaveResponse,
     PickWaveSort as ApiPickWaveSort, PickWaveSortDirection as ApiSortDirection,
     PickWaveStatus as ApiPickWaveStatus, PlanPickWaveOrderRequest, PlanPickWaveRequest,
-    ReleasePickWaveRequest, Revision,
+    ReleasePickWaveRequest, ResolvePickWavePoliciesRequest, Revision,
+    WavePolicyExpectation as ApiWavePolicyExpectation, WavePolicyResponse as ApiWavePolicyResponse,
+    WavePolicySource as ApiWavePolicySource,
 };
 use wareboxes_application::pick_wave::{
-    CancelPickWaveCommand, PickWaveCursor, PickWavePage, PickWaveQuery, PickWaveReadModel,
-    PickWaveSort, PickWaveSortDirection, PlanPickWaveCommand, PlanPickWaveOrder,
-    ReleasePickWaveCommand,
+    CancelPickWaveCommand, PickWaveCursor, PickWavePage, PickWavePolicyResolution, PickWaveQuery,
+    PickWaveReadModel, PickWaveSort, PickWaveSortDirection, PlanPickWaveCommand, PlanPickWaveOrder,
+    ReleasePickWaveCommand, ResolvePickWavePoliciesQuery, ResolvePickWavePolicyOrder,
+};
+use wareboxes_application::wave_policy::{
+    WavePolicyExpectation, WavePolicyReadModel, WavePolicySource,
 };
 use wareboxes_domain::{
-    FacilityId, LocationId, OrderId, OrderRevision, PickWaveCancellationNote,
+    ConfigurationScope, FacilityId, LocationId, OrderId, OrderRevision, PickWaveCancellationNote,
     PickWaveCancellationReason, PickWaveId, PickWaveName, PickWaveRevision, PickWaveStatus,
 };
 
@@ -41,6 +47,34 @@ pub async fn plan(
     let context = user.command_context(&idempotency_key);
     let result = repo::pick_wave::plan_wave(&state.db, &user.tenant, &context, &command).await?;
     Ok(Json(map_wave(result)?))
+}
+
+pub async fn resolve_policies(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<ResolvePickWavePoliciesRequest>,
+) -> V1Result<Json<PickWavePolicyResolutionsResponse>> {
+    user.require_permission(&state.db, MUTATE_PERMISSION)
+        .await?;
+    let facility_id = user.require_facility(body.facility_id)?;
+    let query = ResolvePickWavePoliciesQuery {
+        facility_id,
+        orders: body
+            .orders
+            .into_iter()
+            .map(|order| {
+                Ok(ResolvePickWavePolicyOrder {
+                    order_id: OrderId::new(order.order_id).map_err(domain_validation)?,
+                    expected_revision: OrderRevision::new(order.expected_revision.get())
+                        .map_err(domain_validation)?,
+                })
+            })
+            .collect::<V1Result<Vec<_>>>()?,
+    };
+    let resolutions = repo::pick_wave::resolve_policies(&state.db, &user.tenant, &query).await?;
+    Ok(Json(
+        resolutions.into_iter().map(map_policy_resolution).collect(),
+    ))
 }
 
 pub async fn release(
@@ -183,6 +217,7 @@ fn map_plan_order(order: PlanPickWaveOrderRequest) -> V1Result<PlanPickWaveOrder
         expected_revision: OrderRevision::new(order.expected_revision.get())
             .map_err(domain_validation)?,
         sequence: order.sequence,
+        expected_policy: map_policy_expectation(order.expected_policy)?,
     })
 }
 
@@ -246,6 +281,7 @@ fn map_wave(wave: PickWaveReadModel) -> AppResult<PickWaveResponse> {
                     allocation_count: order.allocation_count,
                     pick_task_count: order.pick_task_count,
                     released_quantity: order.released_quantity,
+                    wave_policy: map_wave_policy(order.wave_policy),
                 })
             })
             .collect::<AppResult<Vec<_>>>()?,
@@ -260,6 +296,68 @@ fn map_wave(wave: PickWaveReadModel) -> AppResult<PickWaveResponse> {
             .cancellation_note
             .map(|value| value.as_str().to_owned()),
     })
+}
+
+fn map_policy_resolution(resolution: PickWavePolicyResolution) -> PickWavePolicyResolutionResponse {
+    PickWavePolicyResolutionResponse {
+        order_id: resolution.order_id.get(),
+        inventory_owner_id: resolution.inventory_owner_id.get(),
+        policy: map_wave_policy(resolution.policy),
+    }
+}
+
+fn map_policy_expectation(value: ApiWavePolicyExpectation) -> V1Result<WavePolicyExpectation> {
+    let expectation = WavePolicyExpectation {
+        source: match value.source {
+            ApiWavePolicySource::ProductDefault => WavePolicySource::ProductDefault,
+            ApiWavePolicySource::Configuration => WavePolicySource::Configuration,
+        },
+        configuration_id: value
+            .configuration_id
+            .map(wareboxes_domain::ConfigurationVersionId::new)
+            .transpose()
+            .map_err(domain_validation)?,
+        configuration_revision: value.configuration_revision,
+        policy_hash: value.policy_hash,
+    };
+    if !expectation.is_well_formed() {
+        return Err(AppError::bad_request("wave policy expectation is invalid").into());
+    }
+    Ok(expectation)
+}
+
+fn map_wave_policy(value: WavePolicyReadModel) -> ApiWavePolicyResponse {
+    ApiWavePolicyResponse {
+        source: match value.source {
+            WavePolicySource::ProductDefault => ApiWavePolicySource::ProductDefault,
+            WavePolicySource::Configuration => ApiWavePolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id.map(|id| id.get()),
+        configuration_revision: value.configuration_revision,
+        configuration_scope: value.configuration_scope.map(|scope| match scope {
+            ConfigurationScope::Tenant => wareboxes_api_contract::v1::ConfigurationScope::Tenant,
+            ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::InventoryOwner {
+                    inventory_owner_id: inventory_owner_id.get(),
+                }
+            }
+            ConfigurationScope::Facility { facility_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::Facility {
+                    facility_id: facility_id.get(),
+                }
+            }
+            ConfigurationScope::OwnerFacility {
+                inventory_owner_id,
+                facility_id,
+            } => wareboxes_api_contract::v1::ConfigurationScope::OwnerFacility {
+                inventory_owner_id: inventory_owner_id.get(),
+                facility_id: facility_id.get(),
+            },
+        }),
+        max_orders: value.max_orders,
+        require_complete_allocation: value.require_complete_allocation,
+        policy_hash: value.policy_hash,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

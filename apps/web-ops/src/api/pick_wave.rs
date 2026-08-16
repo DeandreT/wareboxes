@@ -1,6 +1,7 @@
 use wareboxes_api_contract::v1::{
-    CancelPickWaveRequest, OpaqueCursor, PickWavePage, PickWaveResponse, PickWaveSort,
-    PickWaveSortDirection, PickWaveStatus, PlanPickWaveRequest, ReleasePickWaveRequest,
+    CancelPickWaveRequest, OpaqueCursor, PickWavePage, PickWavePolicyResolutionsResponse,
+    PickWaveResponse, PickWaveSort, PickWaveSortDirection, PickWaveStatus, PlanPickWaveRequest,
+    ReleasePickWaveRequest, ResolvePickWavePoliciesRequest,
 };
 
 use super::ApiError;
@@ -50,6 +51,25 @@ pub async fn plan_pick_wave(
     idempotency_key: &str,
 ) -> Result<PickWaveResponse, ApiError> {
     super::browser::post("/api/v1/pick-waves", request, idempotency_key).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn resolve_pick_wave_policies(
+    request: &ResolvePickWavePoliciesRequest,
+) -> Result<PickWavePolicyResolutionsResponse, ApiError> {
+    super::browser::post(
+        "/api/v1/pick-waves/policy-resolutions",
+        request,
+        &super::browser::new_idempotency_key(),
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn resolve_pick_wave_policies(
+    _request: &ResolvePickWavePoliciesRequest,
+) -> Result<PickWavePolicyResolutionsResponse, ApiError> {
+    Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -7,15 +7,37 @@ use wareboxes_domain::{
     PickWaveRevision, PickWaveStatus, Timestamp, UserId,
 };
 
-pub const PLAN_PICK_WAVE_OPERATION: &str = "outbound.pick_wave.plan.v1";
-pub const RELEASE_PICK_WAVE_OPERATION: &str = "outbound.pick_wave.release.v1";
-pub const CANCEL_PICK_WAVE_OPERATION: &str = "outbound.pick_wave.cancel.v1";
+use crate::wave_policy::{WavePolicyExpectation, WavePolicyReadModel};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub const PLAN_PICK_WAVE_OPERATION: &str = "outbound.pick_wave.plan.v2";
+pub const RELEASE_PICK_WAVE_OPERATION: &str = "outbound.pick_wave.release.v2";
+pub const CANCEL_PICK_WAVE_OPERATION: &str = "outbound.pick_wave.cancel.v2";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanPickWaveOrder {
     pub order_id: OrderId,
     pub expected_revision: OrderRevision,
     pub sequence: u32,
+    pub expected_policy: WavePolicyExpectation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvePickWavePolicyOrder {
+    pub order_id: OrderId,
+    pub expected_revision: OrderRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvePickWavePoliciesQuery {
+    pub facility_id: FacilityId,
+    pub orders: Vec<ResolvePickWavePolicyOrder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickWavePolicyResolution {
+    pub order_id: OrderId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub policy: WavePolicyReadModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +75,7 @@ pub struct PickWaveOrderReadModel {
     pub allocation_count: i64,
     pub pick_task_count: i64,
     pub released_quantity: i64,
+    pub wave_policy: WavePolicyReadModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,8 +201,8 @@ mod tests {
 
     #[test]
     fn operation_names_are_versioned() {
-        assert_eq!(PLAN_PICK_WAVE_OPERATION, "outbound.pick_wave.plan.v1");
-        assert_eq!(RELEASE_PICK_WAVE_OPERATION, "outbound.pick_wave.release.v1");
-        assert_eq!(CANCEL_PICK_WAVE_OPERATION, "outbound.pick_wave.cancel.v1");
+        assert_eq!(PLAN_PICK_WAVE_OPERATION, "outbound.pick_wave.plan.v2");
+        assert_eq!(RELEASE_PICK_WAVE_OPERATION, "outbound.pick_wave.release.v2");
+        assert_eq!(CANCEL_PICK_WAVE_OPERATION, "outbound.pick_wave.cancel.v2");
     }
 }

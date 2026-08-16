@@ -1,9 +1,123 @@
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
+use super::{ConfigurationScope, CursorPage, OpaqueCursor, PageLimit, Revision};
 
 pub const MAX_PICK_WAVE_NAME_LENGTH: usize = 100;
 pub const MAX_PICK_WAVE_CANCELLATION_NOTE_LENGTH: usize = 500;
+pub const PRODUCT_DEFAULT_WAVE_POLICY_HASH: &str =
+    "03e485c29e6c4e032786157f4f1e216bd741a35ef6f6c3895b35e9c579f443b9";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WavePolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WavePolicyExpectation {
+    pub source: WavePolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub policy_hash: String,
+}
+
+impl WavePolicyExpectation {
+    pub fn product_default() -> Self {
+        Self {
+            source: WavePolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            policy_hash: PRODUCT_DEFAULT_WAVE_POLICY_HASH.to_owned(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        let identity_is_valid = match self.source {
+            WavePolicySource::ProductDefault => {
+                self.configuration_id.is_none() && self.configuration_revision.is_none()
+            }
+            WavePolicySource::Configuration => {
+                self.configuration_id.is_some_and(|id| id > 0)
+                    && self
+                        .configuration_revision
+                        .is_some_and(|revision| revision > 0)
+            }
+        };
+        if !identity_is_valid {
+            return Err("wave policy identity is invalid");
+        }
+        if self.policy_hash.len() != 64
+            || !self
+                .policy_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("wave policy hash must be lowercase SHA-256 hex");
+        }
+        if self.source == WavePolicySource::ProductDefault
+            && self.policy_hash != PRODUCT_DEFAULT_WAVE_POLICY_HASH
+        {
+            return Err("wave product-default policy hash is invalid");
+        }
+        Ok(())
+    }
+}
+
+impl Default for WavePolicyExpectation {
+    fn default() -> Self {
+        Self::product_default()
+    }
+}
+
+impl<'de> Deserialize<'de> for WavePolicyExpectation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            source: WavePolicySource,
+            configuration_id: Option<i64>,
+            configuration_revision: Option<i64>,
+            policy_hash: String,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let value = Self {
+            source: raw.source,
+            configuration_id: raw.configuration_id,
+            configuration_revision: raw.configuration_revision,
+            policy_hash: raw.policy_hash,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WavePolicyResponse {
+    pub source: WavePolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub max_orders: u32,
+    pub require_complete_allocation: bool,
+    pub policy_hash: String,
+}
+
+impl WavePolicyResponse {
+    pub fn expectation(&self) -> WavePolicyExpectation {
+        WavePolicyExpectation {
+            source: self.source,
+            configuration_id: self.configuration_id,
+            configuration_revision: self.configuration_revision,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,13 +156,63 @@ pub enum PickWaveSortDirection {
     Desc,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanPickWaveOrderRequest {
     pub order_id: i64,
     pub expected_revision: Revision,
     pub sequence: u32,
+    #[serde(default)]
+    pub expected_policy: WavePolicyExpectation,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvePickWavePolicyOrderRequest {
+    pub order_id: i64,
+    pub expected_revision: Revision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvePickWavePoliciesRequest {
+    pub facility_id: i64,
+    pub orders: Vec<ResolvePickWavePolicyOrderRequest>,
+}
+
+impl<'de> Deserialize<'de> for ResolvePickWavePoliciesRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            facility_id: i64,
+            orders: Vec<ResolvePickWavePolicyOrderRequest>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.facility_id <= 0
+            || raw.orders.is_empty()
+            || raw.orders.iter().any(|order| order.order_id <= 0)
+        {
+            return Err(D::Error::custom("wave policy resolution scope is invalid"));
+        }
+        Ok(Self {
+            facility_id: raw.facility_id,
+            orders: raw.orders,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickWavePolicyResolutionResponse {
+    pub order_id: i64,
+    pub inventory_owner_id: i64,
+    pub policy: WavePolicyResponse,
+}
+
+pub type PickWavePolicyResolutionsResponse = Vec<PickWavePolicyResolutionResponse>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlanPickWaveRequest {
@@ -162,6 +326,7 @@ pub struct PickWaveOrderResponse {
     pub allocation_count: i64,
     pub pick_task_count: i64,
     pub released_quantity: i64,
+    pub wave_policy: WavePolicyResponse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +390,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(request.orders.len(), 1);
+        assert_eq!(
+            request.orders[0].expected_policy,
+            WavePolicyExpectation::product_default()
+        );
         assert!(serde_json::from_value::<PlanPickWaveRequest>(json!({
             "facility_id": 2,
             "destination_location_id": 3,
@@ -233,6 +402,60 @@ mod tests {
             "tenant_id": 9
         }))
         .is_err());
+    }
+
+    #[test]
+    fn wave_policy_expectations_are_exact_and_fail_closed() {
+        let configured = serde_json::from_value::<WavePolicyExpectation>(json!({
+            "source": "configuration",
+            "configuration_id": 8,
+            "configuration_revision": 4,
+            "policy_hash": "a".repeat(64)
+        }))
+        .unwrap();
+        assert_eq!(configured.configuration_id, Some(8));
+        assert!(serde_json::from_value::<WavePolicyExpectation>(json!({
+            "source": "configuration",
+            "configuration_revision": 4,
+            "policy_hash": "a".repeat(64)
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<WavePolicyExpectation>(json!({
+            "source": "product_default",
+            "configuration_id": 8,
+            "policy_hash": PRODUCT_DEFAULT_WAVE_POLICY_HASH
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<WavePolicyExpectation>(json!({
+            "source": "product_default",
+            "policy_hash": "ABC"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn policy_resolution_requires_positive_scope_and_members() {
+        assert!(
+            serde_json::from_value::<ResolvePickWavePoliciesRequest>(json!({
+                "facility_id": 2,
+                "orders": [{"order_id": 4, "expected_revision": 2}]
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ResolvePickWavePoliciesRequest>(json!({
+                "facility_id": 2,
+                "orders": []
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ResolvePickWavePoliciesRequest>(json!({
+                "facility_id": 0,
+                "orders": [{"order_id": 4, "expected_revision": 2}]
+            }))
+            .is_err()
+        );
     }
 
     #[test]

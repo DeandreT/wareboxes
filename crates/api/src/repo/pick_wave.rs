@@ -1,5 +1,9 @@
 //! Multi-order pick-wave planning, atomic release, cancellation, and scoped reads.
 
+mod policy;
+
+pub use policy::resolve_policies;
+
 use std::collections::HashMap;
 
 use sqlx::Row;
@@ -12,6 +16,7 @@ use wareboxes_application::pick_wave::{
     ReleasePickWaveCommand, ReleasePickWaveResult, CANCEL_PICK_WAVE_OPERATION,
     PLAN_PICK_WAVE_OPERATION, RELEASE_PICK_WAVE_OPERATION,
 };
+use wareboxes_application::wave_policy::WavePolicyReadModel;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
@@ -36,6 +41,7 @@ struct PlannedOrder {
     order_key: String,
     expected_revision: OrderRevision,
     sequence: u32,
+    wave_policy: WavePolicyReadModel,
 }
 
 #[derive(Debug)]
@@ -91,15 +97,16 @@ pub async fn plan_wave(
         command.destination_location_id,
     )
     .await?;
+    let planned_at = now_iso();
     let planned_orders = lock_plan_orders_tx(
         &mut tx,
         access.tenant_id,
         command.facility_id,
         &scope,
         command,
+        planned_at,
     )
     .await?;
-    let planned_at = now_iso();
     let wave_id = PickWaveId::new(
         sqlx::query_scalar(
             r#"INSERT INTO pick_waves (
@@ -125,8 +132,12 @@ pub async fn plan_wave(
         let inserted = sqlx::query(
             r#"INSERT INTO pick_wave_orders (
                  tenant_id,facility_id,pick_wave_id,inventory_owner_id,order_id,
-                 order_key,wave_sequence,expected_order_revision)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"#,
+                 order_key,wave_sequence,expected_order_revision,
+                 wave_policy_source,wave_policy_configuration_id,
+                 wave_policy_configuration_revision,wave_policy_scope_level,
+                 wave_policy_scope_owner_id,wave_policy_scope_facility_id,
+                 wave_policy_definition,wave_policy_hash)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)"#,
         )
         .bind(access.tenant_id.get())
         .bind(command.facility_id.get())
@@ -136,6 +147,14 @@ pub async fn plan_wave(
         .bind(&order.order_key)
         .bind(i64::from(order.sequence))
         .bind(order.expected_revision.get())
+        .bind(policy::source_text(order.wave_policy.source))
+        .bind(order.wave_policy.configuration_id.map(|id| id.get()))
+        .bind(order.wave_policy.configuration_revision)
+        .bind(policy::scope_values(order.wave_policy.configuration_scope).0)
+        .bind(policy::scope_values(order.wave_policy.configuration_scope).1)
+        .bind(policy::scope_values(order.wave_policy.configuration_scope).2)
+        .bind(policy::definition_json(&order.wave_policy))
+        .bind(&order.wave_policy.policy_hash)
         .execute(&mut *tx)
         .await;
         if let Err(error) = inserted {
@@ -169,6 +188,7 @@ pub async fn plan_wave(
                 allocation_count: 0,
                 pick_task_count: 0,
                 released_quantity: 0,
+                wave_policy: order.wave_policy,
             })
             .collect(),
         planned_by: context.actor_id,
@@ -536,11 +556,12 @@ async fn lock_plan_orders_tx(
     facility_id: FacilityId,
     scope: &ScopeBindings,
     command: &PlanPickWaveCommand,
+    effective_at: wareboxes_domain::Timestamp,
 ) -> AppResult<Vec<PlannedOrder>> {
     let expected = command
         .orders
         .iter()
-        .map(|order| (order.order_id, (order.expected_revision, order.sequence)))
+        .map(|order| (order.order_id, order))
         .collect::<HashMap<_, _>>();
     let mut ids = expected.keys().map(|id| id.get()).collect::<Vec<_>>();
     ids.sort_unstable();
@@ -563,10 +584,11 @@ async fn lock_plan_orders_tx(
         let order_id = OrderId::new(row.try_get("id")?).map_err(internal)?;
         let owner_id =
             InventoryOwnerId::new(row.try_get("inventory_owner_id")?).map_err(internal)?;
-        let (expected_revision, sequence) = expected
+        let expected_order = expected
             .get(&order_id)
-            .copied()
             .ok_or_else(|| AppError::internal("wave plan lost an order precondition"))?;
+        let expected_revision = expected_order.expected_revision;
+        let sequence = expected_order.sequence;
         let status: String = row.try_get("status")?;
         let revision = OrderRevision::new(row.try_get("revision")?).map_err(internal)?;
         if status != "open" || revision != expected_revision {
@@ -575,15 +597,30 @@ async fn lock_plan_orders_tx(
             ));
         }
         lock_owner_facility_tx(tx, tenant_id, owner_id, facility_id).await?;
+        let wave_policy =
+            policy::resolve_policy_tx(tx, tenant_id, owner_id, facility_id, effective_at, true)
+                .await?;
+        policy::require_expected_policy(&wave_policy, &expected_order.expected_policy)?;
+        if wave_policy.require_complete_allocation {
+            policy::require_complete_allocation_tx(tx, tenant_id, owner_id, facility_id, order_id)
+                .await?;
+        }
         result.push(PlannedOrder {
             order_id,
             owner_id,
             order_key: row.try_get("order_key")?,
             expected_revision,
             sequence,
+            wave_policy,
         });
     }
     result.sort_by_key(|order| order.sequence);
+    policy::unique_owner_counts(
+        &result
+            .iter()
+            .map(|order| (order.owner_id, &order.wave_policy))
+            .collect::<Vec<_>>(),
+    )?;
     Ok(result)
 }
 
@@ -659,7 +696,11 @@ async fn lock_wave_members_tx(
     scope: &ScopeBindings,
 ) -> AppResult<Vec<PlannedOrder>> {
     let rows = sqlx::query(
-        r#"SELECT order_id,inventory_owner_id,order_key,wave_sequence,expected_order_revision
+        r#"SELECT order_id,inventory_owner_id,order_key,wave_sequence,expected_order_revision,
+                  wave_policy_source,wave_policy_configuration_id,
+                  wave_policy_configuration_revision,wave_policy_scope_level,
+                  wave_policy_scope_owner_id,wave_policy_scope_facility_id,
+                  wave_policy_definition,wave_policy_hash
            FROM pick_wave_orders WHERE tenant_id=$1 AND pick_wave_id=$2 AND active
            ORDER BY order_id FOR UPDATE"#,
     )
@@ -685,6 +726,7 @@ async fn lock_wave_members_tx(
                     .map_err(internal)?,
                 sequence: u32::try_from(row.try_get::<i64, _>("wave_sequence")?)
                     .map_err(internal)?,
+                wave_policy: policy::frozen_policy(&row)?,
             })
         })
         .collect()
@@ -721,7 +763,11 @@ async fn load_wave_tx(
     let member_rows = sqlx::query(
         r#"SELECT inventory_owner_id,order_id,order_key,wave_sequence,
                   expected_order_revision,resulting_order_revision,order_release_id,
-                  allocation_count,pick_task_count,released_qty
+                  allocation_count,pick_task_count,released_qty,
+                  wave_policy_source,wave_policy_configuration_id,
+                  wave_policy_configuration_revision,wave_policy_scope_level,
+                  wave_policy_scope_owner_id,wave_policy_scope_facility_id,
+                  wave_policy_definition,wave_policy_hash
            FROM pick_wave_orders WHERE tenant_id=$1 AND pick_wave_id=$2
            ORDER BY wave_sequence"#,
     )
@@ -763,6 +809,7 @@ async fn load_wave_tx(
                 allocation_count: member.try_get("allocation_count")?,
                 pick_task_count: member.try_get("pick_task_count")?,
                 released_quantity: member.try_get("released_qty")?,
+                wave_policy: policy::frozen_policy(&member)?,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -896,7 +943,7 @@ async fn enqueue_wave_event_tx(
             ordering_key: &ordering_key,
             aggregate_sequence: sequence,
             event_type,
-            schema_version: 1,
+            schema_version: 2,
             payload: &payload,
             occurred_at: wave
                 .released_at

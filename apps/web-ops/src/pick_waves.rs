@@ -2,8 +2,10 @@ use leptos::prelude::*;
 use lucide_leptos::{Eye, Play, Plus, RefreshCw, RotateCcw, Trash2, X};
 use wareboxes_api_contract::v1::{
     CancelPickWaveRequest, OpaqueCursor, PickWaveCancellationReason, PickWavePage,
-    PickWaveResponse, PickWaveSort, PickWaveSortDirection, PickWaveStatus,
-    PlanPickWaveOrderRequest, PlanPickWaveRequest, ReleasePickWaveRequest, Revision,
+    PickWavePolicyResolutionResponse, PickWaveResponse, PickWaveSort, PickWaveSortDirection,
+    PickWaveStatus, PlanPickWaveOrderRequest, PlanPickWaveRequest, ReleasePickWaveRequest,
+    ResolvePickWavePoliciesRequest, ResolvePickWavePolicyOrderRequest, Revision,
+    WavePolicyExpectation, WavePolicyResponse,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::dto::OrderPage;
@@ -122,22 +124,58 @@ pub(crate) fn PickWavesWorkspace(
         signals.dialog.set(Some(Dialog::Plan));
     };
     let submit_plan = Callback::new(move |_| {
-        let Some(request) = build_plan_request(drafts, orders) else {
+        let Some(mut request) = build_plan_request(drafts, orders) else {
             signals.error.set(Some(
                 "Name, facility, staging destination, and at least one order are required."
                     .to_owned(),
             ));
             return;
         };
-        dispatch(
-            SavedCommand::Plan {
-                request,
-                key: api::new_idempotency_key(),
-            },
-            signals,
-            toasts,
-            on_unauthorized,
-        );
+        if signals.command_pending.get_untracked() {
+            return;
+        }
+        signals.command_pending.set(true);
+        signals.error.set(None);
+        let resolution_request = ResolvePickWavePoliciesRequest {
+            facility_id: request.facility_id,
+            orders: request
+                .orders
+                .iter()
+                .map(|order| ResolvePickWavePolicyOrderRequest {
+                    order_id: order.order_id,
+                    expected_revision: order.expected_revision,
+                })
+                .collect(),
+        };
+        leptos::task::spawn_local(async move {
+            match api::resolve_pick_wave_policies(&resolution_request).await {
+                Ok(resolutions) => {
+                    if !apply_policy_resolutions(&mut request, &resolutions) {
+                        signals.error.set(Some(
+                            "The server returned incomplete wave policy evidence.".to_owned(),
+                        ));
+                        signals.command_pending.set(false);
+                        return;
+                    }
+                    signals.command_pending.set(false);
+                    dispatch(
+                        SavedCommand::Plan {
+                            request,
+                            key: api::new_idempotency_key(),
+                        },
+                        signals,
+                        toasts,
+                        on_unauthorized,
+                    );
+                }
+                Err(error) if error.unauthorized => on_unauthorized.run(()),
+                Err(error) => {
+                    signals.error.set(Some(error.message.clone()));
+                    signals.command_pending.set(false);
+                    toasts.error(error.message);
+                }
+            }
+        });
     });
     let submit_release = Callback::new(move |wave: PickWaveResponse| {
         dispatch(
@@ -234,7 +272,7 @@ fn WaveDetail(
     open_cancel: Callback<()>,
 ) -> impl IntoView {
     view! {
-        {move || if signals.detail_loading.get() { view! { <div class="workspace-state compact"><h2>"Loading wave"</h2></div> }.into_any() } else if let Some(wave)=signals.selected.get() { let for_release=wave.clone(); view! { <div class="pick-wave-detail-content"><header><div><span class="eyebrow">{format!("Wave #{}", wave.wave_id)}</span><h2>{wave.name.clone()}</h2></div><span class=wave_status_class(wave.status)>{wave_status_label(wave.status)}</span></header><div class="pick-wave-facts"><span><small>"Facility"</small><strong>{wave.facility_name.clone()}</strong></span><span><small>"Destination"</small><strong>{wave.destination_location_name.clone()}</strong></span><span><small>"Orders"</small><strong>{wave.order_count}</strong></span><span><small>"Tasks"</small><strong>{wave.pick_task_count}</strong></span><span><small>"Units"</small><strong>{wave.released_quantity}</strong></span><span><small>"Revision"</small><strong>{wave.revision.get()}</strong></span></div><div class="pick-wave-members table-scroll"><table class="data-table"><thead><tr><th>"Seq"</th><th>"Order"</th><th>"Client ID"</th><th>"State"</th><th class="numeric">"Tasks"</th><th class="numeric">"Units"</th></tr></thead><tbody>{wave.orders.into_iter().map(|order| view! { <tr><td>{order.sequence}</td><td><strong>{order.order_key}</strong><small class="cell-detail">{format!("Order #{} · rev {}", order.order_id, order.expected_revision.get())}</small></td><td>{order.inventory_owner_id}</td><td>{order.status}</td><td class="numeric">{order.pick_task_count}</td><td class="numeric">{order.released_quantity}</td></tr> }).collect_view()}</tbody></table></div>{(wave.status == PickWaveStatus::Planned).then(|| view! { <footer><button type="button" class="button danger-action" disabled=move || signals.command_pending.get() on:click=move |_| open_cancel.run(())><Trash2 size=14/>"Cancel"</button><button type="button" class="button primary-action" disabled=move || signals.command_pending.get() on:click=move |_| submit_release.run(for_release.clone())><Play size=14/>"Release wave"</button></footer> })}</div> }.into_any() } else { view! { <div class="workspace-empty"><h2>"Wave details"</h2><p>"Select a wave to inspect membership, work totals, and lifecycle evidence."</p></div> }.into_any() }}
+        {move || if signals.detail_loading.get() { view! { <div class="workspace-state compact"><h2>"Loading wave"</h2></div> }.into_any() } else if let Some(wave)=signals.selected.get() { let for_release=wave.clone(); view! { <div class="pick-wave-detail-content"><header><div><span class="eyebrow">{format!("Wave #{}", wave.wave_id)}</span><h2>{wave.name.clone()}</h2></div><span class=wave_status_class(wave.status)>{wave_status_label(wave.status)}</span></header><div class="pick-wave-facts"><span><small>"Facility"</small><strong>{wave.facility_name.clone()}</strong></span><span><small>"Destination"</small><strong>{wave.destination_location_name.clone()}</strong></span><span><small>"Orders"</small><strong>{wave.order_count}</strong></span><span><small>"Tasks"</small><strong>{wave.pick_task_count}</strong></span><span><small>"Units"</small><strong>{wave.released_quantity}</strong></span><span><small>"Revision"</small><strong>{wave.revision.get()}</strong></span></div><div class="pick-wave-members table-scroll"><table class="data-table"><thead><tr><th>"Seq"</th><th>"Order"</th><th>"Client ID"</th><th>"Policy"</th><th>"State"</th><th class="numeric">"Tasks"</th><th class="numeric">"Units"</th></tr></thead><tbody>{wave.orders.into_iter().map(|order| { let policy_label=wave_policy_label(&order.wave_policy); let policy_rules=wave_policy_rules(&order.wave_policy); view! { <tr><td>{order.sequence}</td><td><strong>{order.order_key}</strong><small class="cell-detail">{format!("Order #{} · rev {}", order.order_id, order.expected_revision.get())}</small></td><td>{order.inventory_owner_id}</td><td><strong>{policy_label}</strong><small class="cell-detail">{policy_rules}</small></td><td>{order.status}</td><td class="numeric">{order.pick_task_count}</td><td class="numeric">{order.released_quantity}</td></tr> }}).collect_view()}</tbody></table></div>{(wave.status == PickWaveStatus::Planned).then(|| view! { <footer><button type="button" class="button danger-action" disabled=move || signals.command_pending.get() on:click=move |_| open_cancel.run(())><Trash2 size=14/>"Cancel"</button><button type="button" class="button primary-action" disabled=move || signals.command_pending.get() on:click=move |_| submit_release.run(for_release.clone())><Play size=14/>"Release wave"</button></footer> })}</div> }.into_any() } else { view! { <div class="workspace-empty"><h2>"Wave details"</h2><p>"Select a wave to inspect membership, work totals, and lifecycle evidence."</p></div> }.into_any() }}
     }
 }
 
@@ -439,6 +477,7 @@ fn build_plan_request(
                 order_id,
                 expected_revision: Revision::new(revision).ok()?,
                 sequence: u32::try_from(index + 1).ok()?,
+                expected_policy: WavePolicyExpectation::product_default(),
             })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -448,6 +487,43 @@ fn build_plan_request(
         name,
         orders,
     })
+}
+
+fn apply_policy_resolutions(
+    request: &mut PlanPickWaveRequest,
+    resolutions: &[PickWavePolicyResolutionResponse],
+) -> bool {
+    request.orders.iter_mut().all(|order| {
+        resolutions
+            .iter()
+            .find(|resolution| resolution.order_id == order.order_id)
+            .map(|resolution| order.expected_policy = resolution.policy.expectation())
+            .is_some()
+    }) && resolutions.len() == request.orders.len()
+}
+
+fn wave_policy_label(policy: &WavePolicyResponse) -> String {
+    policy.configuration_id.map_or_else(
+        || "Product default".to_owned(),
+        |id| {
+            format!(
+                "Policy #{id} r{}",
+                policy.configuration_revision.unwrap_or_default()
+            )
+        },
+    )
+}
+
+fn wave_policy_rules(policy: &WavePolicyResponse) -> String {
+    format!(
+        "Max {} order(s) · complete allocation {}",
+        policy.max_orders,
+        if policy.require_complete_allocation {
+            "required"
+        } else {
+            "not required at planning"
+        }
+    )
 }
 fn toggle_id(signal: RwSignal<Vec<i64>>, id: i64, checked: bool) {
     signal.update(|ids| {
@@ -524,6 +600,7 @@ fn compact_time(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wareboxes_api_contract::v1::{WavePolicySource, PRODUCT_DEFAULT_WAVE_POLICY_HASH};
     #[test]
     fn status_and_reason_parsers_fail_closed() {
         assert_eq!(parse_status("other"), None);
@@ -542,5 +619,60 @@ mod tests {
             ui_direction(PickWaveSortDirection::Desc),
             SortDirection::Descending
         );
+    }
+
+    #[test]
+    fn policy_resolution_binds_exact_evidence_and_rejects_incomplete_results() {
+        let mut request = PlanPickWaveRequest {
+            facility_id: 2,
+            destination_location_id: 3,
+            name: "Policy wave".into(),
+            orders: vec![PlanPickWaveOrderRequest {
+                order_id: 4,
+                expected_revision: Revision::new(2).unwrap(),
+                sequence: 1,
+                expected_policy: WavePolicyExpectation::product_default(),
+            }],
+        };
+        let configured = WavePolicyResponse {
+            source: WavePolicySource::Configuration,
+            configuration_id: Some(9),
+            configuration_revision: Some(4),
+            configuration_scope: Some(
+                wareboxes_api_contract::v1::ConfigurationScope::OwnerFacility {
+                    inventory_owner_id: 5,
+                    facility_id: 2,
+                },
+            ),
+            max_orders: 25,
+            require_complete_allocation: true,
+            policy_hash: "1".repeat(64),
+        };
+        assert!(apply_policy_resolutions(
+            &mut request,
+            &[PickWavePolicyResolutionResponse {
+                order_id: 4,
+                inventory_owner_id: 5,
+                policy: configured.clone(),
+            }]
+        ));
+        assert_eq!(request.orders[0].expected_policy, configured.expectation());
+
+        assert!(!apply_policy_resolutions(
+            &mut request,
+            &[PickWavePolicyResolutionResponse {
+                order_id: 7,
+                inventory_owner_id: 5,
+                policy: WavePolicyResponse {
+                    source: WavePolicySource::ProductDefault,
+                    configuration_id: None,
+                    configuration_revision: None,
+                    configuration_scope: None,
+                    max_orders: 10_000,
+                    require_complete_allocation: false,
+                    policy_hash: PRODUCT_DEFAULT_WAVE_POLICY_HASH.into(),
+                },
+            }]
+        ));
     }
 }

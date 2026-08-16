@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_pick_waves/policy.rs"]
+mod policy;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};

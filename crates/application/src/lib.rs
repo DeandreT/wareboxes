@@ -53,6 +53,7 @@ pub mod topology;
 pub mod transfer_order;
 pub mod value_added_work;
 pub mod vendor_return;
+pub mod wave_policy;
 pub mod work_orchestration;
 pub mod workforce_identity;
 pub mod yard;
