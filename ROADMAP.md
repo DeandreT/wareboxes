@@ -55,8 +55,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Production container images, infrastructure definitions, managed secrets,
   telemetry, readiness, backups, and restore automation.
 - Tenant-isolation, authorization, concurrency, migration, and load-test harnesses.
-- Architecture decision records for tenancy, ownership, inventory, clients,
-  integration, deployment cells, and configuration.
+- A durable architecture specification for tenancy, ownership, inventory, clients,
+  integration, deployment cells, and configuration, maintained alongside the code.
 
 ### Exit Gate
 

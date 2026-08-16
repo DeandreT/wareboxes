@@ -79,6 +79,17 @@ different request is rejected. Balance rows are locked in stable order, and
 continuous reconciliation compares the journal, balances, allocations, shipments,
 and external totals.
 
+## Runtime Configuration
+
+Operational decisions use typed, versioned, effective-dated rules rather than
+customer-specific code. Resolution starts with a stable product default, then
+applies tenant, inventory-owner or facility, and owner-facility precedence. A
+mutating command binds the exact expected policy identity and hash; accepted work
+freezes its source, configuration revision, scope, definition, and hash so replay,
+audit, and later execution cannot silently adopt a newer rule. Activation and
+execution serialize on the rule kind, making either concurrent ordering valid and
+explainable.
+
 ## Client Responsibilities
 
 The web application is a dense desktop operations surface for planning,
