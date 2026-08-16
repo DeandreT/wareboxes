@@ -421,7 +421,7 @@ async fn service_accounts_are_scoped_non_login_identities_with_rotatable_credent
     assert_eq!(wrong_tenant.status(), StatusCode::FORBIDDEN);
 
     let visible_intake =
-        format!("/api/v1/integrations/order-intake/service-api/inventory-owners/VISIBLE/orders");
+        "/api/v1/integrations/order-intake/service-api/inventory-owners/VISIBLE/orders".to_owned();
     let accepted = app
         .clone()
         .oneshot(request(
