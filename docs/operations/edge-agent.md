@@ -108,10 +108,27 @@ For an incident:
    controller never accepted it and explicitly retry it.
 4. Reconcile affected WMS work and inventory before resuming automation.
 
-Cloud command ingestion, outbound health publication, secrets provisioning, and
-facility-specific vendor drivers remain deployment integrations. They must use
-outbound authenticated connections and the typed engine boundary; they must not
-bypass the durable store or permit stale edge state to create inventory decisions.
+The `CloudClient` and `CloudSync` runtime provide authenticated outbound command
+ingestion, device-registry reconciliation, heartbeat publication, exact
+acknowledgement/report replay, and a bounded continuous polling loop. A pulled
+command and its delivery token are committed atomically to the local store before
+the cloud is acknowledged. On restart, unpublished acknowledgements and terminal
+reports are replayed with stable idempotency keys before new work is pulled.
+
+Provision a tenant-bound service-account credential with only `automation_edge`
+and the exact facility scope. Configure the client with the Wareboxes HTTPS origin,
+tenant ID, bearer credential, request timeout, facility ID, and a unique agent
+instance for each process boot. Never place the bearer credential in command-line
+arguments, the SQLite store, logs, or committed configuration. The deployment host
+must register the exact local adapters, explicitly resume locally inspected devices,
+and call `CloudSync::run_until_shutdown`; transport failures back off without
+discarding durable work. A newer heartbeat takes ownership for that facility/device,
+so an older agent can no longer pull commands.
+
+Secrets provisioning and facility-specific vendor drivers remain deployment
+integrations. They must use the cloud sync and typed engine boundaries; they must
+not bypass the durable store or permit stale edge state to create inventory
+decisions.
 
 The repository's executable durable-command throughput and ambiguous-recovery
 baseline is documented in

@@ -52762,7 +52762,7 @@ CREATE TABLE public.automation_devices (
   UNIQUE(tenant_id,id),
   UNIQUE(tenant_id,facility_id,id),
   CHECK(device_key=btrim(device_key) AND device_key<>''
-    AND char_length(device_key)<=128 AND device_key!~'[[:cntrl:]]'),
+    AND char_length(device_key)<=128 AND device_key~'^[A-Za-z0-9_.:/@-]+$'),
   CHECK(display_name=btrim(display_name) AND display_name<>''
     AND char_length(display_name)<=200 AND display_name!~'[[:cntrl:]]'),
   CHECK(device_class IN ('plc','conveyor','robotics','sortation','printer','scale')),
@@ -53253,6 +53253,11 @@ BEGIN
         NEW.tenant_id,actor_id,NEW.facility_id)
       OR device.control_mode<>'automatic' OR device.health NOT IN ('healthy','degraded')
       OR device.last_heartbeat_at<CURRENT_TIMESTAMP-INTERVAL '2 minutes'
+      OR NOT EXISTS(SELECT 1 FROM public.automation_heartbeats heartbeat
+        WHERE heartbeat.tenant_id=NEW.tenant_id
+          AND heartbeat.device_id=NEW.device_id
+          AND heartbeat.observed_at=device.last_heartbeat_at
+          AND heartbeat.control_mode='automatic')
       OR EXISTS(SELECT 1 FROM public.automation_commands held
         WHERE held.tenant_id=NEW.tenant_id AND held.device_id=NEW.device_id
           AND held.status='manual_review') THEN
@@ -53296,6 +53301,16 @@ BEGIN
     OR NOT (
       (OLD.status IN ('queued','delivered') AND NEW.status='delivered'
         AND NEW.delivery_attempts=OLD.delivery_attempts+1
+        AND EXISTS(SELECT 1 FROM public.automation_heartbeats heartbeat
+          WHERE heartbeat.tenant_id=NEW.tenant_id
+            AND heartbeat.device_id=NEW.device_id
+            AND heartbeat.service_account_id=edge_account_id
+            AND heartbeat.agent_instance=NEW.agent_instance
+            AND heartbeat.control_mode='automatic'
+            AND heartbeat.id=(SELECT max(latest.id)
+              FROM public.automation_heartbeats latest
+              WHERE latest.tenant_id=heartbeat.tenant_id
+                AND latest.device_id=heartbeat.device_id))
         AND NOT EXISTS(SELECT 1 FROM public.automation_commands held
           WHERE held.tenant_id=NEW.tenant_id AND held.device_id=NEW.device_id
             AND held.status='manual_review')

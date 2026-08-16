@@ -7,7 +7,9 @@ mod mapping;
 mod query;
 
 pub use commands::{change_control, enqueue_command, register_device, resolve_command};
-pub use edge::{acknowledge_command, pull_commands, record_heartbeat, report_command};
+pub use edge::{
+    acknowledge_command, assigned_devices, pull_commands, record_heartbeat, report_command,
+};
 pub use query::workspace;
 
 pub const EDGE_PERMISSION: &str = "automation_edge";

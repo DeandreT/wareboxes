@@ -99,6 +99,10 @@ pub fn router() -> Router<AppState> {
             post(automation::pull_commands),
         )
         .route(
+            "/edge/automation/devices",
+            get(automation::assigned_devices),
+        )
+        .route(
             "/edge/automation/commands/{command_id}/acknowledgements",
             post(automation::acknowledge_command),
         )

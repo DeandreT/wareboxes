@@ -4,8 +4,9 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     AcknowledgeAutomationCommandRequest, AutomationCommandDeliveryPage, AutomationCommandResponse,
-    AutomationDeviceResponse, AutomationWorkspaceRequest, AutomationWorkspaceResponse,
-    ChangeAutomationControlRequest, EnqueueAutomationCommandRequest, PullAutomationCommandsRequest,
+    AutomationDeviceResponse, AutomationEdgeDevicePage, AutomationEdgeDevicesRequest,
+    AutomationWorkspaceRequest, AutomationWorkspaceResponse, ChangeAutomationControlRequest,
+    EnqueueAutomationCommandRequest, PullAutomationCommandsRequest,
     RecordAutomationHeartbeatRequest, RegisterAutomationDeviceRequest,
     ReportAutomationCommandRequest, ResolveAutomationCommandRequest,
 };
@@ -186,6 +187,22 @@ pub async fn pull_commands(
             .map(mapping::delivery)
             .collect::<Result<_, _>>()?,
     }))
+}
+
+pub async fn assigned_devices(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Query(body): Query<AutomationEdgeDevicesRequest>,
+) -> V1Result<Json<AutomationEdgeDevicePage>> {
+    edge_identity(&state, &user).await?;
+    let facility_id = FacilityId::new(body.facility_id)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let items = repo::automation::assigned_devices(&state.db, &user.tenant, facility_id)
+        .await?
+        .into_iter()
+        .map(mapping::device)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(AutomationEdgeDevicePage { items }))
 }
 
 pub async fn acknowledge_command(

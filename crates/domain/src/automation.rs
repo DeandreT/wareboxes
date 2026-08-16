@@ -528,6 +528,14 @@ pub fn validate_automation_device(
         "automation device key",
         MAX_AUTOMATION_IDENTIFIER_LENGTH,
     )?;
+    if !device_key.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'@')
+    }) {
+        return Err(AutomationError::InvalidText {
+            field: "automation device key",
+            max: MAX_AUTOMATION_IDENTIFIER_LENGTH,
+        });
+    }
     validate_text(
         display_name,
         "automation device display name",
@@ -559,5 +567,12 @@ mod tests {
             .validate(),
             Err(AutomationError::InvalidPulseDuration)
         );
+    }
+
+    #[test]
+    fn automation_device_keys_are_compatible_with_edge_identifiers() {
+        assert!(validate_automation_device("scale-01/pack:a", "Pack scale").is_ok());
+        assert!(validate_automation_device("scale 01", "Pack scale").is_err());
+        assert!(validate_automation_device("scale#01", "Pack scale").is_err());
     }
 }

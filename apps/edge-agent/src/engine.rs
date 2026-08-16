@@ -7,8 +7,8 @@ use crate::adapter::{
     AdapterFailure, AdapterFailureClass, AdapterRegistry, RecoveryOutcome, RegistryError,
 };
 use crate::command::{CommandError, CommandRequest, RecoveryPolicy, SubmissionOutcome};
-use crate::store::{ClaimKind, EdgeStore, RetryLimits, StoreError};
-use crate::types::{ActorId, ControlMode};
+use crate::store::{ClaimKind, CloudDelivery, EdgeStore, RetryLimits, StoreError};
+use crate::types::{ActorId, ControlMode, DeviceStatus};
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -133,6 +133,21 @@ impl EdgeEngine {
         request: CommandRequest,
         now: DateTime<Utc>,
     ) -> Result<SubmissionOutcome, EngineError> {
+        self.validate_submission(&request)?;
+        Ok(self.store.submit(request, now)?)
+    }
+
+    pub fn submit_cloud_delivery(
+        &mut self,
+        request: CommandRequest,
+        delivery: &CloudDelivery,
+        now: DateTime<Utc>,
+    ) -> Result<SubmissionOutcome, EngineError> {
+        self.validate_submission(&request)?;
+        Ok(self.store.submit_cloud_delivery(request, delivery, now)?)
+    }
+
+    fn validate_submission(&self, request: &CommandRequest) -> Result<(), EngineError> {
         request.validate()?;
         let adapter = self
             .adapters
@@ -158,7 +173,34 @@ impl EdgeEngine {
             }
             _ => {}
         }
-        Ok(self.store.submit(request, now)?)
+        Ok(())
+    }
+
+    pub fn refresh_heartbeats(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<DeviceStatus>, EngineError> {
+        let mut statuses = Vec::with_capacity(self.adapters.len());
+        for device_id in self.adapters.device_ids() {
+            let heartbeat = self
+                .adapters
+                .get_mut(&device_id)
+                .ok_or_else(|| EngineError::AdapterNotRegistered(device_id.to_string()))?
+                .heartbeat();
+            let status = match heartbeat {
+                Ok(report) => {
+                    report.validate().map_err(|failure| {
+                        EngineError::Store(StoreError::CorruptRecord(failure.to_string()))
+                    })?;
+                    self.store.record_heartbeat(&device_id, &report, now)?
+                }
+                Err(failure) => self
+                    .store
+                    .record_heartbeat_failure(&device_id, &failure, now)?,
+            };
+            statuses.push(status);
+        }
+        Ok(statuses)
     }
 
     pub fn run_once(&mut self, now: DateTime<Utc>) -> Result<RunSummary, EngineError> {

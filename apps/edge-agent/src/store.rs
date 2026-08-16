@@ -18,7 +18,10 @@ use crate::types::{
     DeviceStatus, FacilityId, HealthState, TenantId, TypeError,
 };
 
-const STORE_SCHEMA_VERSION: i64 = 1;
+mod cloud;
+pub use cloud::{CloudDelivery, CloudDeliveryRecord, PendingCloudCommand};
+
+const STORE_SCHEMA_VERSION: i64 = 2;
 const MAX_PERSISTED_MESSAGE_LENGTH: usize = 1_000;
 
 #[derive(Debug, Error)]
@@ -64,6 +67,12 @@ pub enum StoreError {
     CorruptRecord(String),
     #[error("duration is too large for the edge command database")]
     DurationOverflow,
+    #[error("cloud command delivery metadata is invalid")]
+    InvalidCloudDelivery,
+    #[error("cloud command delivery conflicts with durable local evidence")]
+    CloudDeliveryConflict,
+    #[error("cloud command delivery {0} does not exist")]
+    CloudDeliveryNotFound(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +256,12 @@ impl EdgeStore {
             0 => {
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 tx.execute_batch(include_str!("store/schema.sql"))?;
+                tx.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+                tx.commit()?;
+            }
+            1 => {
+                let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                tx.execute_batch(include_str!("store/cloud_v2.sql"))?;
                 tx.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
                 tx.commit()?;
             }
@@ -462,6 +477,24 @@ impl EdgeStore {
         request: CommandRequest,
         now: DateTime<Utc>,
     ) -> Result<SubmissionOutcome, StoreError> {
+        self.submit_with_cloud(request, None, now)
+    }
+
+    pub fn submit_cloud_delivery(
+        &mut self,
+        request: CommandRequest,
+        delivery: &CloudDelivery,
+        now: DateTime<Utc>,
+    ) -> Result<SubmissionOutcome, StoreError> {
+        self.submit_with_cloud(request, Some(delivery), now)
+    }
+
+    fn submit_with_cloud(
+        &mut self,
+        request: CommandRequest,
+        cloud_delivery: Option<&CloudDelivery>,
+        now: DateTime<Utc>,
+    ) -> Result<SubmissionOutcome, StoreError> {
         request.validate()?;
         let request_hash = request.request_hash()?;
         let request_json = serde_json::to_vec(&request)?;
@@ -497,6 +530,9 @@ impl EdgeStore {
                 .ok_or_else(|| StoreError::CommandNotFound(CommandIdRef(command_id.clone())))?;
             if raw.request_hash.as_slice() != request_hash || raw.request_json != request_json {
                 return Err(StoreError::IdentityConflict);
+            }
+            if let Some(delivery) = cloud_delivery {
+                cloud::upsert_cloud_delivery_tx(&tx, request.command_id.as_str(), delivery, now)?;
             }
             let record = decode_command(raw)?;
             tx.commit()?;
@@ -552,6 +588,9 @@ impl EdgeStore {
             status_reason,
             now,
         )?;
+        if let Some(delivery) = cloud_delivery {
+            cloud::upsert_cloud_delivery_tx(&tx, request.command_id.as_str(), delivery, now)?;
+        }
         let raw = load_raw_command(&tx, request.command_id.as_str())?.ok_or_else(|| {
             StoreError::CommandNotFound(CommandIdRef(request.command_id.to_string()))
         })?;

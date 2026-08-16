@@ -25,6 +25,42 @@ use super::events::{
 use super::mapping;
 use super::{DELIVERY_LEASE_SECONDS, EDGE_PERMISSION, HEALTH_FRESH_SECONDS};
 
+pub async fn assigned_devices(
+    db: &Db,
+    access: &TenantAccess,
+    facility_id: wareboxes_domain::FacilityId,
+) -> AppResult<Vec<wareboxes_application::automation::AutomationDeviceReadModel>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
+    require_permission_tx(
+        &mut tx,
+        access.tenant_id,
+        access.user_id.get(),
+        EDGE_PERMISSION,
+    )
+    .await?;
+    if !scope.includes_facility(facility_id.get()) {
+        return Err(AppError::not_found("automation facility"));
+    }
+    let rows = sqlx::query(&format!(
+        r#"SELECT {} FROM automation_devices
+        WHERE tenant_id=$1 AND facility_id=$2
+        ORDER BY lower(display_name),id"#,
+        mapping::DEVICE_COLUMNS
+    ))
+    .bind(access.tenant_id.get())
+    .bind(facility_id.get())
+    .fetch_all(&mut *tx)
+    .await?;
+    let result = rows
+        .iter()
+        .map(mapping::device)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(result)
+}
+
 pub async fn pull_commands(
     db: &Db,
     access: &TenantAccess,
@@ -83,6 +119,15 @@ pub async fn pull_commands(
           AND device.control_mode='automatic'
           AND device.health IN ('healthy','degraded')
           AND device.last_heartbeat_at >= $3 - make_interval(secs=>$6)
+          AND EXISTS(SELECT 1 FROM automation_heartbeats heartbeat
+            WHERE heartbeat.tenant_id=command.tenant_id
+              AND heartbeat.device_id=command.device_id
+              AND heartbeat.service_account_id=$4
+              AND heartbeat.agent_instance=$7
+              AND heartbeat.control_mode='automatic'
+              AND heartbeat.id=(SELECT max(latest.id) FROM automation_heartbeats latest
+                WHERE latest.tenant_id=heartbeat.tenant_id
+                  AND latest.device_id=heartbeat.device_id))
           AND NOT EXISTS(SELECT 1 FROM automation_commands held
             WHERE held.tenant_id=command.tenant_id AND held.device_id=command.device_id
               AND held.status='manual_review')
@@ -99,6 +144,7 @@ pub async fn pull_commands(
     .bind(service_account_id.get())
     .bind(i64::from(command.limit))
     .bind(HEALTH_FRESH_SECONDS as i32)
+    .bind(&command.agent_instance)
     .fetch_all(&mut *tx)
     .await?;
     let mut result = Vec::with_capacity(ids.len());

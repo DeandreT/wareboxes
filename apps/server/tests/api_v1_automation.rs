@@ -12,14 +12,15 @@ use wareboxes_api::{auth, routes, state::AppState};
 use wareboxes_api_contract::v1::{
     AcknowledgeAutomationCommandRequest, AutomationCommandDeliveryPage, AutomationCommandResponse,
     AutomationCommandResult, AutomationCommandStatus, AutomationControlMode, AutomationDeviceClass,
-    AutomationDeviceCommand, AutomationDeviceResponse, AutomationHealthState,
-    AutomationManualResolution, AutomationRecoveryPolicy, AutomationScaleCommand,
-    AutomationScaleResult, AutomationWeightUnit, AutomationWorkspaceResponse,
-    ChangeAutomationControlRequest, CreateServiceAccountRequest, EnqueueAutomationCommandRequest,
-    IssueServiceAccountCredentialRequest, IssuedServiceAccountCredentialResponse,
-    PullAutomationCommandsRequest, RecordAutomationHeartbeatRequest,
-    RegisterAutomationDeviceRequest, ReportAutomationCommandRequest,
-    ResolveAutomationCommandRequest, Revision, ServiceAccountAccessRequest, ServiceAccountResponse,
+    AutomationDeviceCommand, AutomationDeviceResponse, AutomationEdgeDevicePage,
+    AutomationHealthState, AutomationManualResolution, AutomationRecoveryPolicy,
+    AutomationScaleCommand, AutomationScaleResult, AutomationWeightUnit,
+    AutomationWorkspaceResponse, ChangeAutomationControlRequest, CreateServiceAccountRequest,
+    EnqueueAutomationCommandRequest, IssueServiceAccountCredentialRequest,
+    IssuedServiceAccountCredentialResponse, PullAutomationCommandsRequest,
+    RecordAutomationHeartbeatRequest, RegisterAutomationDeviceRequest,
+    ReportAutomationCommandRequest, ResolveAutomationCommandRequest, Revision,
+    ServiceAccountAccessRequest, ServiceAccountResponse,
 };
 
 fn request<T: Serialize>(
@@ -101,6 +102,8 @@ async fn edge_identity(
     manager_token: &str,
     tenant_id: TenantId,
     facility_id: i64,
+    identity_tag: &str,
+    token_character: char,
 ) -> (ServiceAccountResponse, String) {
     let created: ServiceAccountResponse = response(
         app.clone()
@@ -109,9 +112,9 @@ async fn edge_identity(
                 tenant_id,
                 Method::POST,
                 "/api/v1/service-accounts",
-                Some("create-edge-agent"),
+                Some(&format!("create-edge-agent-{identity_tag}")),
                 &CreateServiceAccountRequest {
-                    name: "Facility edge agent".into(),
+                    name: format!("Facility edge agent {identity_tag}"),
                     description: Some("Outbound local automation connection".into()),
                     access: ServiceAccountAccessRequest {
                         all_facilities: false,
@@ -127,7 +130,7 @@ async fn edge_identity(
         StatusCode::OK,
     )
     .await;
-    let bearer = format!("wbs_sa_{}", "E".repeat(48));
+    let bearer = format!("wbs_sa_{}", token_character.to_string().repeat(48));
     let issued: IssuedServiceAccountCredentialResponse = response(
         app.clone()
             .oneshot(request(
@@ -138,10 +141,10 @@ async fn edge_identity(
                     "/api/v1/service-accounts/{}/credentials",
                     created.service_account_id
                 ),
-                Some("issue-edge-agent"),
+                Some(&format!("issue-edge-agent-{identity_tag}")),
                 &IssueServiceAccountCredentialRequest {
                     expected_revision: Revision::new(1).unwrap(),
-                    label: "edge outbound credential".into(),
+                    label: format!("edge outbound credential {identity_tag}"),
                     expires_at: None,
                     bearer_token: bearer.clone(),
                 },
@@ -177,7 +180,7 @@ async fn automation_commands_cross_the_cloud_edge_boundary_once_with_frozen_evid
     let manager_token = auth::create_session(&fixture.db, manager.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
     let (edge_account, edge_token) =
-        edge_identity(&app, &manager_token, tenant_id, facility_id).await;
+        edge_identity(&app, &manager_token, tenant_id, facility_id, "a", 'E').await;
 
     let registered: AutomationDeviceResponse = response(
         app.clone()
@@ -201,6 +204,22 @@ async fn automation_commands_cross_the_cloud_edge_boundary_once_with_frozen_evid
     .await;
     assert_eq!(registered.control_mode, AutomationControlMode::Disabled);
     assert_eq!(registered.health, AutomationHealthState::Unknown);
+    let assigned_devices: AutomationEdgeDevicePage = response(
+        app.clone()
+            .oneshot(request(
+                &edge_token,
+                tenant_id,
+                Method::GET,
+                &format!("/api/v1/edge/automation/devices?facility_id={facility_id}"),
+                None,
+                &(),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(assigned_devices.items, vec![registered.clone()]);
 
     let observed_at = chrono::Utc::now().to_rfc3339();
     let heartbeat: wareboxes_api_contract::v1::AutomationHeartbeatResponse = response(
@@ -282,6 +301,36 @@ async fn automation_commands_cross_the_cloud_edge_boundary_once_with_frozen_evid
     )
     .await;
     assert_eq!(enabled.control_mode, AutomationControlMode::Automatic);
+    let local_automatic: wareboxes_api_contract::v1::AutomationHeartbeatResponse = response(
+        app.clone()
+            .oneshot(request(
+                &edge_token,
+                tenant_id,
+                Method::POST,
+                &format!(
+                    "/api/v1/edge/automation/devices/{}/heartbeats",
+                    registered.device_id
+                ),
+                Some("edge-heartbeat-automatic"),
+                &RecordAutomationHeartbeatRequest {
+                    agent_instance: "edge-host-a/boot-1".into(),
+                    health: AutomationHealthState::Healthy,
+                    control_mode: AutomationControlMode::Automatic,
+                    message: Some("local safety interlock permits automatic work".into()),
+                    queued_commands: 0,
+                    manual_review_commands: 0,
+                    observed_at: chrono::Utc::now().to_rfc3339(),
+                },
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        local_automatic.control_mode,
+        AutomationControlMode::Automatic
+    );
 
     let enqueue = EnqueueAutomationCommandRequest {
         correlation_id: "pack-carton-100-weight".into(),
@@ -690,7 +739,7 @@ async fn automation_commands_cross_the_cloud_edge_boundary_once_with_frozen_evid
     .await;
     assert_eq!(workspace.devices.len(), 1);
     assert_eq!(workspace.commands, vec![resolved.clone(), succeeded]);
-    assert_eq!(workspace.heartbeats.len(), 1);
+    assert_eq!(workspace.heartbeats.len(), 2);
 
     let wrong_tenant = app
         .clone()
@@ -764,6 +813,36 @@ async fn automation_commands_cross_the_cloud_edge_boundary_once_with_frozen_evid
     assert_eq!(resolution_outbox_count, 3);
     outbox_tx.commit().await.unwrap();
 
+    let (_replacement_edge_account, replacement_edge_token) =
+        edge_identity(&app, &manager_token, tenant_id, facility_id, "b", 'F').await;
+    let replacement_instance = "edge-host-b/boot-1";
+    let _replacement_heartbeat: wareboxes_api_contract::v1::AutomationHeartbeatResponse = response(
+        app.clone()
+            .oneshot(request(
+                &replacement_edge_token,
+                tenant_id,
+                Method::POST,
+                &format!(
+                    "/api/v1/edge/automation/devices/{}/heartbeats",
+                    resumed.device_id
+                ),
+                Some("replacement-edge-heartbeat"),
+                &RecordAutomationHeartbeatRequest {
+                    agent_instance: replacement_instance.into(),
+                    health: AutomationHealthState::Healthy,
+                    control_mode: AutomationControlMode::Automatic,
+                    message: Some("replacement agent owns the live controller link".into()),
+                    queued_commands: 0,
+                    manual_review_commands: 0,
+                    observed_at: (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339(),
+                },
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+
     let concurrent_queued: AutomationCommandResponse = response(
         app.clone()
             .oneshot(request(
@@ -783,21 +862,42 @@ async fn automation_commands_cross_the_cloud_edge_boundary_once_with_frozen_evid
         StatusCode::OK,
     )
     .await;
+    let superseded_agent_pull: AutomationCommandDeliveryPage = response(
+        app.clone()
+            .oneshot(request(
+                &edge_token,
+                tenant_id,
+                Method::POST,
+                "/api/v1/edge/automation/command-pulls",
+                Some("superseded-agent-pull"),
+                &pull,
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(superseded_agent_pull.items.is_empty());
+    let replacement_pull = PullAutomationCommandsRequest {
+        facility_id,
+        agent_instance: replacement_instance.into(),
+        limit: 10,
+    };
     let first_pull = app.clone().oneshot(request(
-        &edge_token,
+        &replacement_edge_token,
         tenant_id,
         Method::POST,
         "/api/v1/edge/automation/command-pulls",
         Some("concurrent-pull-a"),
-        &pull,
+        &replacement_pull,
     ));
     let second_pull = app.clone().oneshot(request(
-        &edge_token,
+        &replacement_edge_token,
         tenant_id,
         Method::POST,
         "/api/v1/edge/automation/command-pulls",
         Some("concurrent-pull-b"),
-        &pull,
+        &replacement_pull,
     ));
     let (first_response, second_response) = tokio::join!(first_pull, second_pull);
     let first_page: AutomationCommandDeliveryPage =

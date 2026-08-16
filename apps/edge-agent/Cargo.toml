@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "=0.30.0", features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,6 +27,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.11", features = ["v4"] }
+wareboxes-api-contract = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

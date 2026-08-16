@@ -306,6 +306,12 @@ pub struct AutomationWorkspaceRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AutomationEdgeDevicesRequest {
+    pub facility_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutomationDeviceResponse {
     pub device_id: i64,
     pub facility_id: i64,
@@ -322,6 +328,12 @@ pub struct AutomationDeviceResponse {
     pub last_heartbeat_at: Option<String>,
     pub registered_by: i64,
     pub registered_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationEdgeDevicePage {
+    pub items: Vec<AutomationDeviceResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

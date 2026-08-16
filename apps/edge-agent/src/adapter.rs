@@ -341,6 +341,10 @@ impl AdapterRegistry {
     pub fn is_empty(&self) -> bool {
         self.adapters.is_empty()
     }
+
+    pub fn device_ids(&self) -> Vec<DeviceId> {
+        self.adapters.keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]

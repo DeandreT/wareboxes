@@ -261,7 +261,18 @@ pub async fn enqueue_command(
         ));
     }
     let now = now_iso();
+    let edge_is_automatic: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM automation_heartbeats heartbeat
+        WHERE heartbeat.tenant_id=$1 AND heartbeat.device_id=$2
+          AND heartbeat.observed_at=$3 AND heartbeat.control_mode='automatic')"#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(device.device_id.get())
+    .bind(device.last_heartbeat_at)
+    .fetch_one(&mut *tx)
+    .await?;
     let ready = device.control_mode == AutomationControlMode::Automatic
+        && edge_is_automatic
         && matches!(
             device.health,
             AutomationHealthState::Healthy | AutomationHealthState::Degraded
@@ -271,7 +282,7 @@ pub async fn enqueue_command(
         });
     if !ready {
         return Err(AppError::conflict(
-            "automation device is not healthy, fresh, and in automatic mode",
+            "automation device is not healthy, fresh, and automatic at both cloud and edge",
         ));
     }
     let unresolved_command_exists: bool = sqlx::query_scalar(

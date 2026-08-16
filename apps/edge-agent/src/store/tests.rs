@@ -167,3 +167,39 @@ fn persistent_database_is_owner_readable_and_writable_only() {
         0o600
     );
 }
+
+#[test]
+fn version_one_store_is_migrated_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("edge-v1.sqlite3");
+    let schema = include_str!("schema.sql");
+    let (version_one_schema, _) = schema
+        .split_once("CREATE TABLE edge_cloud_deliveries")
+        .unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(version_one_schema).unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let mut store = EdgeStore::open(&path).unwrap();
+    let actor = ActorId::new("operator-1").unwrap();
+    store
+        .register_device(descriptor(), &actor, "migration verification", now())
+        .unwrap();
+    let cloud_table_exists: bool = store
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edge_cloud_deliveries')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(cloud_table_exists);
+    assert_eq!(
+        store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        STORE_SCHEMA_VERSION
+    );
+}
