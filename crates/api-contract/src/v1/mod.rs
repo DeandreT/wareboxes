@@ -38,6 +38,7 @@ mod order_cancellation;
 mod order_hold;
 mod order_line_amendment;
 mod order_release;
+mod order_stream;
 mod outbound_load;
 mod outbound_qa;
 mod packing;
@@ -313,6 +314,7 @@ pub use order_line_amendment::{
     ReplacedFulfillmentOrderStatus,
 };
 pub use order_release::{OrderReleaseStatus, ReleaseOrderRequest, ReleaseOrderResponse};
+pub use order_stream::{StreamOrderRequest, StreamOrderResponse};
 pub use outbound_load::{
     CancelOutboundLoadRequest, CancelOutboundLoadResponse, CompleteOutboundLoadLoadingRequest,
     CompleteOutboundLoadLoadingResponse, ConfirmOutboundLoadDepartureRequest,

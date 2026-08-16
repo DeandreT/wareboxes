@@ -19,7 +19,7 @@ use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use crate::error::{AppError, AppResult};
-use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
+use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
 use crate::repo::orders::{insert_order_activity_tx, require_replayed_order_visible_tx};
 
 pub(crate) mod policy;
@@ -191,6 +191,21 @@ pub async fn plan_order_allocation(
         return Ok(result);
     }
 
+    let result =
+        plan_order_allocation_tx(&mut tx, access, context, &scope, command, now_iso()).await?;
+    Ok(prepared.commit(tx, result).await?)
+}
+
+pub(crate) async fn plan_order_allocation_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    context: &CommandContext,
+    scope: &ScopeBindings,
+    command: &PlanOrderAllocationCommand,
+    occurred_at: Timestamp,
+) -> AppResult<PlanOrderAllocationResult> {
+    let mut tx = tx;
+
     if !scope.includes_facility(command.facility_id.get()) {
         return Err(AppError::forbidden());
     }
@@ -210,7 +225,6 @@ pub async fn plan_order_allocation(
         command.facility_id,
     )
     .await?;
-    let occurred_at = now_iso();
     let policy = resolve_allocation_policy_tx(
         &mut tx,
         access.tenant_id,
@@ -443,7 +457,7 @@ pub async fn plan_order_allocation(
             "committed allocation result does not conserve order demand",
         ));
     }
-    Ok(prepared.commit(tx, result).await?)
+    Ok(result)
 }
 
 pub async fn order_allocation_readiness(

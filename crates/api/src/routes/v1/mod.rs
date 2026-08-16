@@ -33,6 +33,7 @@ mod order_allocations;
 mod order_cancellations;
 mod order_holds;
 mod order_releases;
+mod order_streams;
 mod orders;
 pub(crate) mod outbound_loads;
 mod outbound_qa;
@@ -863,6 +864,7 @@ pub fn router() -> Router<AppState> {
             post(order_cancellations::create),
         )
         .route("/orders/{order_id}/releases", post(order_releases::create))
+        .route("/orders/{order_id}/streams", post(order_streams::create))
         .route(
             "/orders/{order_id}/packing-session",
             get(packing::for_order),

@@ -41,7 +41,7 @@ fn release_command(order_id: i64, body: ReleaseOrderRequest) -> V1Result<Release
     })
 }
 
-fn map_result(result: ReleaseOrderResult) -> V1Result<ReleaseOrderResponse> {
+pub(super) fn map_result(result: ReleaseOrderResult) -> V1Result<ReleaseOrderResponse> {
     if !result.is_consistent() {
         return Err(V1Error::internal(
             "order release produced inconsistent work totals",

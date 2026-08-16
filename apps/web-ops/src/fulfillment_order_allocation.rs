@@ -14,8 +14,10 @@ use crate::view_model::format_quantity;
 
 mod backorder;
 mod policy;
+mod stream;
 use backorder::BackorderControls;
 use policy::{allocation_action_title, AllocationPolicyBadge, CommittedAllocationPolicy};
+use stream::{OrderStreamControls, StreamControlsState};
 
 type AllocationRetry = (PlanOrderAllocationRequest, String);
 type ReleaseRetry = (ReleaseOrderRequest, String);
@@ -50,6 +52,7 @@ pub(super) fn OrderAllocationPanel(
     let loading = RwSignal::new(false);
     let command_pending = RwSignal::new(false);
     let release_pending = RwSignal::new(false);
+    let stream_pending = RwSignal::new(false);
     let readiness_error = RwSignal::new(None::<String>);
     let command_error = RwSignal::new(None::<String>);
     let release_error = RwSignal::new(None::<String>);
@@ -105,11 +108,15 @@ pub(super) fn OrderAllocationPanel(
             return;
         };
         command_error.set(None);
+        release_error.set(None);
         request_readiness(order_id, selected_facility, readiness_state);
     };
 
     let allocate = move |_| {
-        if command_pending.get_untracked() || release_pending.get_untracked() {
+        if command_pending.get_untracked()
+            || release_pending.get_untracked()
+            || stream_pending.get_untracked()
+        {
             return;
         }
         let (request, idempotency_key) = if let Some(attempt) = retry_attempt.get_untracked() {
@@ -176,7 +183,10 @@ pub(super) fn OrderAllocationPanel(
     };
 
     let release = move |_| {
-        if release_pending.get_untracked() || command_pending.get_untracked() {
+        if release_pending.get_untracked()
+            || command_pending.get_untracked()
+            || stream_pending.get_untracked()
+        {
             return;
         }
         let (request, idempotency_key) = if let Some(attempt) = release_retry.get_untracked() {
@@ -269,6 +279,7 @@ pub(super) fn OrderAllocationPanel(
                             loading.get()
                                 || command_pending.get()
                                 || release_pending.get()
+                                || stream_pending.get()
                                 || readiness.get().is_some_and(|state| state.eligible_facilities.is_empty())
                                 || (readiness.get().is_none() && access_facilities.get_value().is_empty())
                         }
@@ -290,7 +301,12 @@ pub(super) fn OrderAllocationPanel(
                     class="button icon-action allocation-refresh"
                     title="Refresh allocation readiness"
                     aria-label="Refresh allocation readiness"
-                    disabled=move || loading.get() || command_pending.get() || release_pending.get()
+                    disabled=move || {
+                        loading.get()
+                            || command_pending.get()
+                            || release_pending.get()
+                            || stream_pending.get()
+                    }
                     on:click=refresh
                 >
                     <Icon icon=UiIcon::Refresh/>
@@ -302,6 +318,7 @@ pub(super) fn OrderAllocationPanel(
                     disabled=move || {
                         command_pending.get()
                             || release_pending.get()
+                            || stream_pending.get()
                             || (retry_attempt.get().is_none()
                                 && (loading.get()
                                     || readiness.get().is_none_or(|state| {
@@ -348,6 +365,7 @@ pub(super) fn OrderAllocationPanel(
                 readiness
                 allocation_pending=command_pending
                 release_pending
+                stream_pending
                 on_changed=backorder_changed
                 on_unauthorized
             />
@@ -355,6 +373,21 @@ pub(super) fn OrderAllocationPanel(
             {move || committed_policy.get().map(|(run_id, policy)| {
                 view! { <CommittedAllocationPolicy run_id policy/> }
             })}
+
+            <OrderStreamControls state=StreamControlsState {
+                order_id,
+                readiness,
+                facility_id,
+                destination_location_id,
+                release_locations,
+                allocation_pending: command_pending,
+                release_pending,
+                stream_pending,
+                committed_policy,
+                readiness_state,
+                on_refreshed,
+                on_unauthorized,
+            }/>
 
             <Show when=move || {
                 release_retry.get().is_some()
@@ -375,6 +408,7 @@ pub(super) fn OrderAllocationPanel(
                             disabled=move || {
                                 release_pending.get()
                                     || command_pending.get()
+                                    || stream_pending.get()
                                     || release_destinations(
                                         release_locations.get_value(),
                                         facility_id.get().parse::<i64>().unwrap_or_default(),
@@ -412,6 +446,7 @@ pub(super) fn OrderAllocationPanel(
                         disabled=move || {
                             release_pending.get()
                                 || command_pending.get()
+                                || stream_pending.get()
                                 || (release_retry.get().is_none()
                                     && destination_location_id.get().is_empty())
                         }

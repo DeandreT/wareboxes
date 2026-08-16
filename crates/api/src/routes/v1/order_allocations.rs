@@ -68,7 +68,7 @@ pub async fn readiness(
     Ok(Json(map_readiness(readiness)?))
 }
 
-fn plan_command(
+pub(super) fn plan_command(
     order_id: i64,
     request: PlanOrderAllocationRequest,
 ) -> V1Result<PlanOrderAllocationCommand> {
@@ -81,7 +81,9 @@ fn plan_command(
     })
 }
 
-fn map_plan_result(result: PlanOrderAllocationResult) -> V1Result<PlanOrderAllocationResponse> {
+pub(super) fn map_plan_result(
+    result: PlanOrderAllocationResult,
+) -> V1Result<PlanOrderAllocationResponse> {
     if !result.quantities_are_consistent() {
         return Err(V1Error::internal(
             "order allocation produced inconsistent quantities",

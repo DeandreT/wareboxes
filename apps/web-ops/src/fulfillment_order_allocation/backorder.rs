@@ -33,6 +33,7 @@ pub(super) fn BackorderControls(
     readiness: RwSignal<Option<OrderAllocationReadinessResponse>>,
     allocation_pending: RwSignal<bool>,
     release_pending: RwSignal<bool>,
+    stream_pending: RwSignal<bool>,
     on_changed: Callback<i64>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
@@ -232,7 +233,12 @@ pub(super) fn BackorderControls(
                 <button
                     type="button"
                     class="button secondary-action"
-                    disabled=move || pending.get() || allocation_pending.get() || release_pending.get()
+                    disabled=move || {
+                        pending.get()
+                            || allocation_pending.get()
+                            || release_pending.get()
+                            || stream_pending.get()
+                    }
                     on:click=open_policy
                 >
                     <Icon icon=UiIcon::Orders/>
@@ -242,7 +248,12 @@ pub(super) fn BackorderControls(
                     <button
                         type="button"
                         class="button primary-action"
-                        disabled=move || pending.get() || allocation_pending.get() || release_pending.get()
+                        disabled=move || {
+                            pending.get()
+                                || allocation_pending.get()
+                                || release_pending.get()
+                                || stream_pending.get()
+                        }
                         on:click=open_split
                     >
                         <Icon icon=UiIcon::Release/>

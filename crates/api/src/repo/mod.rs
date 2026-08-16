@@ -43,6 +43,7 @@ pub mod order_cancellation;
 pub mod order_creation;
 pub mod order_line_amendment;
 pub mod order_release;
+pub mod order_stream;
 pub mod orders;
 pub mod outbound_load;
 pub mod outbound_qa;

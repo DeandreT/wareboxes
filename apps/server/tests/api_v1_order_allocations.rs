@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_order_allocations/streaming.rs"]
+mod streaming;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -12,7 +14,7 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, OrderAllocationOutcome, OrderAllocationReadinessResponse,
     OrderAllocationReadinessStatus, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-    Revision,
+    Revision, StreamOrderRequest, StreamOrderResponse,
 };
 use wareboxes_application::order_cancellation::CancelOrderCommand;
 use wareboxes_application::CommandContext;

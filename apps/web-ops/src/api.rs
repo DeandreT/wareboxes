@@ -25,7 +25,8 @@ use wareboxes_api_contract::v1::{
     ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse, ReplenishmentWorkSort,
     ReplenishmentWorkSortDirection, ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest,
     RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
-    ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse,
+    ReversePickConfirmationResponse, StreamOrderRequest, StreamOrderResponse, VoidCartonRequest,
+    VoidCartonResponse,
 };
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
@@ -299,7 +300,7 @@ mod browser {
     use wareboxes_core::dto::{LoginRequest, SelectTenantRequest};
 
     use super::{
-        AbandonPackSessionRequest, AbandonPackSessionResponse,
+        order_stream_path, AbandonPackSessionRequest, AbandonPackSessionResponse,
         AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
         AccessScopeWorkspace, ApiError, CancelCrossDockWorkRequest, CancelCrossDockWorkResponse,
         CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest,
@@ -324,7 +325,8 @@ mod browser {
         ReopenCartonRequest, ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
         ReplenishmentWorkCancellationResponse, RetireReplenishmentPolicyRequest,
         RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
-        ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
+        ReversePickConfirmationResponse, StreamOrderRequest, StreamOrderResponse,
+        VoidCartonRequest, VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -449,6 +451,14 @@ mod browser {
             idempotency_key,
         )
         .await
+    }
+
+    pub async fn stream_order(
+        order_id: i64,
+        request: &StreamOrderRequest,
+        idempotency_key: &str,
+    ) -> Result<StreamOrderResponse, ApiError> {
+        post(&order_stream_path(order_id), request, idempotency_key).await
     }
 
     pub async fn cancel_order(
@@ -1168,6 +1178,15 @@ pub async fn release_order(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub async fn stream_order(
+    _order_id: i64,
+    _request: &StreamOrderRequest,
+    _idempotency_key: &str,
+) -> Result<StreamOrderResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn cancel_order(
     _order_id: i64,
     _request: &CancelOrderRequest,
@@ -1649,6 +1668,11 @@ fn pick_reversal_path(confirmation_id: i64) -> String {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn order_stream_path(order_id: i64) -> String {
+    format!("/api/v1/orders/{order_id}/streams")
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn append_optional_id(path: &mut String, name: &str, value: Option<i64>) {
     if let Some(value) = value {
         path.push('&');
@@ -1862,5 +1886,10 @@ mod tests {
             pick_reversal_path(23),
             "/api/v1/pick-confirmations/23/reversals"
         );
+    }
+
+    #[test]
+    fn order_stream_path_targets_the_atomic_command() {
+        assert_eq!(order_stream_path(42), "/api/v1/orders/42/streams");
     }
 }
