@@ -4,6 +4,47 @@ use super::{
     CursorPage, InventoryBalanceSearchQuery, InventoryBalanceStatus, OpaqueCursor, PageLimit,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryReconciliationMonitorState {
+    NeverRun,
+    Current,
+    Overdue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryReconciliationCoverage {
+    FullTenant,
+    AccessScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryReconciliationHealth {
+    Healthy,
+    IssuesDetected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryReconciliationStatusResponse {
+    pub monitor_state: InventoryReconciliationMonitorState,
+    pub coverage: InventoryReconciliationCoverage,
+    pub last_run_id: Option<i64>,
+    pub last_scheduled_for: Option<String>,
+    pub last_completed_at: Option<String>,
+    pub next_due_at: Option<String>,
+    pub state_revision: Option<i64>,
+    pub observed_at: String,
+    pub health: InventoryReconciliationHealth,
+    pub journal_projection_issue_count: i64,
+    pub commitment_issue_count: i64,
+    pub affected_inventory_owner_count: i64,
+    pub affected_facility_count: i64,
+    pub max_severity_quantity: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum InventorySortDirection {
@@ -297,5 +338,29 @@ mod tests {
         assert_eq!(filtered.bucket, Some(InventoryAgingBucket::DueWithin30Days));
         assert_eq!(filtered.sort, InventoryAgingSort::Expiration);
         assert!(serde_json::from_str::<InventoryAgingPageRequest>(r#"{"age_days":30}"#).is_err());
+    }
+
+    #[test]
+    fn reconciliation_status_uses_stable_typed_values() {
+        let response = InventoryReconciliationStatusResponse {
+            monitor_state: InventoryReconciliationMonitorState::Overdue,
+            coverage: InventoryReconciliationCoverage::AccessScope,
+            last_run_id: Some(9),
+            last_scheduled_for: Some("2026-08-15T12:30:00+00:00".into()),
+            last_completed_at: Some("2026-08-15T12:30:01+00:00".into()),
+            next_due_at: Some("2026-08-15T12:31:01+00:00".into()),
+            state_revision: Some(4),
+            observed_at: "2026-08-15T12:32:00+00:00".into(),
+            health: InventoryReconciliationHealth::IssuesDetected,
+            journal_projection_issue_count: 2,
+            commitment_issue_count: 1,
+            affected_inventory_owner_count: 1,
+            affected_facility_count: 1,
+            max_severity_quantity: 7,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["monitor_state"], "overdue");
+        assert_eq!(value["coverage"], "access_scope");
+        assert_eq!(value["health"], "issues_detected");
     }
 }

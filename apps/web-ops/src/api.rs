@@ -102,7 +102,8 @@ pub use integration_mapping::{
 mod inventory_integrity;
 pub use inventory_integrity::{
     create_inventory_recall, inventory_aging, inventory_integrity_issues, inventory_journal,
-    inventory_recalls, release_inventory_recall, AgingFilters, IntegrityFilters, JournalFilters,
+    inventory_recalls, inventory_reconciliation_status, release_inventory_recall, AgingFilters,
+    IntegrityFilters, JournalFilters,
 };
 mod item_storage_policy;
 pub use item_storage_policy::{

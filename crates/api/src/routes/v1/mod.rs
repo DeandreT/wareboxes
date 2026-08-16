@@ -624,6 +624,10 @@ pub fn router() -> Router<AppState> {
             get(inventory_integrity::issues),
         )
         .route(
+            "/inventory/reconciliation/status",
+            get(inventory_integrity::reconciliation_status),
+        )
+        .route(
             "/storage-zones",
             get(storage_zones::list).post(storage_zones::configure),
         )

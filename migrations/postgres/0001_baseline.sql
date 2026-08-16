@@ -48311,3 +48311,289 @@ REVOKE ALL ON FUNCTION public.require_license_plate_hierarchy_integrity() FROM P
 REVOKE ALL ON FUNCTION public.validate_license_plate_hierarchy_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_license_plate_hierarchy_event_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_packed_position_license_plate_hierarchy() FROM PUBLIC;
+
+-- Continuous inventory reconciliation control loop.
+CREATE TABLE public.inventory_reconciliation_runs (
+  id bigint GENERATED ALWAYS AS IDENTITY,
+  tenant_id bigint NOT NULL,
+  scheduled_for timestamp with time zone NOT NULL,
+  started_at timestamp with time zone NOT NULL,
+  completed_at timestamp with time zone NOT NULL,
+  next_due_at timestamp with time zone NOT NULL,
+  interval_seconds bigint NOT NULL,
+  worker_id text NOT NULL,
+  health text NOT NULL,
+  previous_health text,
+  journal_projection_issue_count bigint NOT NULL,
+  commitment_issue_count bigint NOT NULL,
+  affected_inventory_owner_count bigint NOT NULL,
+  affected_facility_count bigint NOT NULL,
+  max_severity_quantity bigint NOT NULL,
+  issue_digest text NOT NULL,
+  previous_issue_digest text,
+  alert_type text,
+  state_revision bigint NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE (tenant_id,id),
+  UNIQUE (tenant_id,scheduled_for),
+  FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+  CHECK (scheduled_for=date_trunc('minute',scheduled_for)),
+  CHECK (started_at<=completed_at),
+  CHECK (completed_at<next_due_at),
+  CHECK (interval_seconds BETWEEN 60 AND 86400),
+  CHECK (char_length(btrim(worker_id)) BETWEEN 1 AND 200),
+  CHECK (health IN ('healthy','issues_detected')),
+  CHECK (previous_health IS NULL OR previous_health IN ('healthy','issues_detected')),
+  CHECK (journal_projection_issue_count>=0),
+  CHECK (commitment_issue_count>=0),
+  CHECK (affected_inventory_owner_count>=0),
+  CHECK (affected_facility_count>=0),
+  CHECK (max_severity_quantity>=0),
+  CHECK (issue_digest ~ '^[0-9a-f]{32}$'),
+  CHECK (previous_issue_digest IS NULL OR previous_issue_digest ~ '^[0-9a-f]{32}$'),
+  CHECK (alert_type IS NULL OR alert_type IN ('issues_detected','issues_changed','restored')),
+  CHECK (state_revision>0),
+  CHECK ((health='healthy')=(journal_projection_issue_count=0 AND commitment_issue_count=0)),
+  CHECK (health='issues_detected' OR max_severity_quantity=0)
+);
+
+CREATE TABLE public.inventory_reconciliation_state (
+  tenant_id bigint PRIMARY KEY,
+  revision bigint NOT NULL,
+  health text NOT NULL,
+  issue_digest text NOT NULL,
+  last_run_id bigint NOT NULL,
+  last_scheduled_for timestamp with time zone NOT NULL,
+  last_completed_at timestamp with time zone NOT NULL,
+  next_due_at timestamp with time zone NOT NULL,
+  journal_projection_issue_count bigint NOT NULL,
+  commitment_issue_count bigint NOT NULL,
+  affected_inventory_owner_count bigint NOT NULL,
+  affected_facility_count bigint NOT NULL,
+  max_severity_quantity bigint NOT NULL,
+  FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+  FOREIGN KEY (tenant_id,last_run_id)
+    REFERENCES public.inventory_reconciliation_runs(tenant_id,id),
+  CHECK (revision>0),
+  CHECK (health IN ('healthy','issues_detected')),
+  CHECK (issue_digest ~ '^[0-9a-f]{32}$'),
+  CHECK (last_scheduled_for=date_trunc('minute',last_scheduled_for)),
+  CHECK (last_completed_at<next_due_at),
+  CHECK (journal_projection_issue_count>=0),
+  CHECK (commitment_issue_count>=0),
+  CHECK (affected_inventory_owner_count>=0),
+  CHECK (affected_facility_count>=0),
+  CHECK (max_severity_quantity>=0),
+  CHECK ((health='healthy')=(journal_projection_issue_count=0 AND commitment_issue_count=0)),
+  CHECK (health='issues_detected' OR max_severity_quantity=0)
+);
+
+CREATE INDEX inventory_reconciliation_runs_tenant_history_idx
+ON public.inventory_reconciliation_runs(tenant_id,scheduled_for DESC,id DESC);
+
+CREATE FUNCTION public.reject_inventory_reconciliation_run_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'inventory reconciliation runs are immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE TRIGGER inventory_reconciliation_runs_immutable
+BEFORE UPDATE OR DELETE ON public.inventory_reconciliation_runs FOR EACH ROW
+EXECUTE FUNCTION public.reject_inventory_reconciliation_run_mutation();
+
+CREATE FUNCTION public.execute_inventory_reconciliation(
+  requested_tenant_id bigint,
+  requested_worker_id text,
+  requested_scheduled_for timestamp with time zone,
+  requested_interval_seconds bigint
+) RETURNS TABLE(
+  run_id bigint,
+  tenant_id bigint,
+  scheduled_for timestamp with time zone,
+  completed_at timestamp with time zone,
+  next_due_at timestamp with time zone,
+  interval_seconds bigint,
+  health text,
+  previous_health text,
+  journal_projection_issue_count bigint,
+  commitment_issue_count bigint,
+  affected_inventory_owner_count bigint,
+  affected_facility_count bigint,
+  max_severity_quantity bigint,
+  issue_digest text,
+  state_revision bigint,
+  created boolean,
+  alert_type text
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE current_tenant_id bigint;
+DECLARE prior public.inventory_reconciliation_state%ROWTYPE;
+DECLARE existing public.inventory_reconciliation_runs%ROWTYPE;
+DECLARE inserted public.inventory_reconciliation_runs%ROWTYPE;
+DECLARE journal_count bigint:=0;
+DECLARE commitment_count bigint:=0;
+DECLARE owner_count bigint:=0;
+DECLARE facility_count bigint:=0;
+DECLARE maximum_severity bigint:=0;
+DECLARE digest text;
+DECLARE current_health text;
+DECLARE transition text;
+DECLARE next_revision bigint;
+DECLARE started timestamp with time zone:=clock_timestamp();
+DECLARE completed timestamp with time zone;
+BEGIN
+  current_tenant_id:=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint;
+  IF current_tenant_id IS NULL OR current_tenant_id<>requested_tenant_id THEN
+    RAISE EXCEPTION 'inventory reconciliation tenant context is required'
+      USING ERRCODE='42501';
+  END IF;
+  IF requested_tenant_id<=0
+    OR char_length(btrim(requested_worker_id)) NOT BETWEEN 1 AND 200
+    OR requested_scheduled_for<>date_trunc('minute',requested_scheduled_for)
+    OR requested_scheduled_for<clock_timestamp()-INTERVAL '24 hours'
+    OR requested_scheduled_for>clock_timestamp()+INTERVAL '1 minute'
+    OR requested_interval_seconds NOT BETWEEN 60 AND 86400
+    OR NOT EXISTS(SELECT 1 FROM public.tenants tenant
+      WHERE tenant.id=requested_tenant_id AND tenant.deleted IS NULL
+        AND tenant.status='active') THEN
+    RAISE EXCEPTION 'invalid inventory reconciliation schedule'
+      USING ERRCODE='22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'inventory-reconciliation:'||requested_tenant_id::text,0));
+  SELECT run.* INTO existing
+  FROM public.inventory_reconciliation_runs run
+  WHERE run.tenant_id=requested_tenant_id
+    AND run.scheduled_for=requested_scheduled_for;
+  IF FOUND THEN
+    IF existing.interval_seconds<>requested_interval_seconds THEN
+      RAISE EXCEPTION 'inventory reconciliation schedule was reused with a different interval'
+        USING ERRCODE='23505';
+    END IF;
+    RETURN QUERY SELECT existing.id,existing.tenant_id,existing.scheduled_for,
+      existing.completed_at,existing.next_due_at,existing.interval_seconds,existing.health,
+      existing.previous_health,existing.journal_projection_issue_count,
+      existing.commitment_issue_count,existing.affected_inventory_owner_count,
+      existing.affected_facility_count,existing.max_severity_quantity,
+      existing.issue_digest,existing.state_revision,FALSE,existing.alert_type;
+    RETURN;
+  END IF;
+
+  SELECT state.* INTO prior
+  FROM public.inventory_reconciliation_state state
+  WHERE state.tenant_id=requested_tenant_id
+  FOR UPDATE;
+  IF FOUND AND requested_scheduled_for<=prior.last_scheduled_for THEN
+    RAISE EXCEPTION 'inventory reconciliation schedule is older than the current state'
+      USING ERRCODE='40001';
+  END IF;
+
+  WITH issue AS (
+    SELECT 'journal_projection'::text AS kind,reconciliation.inventory_owner_id,
+      reconciliation.facility_id,ABS(reconciliation.variance)::bigint AS severity,
+      hashtextextended(concat_ws(':','journal',reconciliation.inventory_owner_id,
+        reconciliation.facility_id,reconciliation.location_id,
+        COALESCE(reconciliation.license_plate_id,0),reconciliation.item_batch_id,
+        reconciliation.status,reconciliation.journal_qty,
+        reconciliation.projected_qty),0) AS issue_hash
+    FROM public.inventory_reconciliation reconciliation
+    WHERE reconciliation.tenant_id=requested_tenant_id
+    UNION ALL
+    SELECT 'commitments'::text,reconciliation.inventory_owner_id,
+      reconciliation.facility_id,GREATEST(
+        ABS(reconciliation.qty_reserved-reconciliation.allocated_qty),
+        ABS(reconciliation.qty_held-reconciliation.held_qty),
+        reconciliation.overcommitted_qty)::bigint,
+      hashtextextended(concat_ws(':','commitments',reconciliation.inventory_balance_id,
+        reconciliation.qty_on_hand,reconciliation.qty_reserved,
+        reconciliation.allocated_qty,reconciliation.qty_held,
+        reconciliation.held_qty,reconciliation.overcommitted_qty,
+        array_to_string(reconciliation.issue_codes,',')),0)
+    FROM public.inventory_hold_reconciliation reconciliation
+    WHERE reconciliation.tenant_id=requested_tenant_id
+  )
+  SELECT COUNT(*) FILTER(WHERE kind='journal_projection')::bigint,
+    COUNT(*) FILTER(WHERE kind='commitments')::bigint,
+    COUNT(DISTINCT inventory_owner_id)::bigint,
+    COUNT(DISTINCT facility_id)::bigint,COALESCE(MAX(severity),0)::bigint,
+    md5(concat_ws('|',
+      COUNT(*) FILTER(WHERE kind='journal_projection')::text,
+      COUNT(*) FILTER(WHERE kind='commitments')::text,
+      COUNT(DISTINCT inventory_owner_id)::text,
+      COUNT(DISTINCT facility_id)::text,
+      COALESCE(MAX(severity),0)::text,
+      COALESCE(SUM(issue_hash::numeric),0)::text))
+  INTO journal_count,commitment_count,owner_count,facility_count,
+    maximum_severity,digest
+  FROM issue;
+
+  current_health:=CASE WHEN journal_count+commitment_count=0
+    THEN 'healthy' ELSE 'issues_detected' END;
+  transition:=CASE
+    WHEN current_health='issues_detected'
+      AND (prior.tenant_id IS NULL OR prior.health='healthy') THEN 'issues_detected'
+    WHEN current_health='issues_detected' AND prior.health='issues_detected'
+      AND prior.issue_digest<>digest THEN 'issues_changed'
+    WHEN current_health='healthy' AND prior.health='issues_detected' THEN 'restored'
+    ELSE NULL END;
+  next_revision:=COALESCE(prior.revision,0)+1;
+  completed:=clock_timestamp();
+
+  INSERT INTO public.inventory_reconciliation_runs(
+    tenant_id,scheduled_for,started_at,completed_at,next_due_at,interval_seconds,worker_id,
+    health,previous_health,journal_projection_issue_count,commitment_issue_count,
+    affected_inventory_owner_count,affected_facility_count,max_severity_quantity,
+    issue_digest,previous_issue_digest,alert_type,state_revision)
+  VALUES(requested_tenant_id,requested_scheduled_for,started,completed,
+    completed+make_interval(secs=>requested_interval_seconds::integer),
+    requested_interval_seconds,btrim(requested_worker_id),current_health,prior.health,journal_count,
+    commitment_count,owner_count,facility_count,maximum_severity,digest,
+    prior.issue_digest,transition,next_revision)
+  RETURNING * INTO inserted;
+
+  INSERT INTO public.inventory_reconciliation_state(
+    tenant_id,revision,health,issue_digest,last_run_id,last_scheduled_for,
+    last_completed_at,next_due_at,journal_projection_issue_count,
+    commitment_issue_count,affected_inventory_owner_count,
+    affected_facility_count,max_severity_quantity)
+  VALUES(requested_tenant_id,next_revision,current_health,digest,inserted.id,
+    requested_scheduled_for,completed,inserted.next_due_at,journal_count,
+    commitment_count,owner_count,facility_count,maximum_severity)
+  ON CONFLICT ON CONSTRAINT inventory_reconciliation_state_pkey
+  DO UPDATE SET revision=EXCLUDED.revision,
+    health=EXCLUDED.health,issue_digest=EXCLUDED.issue_digest,
+    last_run_id=EXCLUDED.last_run_id,last_scheduled_for=EXCLUDED.last_scheduled_for,
+    last_completed_at=EXCLUDED.last_completed_at,next_due_at=EXCLUDED.next_due_at,
+    journal_projection_issue_count=EXCLUDED.journal_projection_issue_count,
+    commitment_issue_count=EXCLUDED.commitment_issue_count,
+    affected_inventory_owner_count=EXCLUDED.affected_inventory_owner_count,
+    affected_facility_count=EXCLUDED.affected_facility_count,
+    max_severity_quantity=EXCLUDED.max_severity_quantity;
+
+  RETURN QUERY SELECT inserted.id,inserted.tenant_id,inserted.scheduled_for,
+    inserted.completed_at,inserted.next_due_at,inserted.interval_seconds,inserted.health,
+    inserted.previous_health,inserted.journal_projection_issue_count,
+    inserted.commitment_issue_count,inserted.affected_inventory_owner_count,
+    inserted.affected_facility_count,inserted.max_severity_quantity,
+    inserted.issue_digest,inserted.state_revision,TRUE,inserted.alert_type;
+END $$;
+
+ALTER TABLE public.inventory_reconciliation_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inventory_reconciliation_runs FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.inventory_reconciliation_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inventory_reconciliation_state FORCE ROW LEVEL SECURITY;
+CREATE POLICY inventory_reconciliation_runs_tenant_isolation
+ON public.inventory_reconciliation_runs
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY inventory_reconciliation_state_tenant_isolation
+ON public.inventory_reconciliation_state
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT ON public.inventory_reconciliation_runs TO wareboxes_app;
+GRANT SELECT ON public.inventory_reconciliation_state TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.reject_inventory_reconciliation_run_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.execute_inventory_reconciliation(bigint,text,timestamp with time zone,bigint)
+FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.execute_inventory_reconciliation(bigint,text,timestamp with time zone,bigint)
+TO wareboxes_app;

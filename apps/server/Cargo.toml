@@ -46,6 +46,7 @@ axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"

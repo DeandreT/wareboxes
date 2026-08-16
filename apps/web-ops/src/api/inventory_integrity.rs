@@ -2,7 +2,8 @@ use wareboxes_api_contract::v1::{
     CreateInventoryRecallRequest, InventoryAgingBucket, InventoryAgingPage, InventoryAgingSort,
     InventoryIntegrityIssueKind, InventoryIntegrityPage, InventoryIntegritySort,
     InventoryJournalPage, InventoryJournalSort, InventoryRecallPage, InventoryRecallResponse,
-    InventoryRecallStatus, InventorySortDirection, OpaqueCursor, ReleaseInventoryRecallRequest,
+    InventoryRecallStatus, InventoryReconciliationStatusResponse, InventorySortDirection,
+    OpaqueCursor, ReleaseInventoryRecallRequest,
 };
 
 use super::{internal_get, internal_post_idempotent, ApiError};
@@ -51,6 +52,11 @@ pub async fn inventory_integrity_issues(
     cursor: Option<&OpaqueCursor>,
 ) -> Result<InventoryIntegrityPage, ApiError> {
     internal_get(&integrity_path(filters, sort, direction, cursor)).await
+}
+
+pub async fn inventory_reconciliation_status(
+) -> Result<InventoryReconciliationStatusResponse, ApiError> {
+    internal_get("/api/v1/inventory/reconciliation/status").await
 }
 
 pub async fn inventory_aging(

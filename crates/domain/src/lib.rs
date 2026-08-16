@@ -465,6 +465,10 @@ positive_id!(
 );
 positive_id!(InventoryHoldId, "inventory hold ID");
 positive_id!(InventoryRecallId, "inventory recall ID");
+positive_id!(
+    InventoryReconciliationRunId,
+    "inventory reconciliation run ID"
+);
 positive_id!(StorageZoneId, "storage zone ID");
 positive_id!(SlottingProfileId, "slotting profile ID");
 positive_id!(SlottingRunId, "slotting run ID");

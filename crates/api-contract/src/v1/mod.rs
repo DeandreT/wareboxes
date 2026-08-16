@@ -215,7 +215,9 @@ pub use inventory_integrity::{
     InventoryAgingSort, InventoryIntegrityIssueKind, InventoryIntegrityIssueResponse,
     InventoryIntegrityPage, InventoryIntegrityPageRequest, InventoryIntegritySort,
     InventoryJournalEntryResponse, InventoryJournalPage, InventoryJournalPageRequest,
-    InventoryJournalSort, InventoryJournalTransactionResponse, InventorySortDirection,
+    InventoryJournalSort, InventoryJournalTransactionResponse, InventoryReconciliationCoverage,
+    InventoryReconciliationHealth, InventoryReconciliationMonitorState,
+    InventoryReconciliationStatusResponse, InventorySortDirection,
 };
 pub use inventory_recall::{
     CreateInventoryRecallRequest, InventoryRecallPage, InventoryRecallPageRequest,

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use reqwest::Url;
-use wareboxes_worker::WorkerConfig;
+use wareboxes_worker::{InventoryReconciliationConfig, WorkerConfig};
 
 const DEFAULT_DATABASE_URL: &str =
     "postgres://wareboxes_app:wareboxes_app@127.0.0.1:5433/wareboxes";
@@ -13,6 +13,8 @@ pub struct Config {
     pub database_url: String,
     pub worker_id: String,
     pub poll_interval: Duration,
+    pub reconciliation_poll_interval: Duration,
+    pub reconciliation: InventoryReconciliationConfig,
     pub worker: WorkerConfig,
     pub publisher: PublisherConfig,
 }
@@ -70,11 +72,31 @@ impl Config {
             max_attempts: parse_i32_env("OUTBOX_MAX_ATTEMPTS", 10, 1, 1_000)?,
         };
         worker.validate()?;
+        let reconciliation = InventoryReconciliationConfig {
+            interval_seconds: parse_i64_env(
+                "INVENTORY_RECONCILIATION_INTERVAL_SECONDS",
+                60,
+                60,
+                86_400,
+            )?,
+            tenant_page_size: parse_usize_env(
+                "INVENTORY_RECONCILIATION_TENANT_PAGE_SIZE",
+                100,
+                1,
+                10_000,
+            )?,
+        };
+        reconciliation.validate()?;
 
         Ok(Self {
             database_url,
             worker_id,
             poll_interval: duration_env("OUTBOX_POLL_INTERVAL_SECONDS", 1, 1, 300)?,
+            reconciliation_poll_interval: Duration::from_secs(
+                u64::try_from(reconciliation.interval_seconds)
+                    .context("inventory reconciliation interval cannot be negative")?,
+            ),
+            reconciliation,
             worker,
             publisher,
         })

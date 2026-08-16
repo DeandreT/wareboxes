@@ -1,6 +1,92 @@
-use wareboxes_domain::{FacilityId, InventoryOwnerId, Timestamp};
+use wareboxes_domain::{
+    FacilityId, InventoryOwnerId, InventoryReconciliationRunId, TenantId, Timestamp,
+};
 
 use crate::inventory::InventoryBalanceStatus;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryReconciliationHealth {
+    Healthy,
+    IssuesDetected,
+}
+
+impl InventoryReconciliationHealth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::IssuesDetected => "issues_detected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryReconciliationAlert {
+    IssuesDetected,
+    IssuesChanged,
+    Restored,
+}
+
+impl InventoryReconciliationAlert {
+    pub const fn event_type(self) -> &'static str {
+        match self {
+            Self::IssuesDetected => "inventory.reconciliation.issues_detected",
+            Self::IssuesChanged => "inventory.reconciliation.issues_changed",
+            Self::Restored => "inventory.reconciliation.restored",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryReconciliationRunResult {
+    pub run_id: InventoryReconciliationRunId,
+    pub tenant_id: TenantId,
+    pub scheduled_for: Timestamp,
+    pub completed_at: Timestamp,
+    pub next_due_at: Timestamp,
+    pub interval_seconds: i64,
+    pub health: InventoryReconciliationHealth,
+    pub previous_health: Option<InventoryReconciliationHealth>,
+    pub journal_projection_issue_count: i64,
+    pub commitment_issue_count: i64,
+    pub affected_inventory_owner_count: i64,
+    pub affected_facility_count: i64,
+    pub max_severity_quantity: i64,
+    pub issue_digest: String,
+    pub state_revision: i64,
+    pub created: bool,
+    pub alert: Option<InventoryReconciliationAlert>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryReconciliationMonitorState {
+    NeverRun,
+    Current,
+    Overdue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryReconciliationCoverage {
+    FullTenant,
+    AccessScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryReconciliationStatusReadModel {
+    pub monitor_state: InventoryReconciliationMonitorState,
+    pub coverage: InventoryReconciliationCoverage,
+    pub last_run_id: Option<InventoryReconciliationRunId>,
+    pub last_scheduled_for: Option<Timestamp>,
+    pub last_completed_at: Option<Timestamp>,
+    pub next_due_at: Option<Timestamp>,
+    pub state_revision: Option<i64>,
+    pub observed_at: Timestamp,
+    pub health: InventoryReconciliationHealth,
+    pub journal_projection_issue_count: i64,
+    pub commitment_issue_count: i64,
+    pub affected_inventory_owner_count: i64,
+    pub affected_facility_count: i64,
+    pub max_severity_quantity: i64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InventorySortDirection {

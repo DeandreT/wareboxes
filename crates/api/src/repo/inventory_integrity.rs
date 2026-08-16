@@ -17,6 +17,10 @@ use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
 
+#[path = "inventory_integrity/status.rs"]
+mod status;
+pub use status::reconciliation_status;
+
 const MAX_PAGE_SIZE: u16 = 1_000;
 
 pub async fn journal_page(

@@ -9,14 +9,19 @@ use wareboxes_api_contract::v1::{
     InventoryIntegritySort as ApiIntegritySort, InventoryJournalEntryResponse,
     InventoryJournalPage as ApiJournalPage, InventoryJournalPageRequest,
     InventoryJournalSort as ApiJournalSort, InventoryJournalTransactionResponse,
-    InventorySortDirection as ApiDirection, OpaqueCursor,
+    InventoryReconciliationCoverage as ApiReconciliationCoverage,
+    InventoryReconciliationHealth as ApiReconciliationHealth,
+    InventoryReconciliationMonitorState as ApiReconciliationMonitorState,
+    InventoryReconciliationStatusResponse, InventorySortDirection as ApiDirection, OpaqueCursor,
 };
 use wareboxes_application::inventory::InventoryBalanceStatus;
 use wareboxes_application::inventory_integrity::{
     InventoryAgingBucket, InventoryAgingQuery, InventoryAgingReadModel, InventoryAgingSort,
     InventoryIntegrityIssueKind, InventoryIntegrityIssueReadModel, InventoryIntegrityQuery,
     InventoryIntegritySort, InventoryJournalEntryReadModel, InventoryJournalQuery,
-    InventoryJournalSort, InventoryJournalTransactionReadModel, InventorySortDirection,
+    InventoryJournalSort, InventoryJournalTransactionReadModel, InventoryReconciliationCoverage,
+    InventoryReconciliationHealth, InventoryReconciliationMonitorState,
+    InventoryReconciliationStatusReadModel, InventorySortDirection,
 };
 use wareboxes_domain::InventoryOwnerId;
 
@@ -65,6 +70,15 @@ pub async fn issues(
         page.items.into_iter().map(map_issue).collect(),
         next_cursor,
     )))
+}
+
+pub async fn reconciliation_status(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+) -> V1Result<Json<InventoryReconciliationStatusResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let status = repo::inventory_integrity::reconciliation_status(&state.db, &user.tenant).await?;
+    Ok(Json(map_reconciliation_status(status)))
 }
 
 pub async fn aging(
@@ -441,6 +455,41 @@ fn map_status(value: InventoryBalanceStatus) -> ApiInventoryBalanceStatus {
         InventoryBalanceStatus::Hold => ApiInventoryBalanceStatus::Hold,
         InventoryBalanceStatus::Damaged => ApiInventoryBalanceStatus::Damaged,
         InventoryBalanceStatus::Quarantine => ApiInventoryBalanceStatus::Quarantine,
+    }
+}
+
+fn map_reconciliation_status(
+    value: InventoryReconciliationStatusReadModel,
+) -> InventoryReconciliationStatusResponse {
+    InventoryReconciliationStatusResponse {
+        monitor_state: match value.monitor_state {
+            InventoryReconciliationMonitorState::NeverRun => {
+                ApiReconciliationMonitorState::NeverRun
+            }
+            InventoryReconciliationMonitorState::Current => ApiReconciliationMonitorState::Current,
+            InventoryReconciliationMonitorState::Overdue => ApiReconciliationMonitorState::Overdue,
+        },
+        coverage: match value.coverage {
+            InventoryReconciliationCoverage::FullTenant => ApiReconciliationCoverage::FullTenant,
+            InventoryReconciliationCoverage::AccessScope => ApiReconciliationCoverage::AccessScope,
+        },
+        last_run_id: value.last_run_id.map(|id| id.get()),
+        last_scheduled_for: value.last_scheduled_for.map(|time| time.to_rfc3339()),
+        last_completed_at: value.last_completed_at.map(|time| time.to_rfc3339()),
+        next_due_at: value.next_due_at.map(|time| time.to_rfc3339()),
+        state_revision: value.state_revision,
+        observed_at: value.observed_at.to_rfc3339(),
+        health: match value.health {
+            InventoryReconciliationHealth::Healthy => ApiReconciliationHealth::Healthy,
+            InventoryReconciliationHealth::IssuesDetected => {
+                ApiReconciliationHealth::IssuesDetected
+            }
+        },
+        journal_projection_issue_count: value.journal_projection_issue_count,
+        commitment_issue_count: value.commitment_issue_count,
+        affected_inventory_owner_count: value.affected_inventory_owner_count,
+        affected_facility_count: value.affected_facility_count,
+        max_severity_quantity: value.max_severity_quantity,
     }
 }
 

@@ -1,17 +1,20 @@
 mod config;
 mod publisher;
+mod reconciliation_store;
 mod store;
 
 use std::sync::Arc;
 
 use anyhow::Context;
+use chrono::{Timelike, Utc};
 use config::{Config, PublisherConfig};
 use publisher::ConfiguredPublisher;
+use reconciliation_store::PostgresInventoryReconciliationStore;
 use store::PostgresOutboxStore;
 use tokio::time::MissedTickBehavior;
 use tracing_subscriber::EnvFilter;
 use wareboxes_persistence_postgres::db;
-use wareboxes_worker::Worker;
+use wareboxes_worker::{InventoryReconciliationWorker, Worker};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -51,11 +54,18 @@ async fn main() -> anyhow::Result<()> {
     let worker = Worker::new(
         Arc::new(PostgresOutboxStore::new(pool.clone())),
         Arc::new(publisher),
-        config.worker_id,
+        config.worker_id.clone(),
         config.worker,
+    )?;
+    let reconciliation_worker = InventoryReconciliationWorker::new(
+        Arc::new(PostgresInventoryReconciliationStore::new(pool.clone())),
+        config.worker_id,
+        config.reconciliation,
     )?;
     let mut interval = tokio::time::interval(config.poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut reconciliation_interval = tokio::time::interval(config.reconciliation_poll_interval);
+    reconciliation_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -81,6 +91,33 @@ async fn main() -> anyhow::Result<()> {
                     ),
                     Ok(_) => {}
                     Err(error) => tracing::error!(%error, "outbox delivery cycle failed"),
+                }
+            }
+            _ = reconciliation_interval.tick() => {
+                let now = Utc::now();
+                let Some(scheduled_for) = now.with_second(0).and_then(|value| value.with_nanosecond(0)) else {
+                    tracing::error!("could not align inventory reconciliation schedule to a minute");
+                    continue;
+                };
+                match reconciliation_worker.run_discovered_cycle(scheduled_for).await {
+                    Ok(summary) => {
+                        for failure in &summary.failures {
+                            tracing::error!(
+                                tenant_id = failure.tenant_id.get(),
+                                error = %failure.error,
+                                "inventory reconciliation failed for tenant"
+                            );
+                        }
+                        tracing::info!(
+                            attempted = summary.attempted,
+                            completed = summary.completed,
+                            replayed = summary.replayed,
+                            alerts = summary.alerts,
+                            failures = summary.failures.len(),
+                            "completed inventory reconciliation cycle"
+                        );
+                    }
+                    Err(error) => tracing::error!(%error, "inventory reconciliation cycle failed"),
                 }
             }
         }

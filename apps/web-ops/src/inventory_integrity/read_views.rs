@@ -3,7 +3,9 @@ use lucide_leptos::Eye;
 use wareboxes_api_contract::v1::{
     InventoryIntegrityIssueKind, InventoryIntegrityIssueResponse, InventoryIntegrityPage,
     InventoryIntegritySort, InventoryJournalPage, InventoryJournalSort,
-    InventoryJournalTransactionResponse, InventorySortDirection, OpaqueCursor,
+    InventoryJournalTransactionResponse, InventoryReconciliationCoverage,
+    InventoryReconciliationHealth, InventoryReconciliationMonitorState,
+    InventoryReconciliationStatusResponse, InventorySortDirection, OpaqueCursor,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
@@ -180,7 +182,7 @@ impl IssueSignals {
         Self {
             page: RwSignal::new(InventoryIntegrityPage::new(Vec::new(), None)),
             selected: RwSignal::new(None),
-            loading: RwSignal::new(false),
+            loading: RwSignal::new(true),
             error: RwSignal::new(None),
             generation: RwSignal::new(0),
             kind: RwSignal::new(None),
@@ -192,14 +194,38 @@ impl IssueSignals {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ReconciliationStatusSignals {
+    status: RwSignal<Option<InventoryReconciliationStatusResponse>>,
+    loading: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    generation: RwSignal<u64>,
+}
+
+impl ReconciliationStatusSignals {
+    fn new() -> Self {
+        Self {
+            status: RwSignal::new(None),
+            loading: RwSignal::new(true),
+            error: RwSignal::new(None),
+            generation: RwSignal::new(0),
+        }
+    }
+}
+
 #[component]
 pub(super) fn ReconciliationView(on_unauthorized: Callback<()>) -> impl IntoView {
     let signals = IssueSignals::new();
+    let status = ReconciliationStatusSignals::new();
     let layout = SplitPaneState::new("inventory-reconciliation", 820);
-    Effect::new(move || request_issues(signals, on_unauthorized));
+    Effect::new(move || {
+        request_issues(signals, on_unauthorized);
+        request_reconciliation_status(status, on_unauthorized);
+    });
     let refresh = move |_| {
         reset_issue_page(signals);
-        request_issues(signals, on_unauthorized)
+        request_issues(signals, on_unauthorized);
+        request_reconciliation_status(status, on_unauthorized)
     };
     let next = move |_| {
         let Some(cursor) = signals.page.get_untracked().next_cursor else {
@@ -224,7 +250,26 @@ pub(super) fn ReconciliationView(on_unauthorized: Callback<()>) -> impl IntoView
         signals.cursor.set(cursor);
         request_issues(signals, on_unauthorized)
     };
-    view! {<section class="integrity-read-view"><div class="integrity-query-bar reconciliation"><label><span>"Issue type"</span><select prop:value=move||issue_kind_value(signals.kind.get()) on:change=move|event|{signals.kind.set(parse_issue_kind(&event_target_value(&event)));reset_issue_page(signals);request_issues(signals,on_unauthorized)}><option value="all">"All issues"</option><option value="journal_projection">"Journal projection"</option><option value="commitments">"Commitments"</option></select></label><button type="button" class="button secondary-action" disabled=move||signals.loading.get() on:click=refresh>"Refresh"</button><div class="integrity-health" class:attention=move||!signals.page.get().items.is_empty()><strong>{move||signals.page.get().items.len()}</strong><span>"issues on page"</span></div><PaneControls layout master_label="issue table" detail_label="issue detail"/></div><Show when=move||signals.error.get().is_some()><p class="inline-command-error" role="alert">{move||signals.error.get().unwrap_or_default()}</p></Show><div class="integrity-read-split split-workspace" style=move||layout.style() data-pane-mode=move||layout.mode_attribute()><section class="data-section split-master integrity-read-master"><div class="table-scroll"><table class="data-table reconciliation-table"><thead><tr><th>"Issue"</th><SortableHeader label="Client" active=move||signals.sort.get()==InventoryIntegritySort::Client direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Client,on_unauthorized))/><SortableHeader label="Facility" active=move||signals.sort.get()==InventoryIntegritySort::Facility direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Facility,on_unauthorized))/><SortableHeader label="Item" active=move||signals.sort.get()==InventoryIntegritySort::Item direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Item,on_unauthorized))/><th>"Position"</th><SortableHeader label="Severity" active=move||signals.sort.get()==InventoryIntegritySort::Severity direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Severity,on_unauthorized)) numeric=true/><th class="icon-column"><span class="sr-only">"Detail"</span></th></tr></thead><tbody>{move||issue_rows(signals,layout)}</tbody></table></div><div class="table-footer"><span>{move||if signals.page.get().items.is_empty()&&!signals.loading.get(){"Journal, balances, allocations, and holds agree."}else if signals.page.get().next_cursor.is_some(){"More issues available"}else{"End of reconciliation results"}}</span><div><button type="button" class="button secondary-action" disabled=move||signals.history.get().is_empty()||signals.loading.get() on:click=previous>"Previous"</button><button type="button" class="button secondary-action" disabled=move||signals.page.get().next_cursor.is_none()||signals.loading.get() on:click=next>"Next"</button></div></div></section><SplitPaneHandle layout/><aside class="data-section split-detail journal-detail">{move||signals.selected.get().map_or_else(||view!{<div class="journal-detail-empty"><h2>"Reconciliation evidence"</h2><p>"Select an issue to compare the immutable journal with operational projections."</p></div>}.into_any(),|issue|view!{<IssueDetail issue/>}.into_any())}</aside></div></section>}
+    view! {<section class="integrity-read-view reconciliation-workspace"><div class="integrity-query-bar reconciliation"><label><span>"Issue type"</span><select prop:value=move||issue_kind_value(signals.kind.get()) on:change=move|event|{signals.kind.set(parse_issue_kind(&event_target_value(&event)));reset_issue_page(signals);request_issues(signals,on_unauthorized)}><option value="all">"All issues"</option><option value="journal_projection">"Journal projection"</option><option value="commitments">"Commitments"</option></select></label><button type="button" class="button secondary-action" disabled=move||signals.loading.get()||status.loading.get() on:click=refresh>"Refresh"</button><div class="integrity-health" class:attention=move||!signals.page.get().items.is_empty()><strong>{move||signals.page.get().items.len()}</strong><span>"issues on page"</span></div><PaneControls layout master_label="issue table" detail_label="issue detail"/></div><ReconciliationStatus signals=status/><Show when=move||signals.error.get().is_some()><p class="inline-command-error" role="alert">{move||signals.error.get().unwrap_or_default()}</p></Show><div class="integrity-read-split split-workspace" style=move||layout.style() data-pane-mode=move||layout.mode_attribute()><section class="data-section split-master integrity-read-master"><div class="table-scroll"><table class="data-table reconciliation-table"><thead><tr><th>"Issue"</th><SortableHeader label="Client" active=move||signals.sort.get()==InventoryIntegritySort::Client direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Client,on_unauthorized))/><SortableHeader label="Facility" active=move||signals.sort.get()==InventoryIntegritySort::Facility direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Facility,on_unauthorized))/><SortableHeader label="Item" active=move||signals.sort.get()==InventoryIntegritySort::Item direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Item,on_unauthorized))/><th>"Position"</th><SortableHeader label="Severity" active=move||signals.sort.get()==InventoryIntegritySort::Severity direction=move||sort_direction(signals.direction.get()) on_sort=Callback::new(move |_|select_issue_sort(signals,InventoryIntegritySort::Severity,on_unauthorized)) numeric=true/><th class="icon-column"><span class="sr-only">"Detail"</span></th></tr></thead><tbody>{move||issue_rows(signals,layout)}</tbody></table></div><div class="table-footer"><span>{move||if signals.page.get().items.is_empty()&&!signals.loading.get(){"Journal, balances, allocations, and holds agree."}else if signals.page.get().next_cursor.is_some(){"More issues available"}else{"End of reconciliation results"}}</span><div><button type="button" class="button secondary-action" disabled=move||signals.history.get().is_empty()||signals.loading.get() on:click=previous>"Previous"</button><button type="button" class="button secondary-action" disabled=move||signals.page.get().next_cursor.is_none()||signals.loading.get() on:click=next>"Next"</button></div></div></section><SplitPaneHandle layout/><aside class="data-section split-detail journal-detail">{move||signals.selected.get().map_or_else(||view!{<div class="journal-detail-empty"><h2>"Reconciliation evidence"</h2><p>"Select an issue to compare the immutable journal with operational projections."</p></div>}.into_any(),|issue|view!{<IssueDetail issue/>}.into_any())}</aside></div></section>}
+}
+
+#[component]
+fn ReconciliationStatus(signals: ReconciliationStatusSignals) -> impl IntoView {
+    view! {
+        <section class="reconciliation-monitor" class:attention=move || signals.status.get().is_some_and(|value| value.monitor_state != InventoryReconciliationMonitorState::Current || value.health != InventoryReconciliationHealth::Healthy)>
+            <Show when=move || signals.loading.get()><span>"Loading continuous reconciliation status…"</span></Show>
+            <Show when=move || signals.error.get().is_some()><span class="inline-command-error" role="alert">{move || signals.error.get().unwrap_or_default()}</span></Show>
+            {move || signals.status.get().map(|status| view! {
+                <div><span>"Monitor"</span><strong>{monitor_label(status.monitor_state)}</strong></div>
+                <div><span>"Coverage"</span><strong>{coverage_label(status.coverage)}</strong></div>
+                <div><span>"Last checked"</span><strong>{status.last_completed_at.as_deref().map(compact_time).unwrap_or_else(|| "Never".into())}</strong></div>
+                <div><span>"Next due"</span><strong>{status.next_due_at.as_deref().map(compact_time).unwrap_or_else(|| "Awaiting first run".into())}</strong></div>
+                <div><span>"Journal / projection"</span><strong>{status.journal_projection_issue_count}</strong></div>
+                <div><span>"Commitments"</span><strong>{status.commitment_issue_count}</strong></div>
+                <div><span>"Maximum variance"</span><strong>{format_quantity(status.max_severity_quantity)}</strong></div>
+            })}
+        </section>
+    }
 }
 
 fn issue_rows(signals: IssueSignals, layout: SplitPaneState) -> AnyView {
@@ -370,6 +415,29 @@ fn request_issues(signals: IssueSignals, on_unauthorized: Callback<()>) {
         }
     })
 }
+fn request_reconciliation_status(
+    signals: ReconciliationStatusSignals,
+    on_unauthorized: Callback<()>,
+) {
+    let generation = signals.generation.get_untracked() + 1;
+    signals.generation.set(generation);
+    signals.loading.set(true);
+    signals.error.set(None);
+    leptos::task::spawn_local(async move {
+        match api::inventory_reconciliation_status().await {
+            Ok(status) if signals.generation.get_untracked() == generation => {
+                signals.status.set(Some(status));
+                signals.loading.set(false)
+            }
+            Err(error) if error.unauthorized => on_unauthorized.run(()),
+            Err(error) if signals.generation.get_untracked() == generation => {
+                signals.error.set(Some(error.message));
+                signals.loading.set(false)
+            }
+            _ => {}
+        }
+    })
+}
 fn reset_journal_page(signals: JournalSignals) {
     signals.cursor.set(None);
     signals.history.set(Vec::new())
@@ -499,6 +567,19 @@ fn status_label(value: wareboxes_api_contract::v1::InventoryBalanceStatus) -> &'
         wareboxes_api_contract::v1::InventoryBalanceStatus::Quarantine => "Quarantine",
     }
 }
+fn monitor_label(value: InventoryReconciliationMonitorState) -> &'static str {
+    match value {
+        InventoryReconciliationMonitorState::NeverRun => "Never run",
+        InventoryReconciliationMonitorState::Current => "Current",
+        InventoryReconciliationMonitorState::Overdue => "Overdue",
+    }
+}
+fn coverage_label(value: InventoryReconciliationCoverage) -> &'static str {
+    match value {
+        InventoryReconciliationCoverage::FullTenant => "Entire tenant",
+        InventoryReconciliationCoverage::AccessScope => "Your access scope",
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -521,5 +602,16 @@ mod tests {
             signals.direction.get_untracked(),
             InventorySortDirection::Ascending
         )
+    }
+    #[test]
+    fn monitor_and_coverage_labels_are_explicit() {
+        assert_eq!(
+            monitor_label(InventoryReconciliationMonitorState::NeverRun),
+            "Never run"
+        );
+        assert_eq!(
+            coverage_label(InventoryReconciliationCoverage::AccessScope),
+            "Your access scope"
+        );
     }
 }

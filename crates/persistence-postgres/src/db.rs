@@ -783,6 +783,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'inventory_projection_changes_tenant_isolation'
                 ),
                 (
+                    'inventory_reconciliation_runs',
+                    'inventory_reconciliation_runs_tenant_isolation'
+                ),
+                (
+                    'inventory_reconciliation_state',
+                    'inventory_reconciliation_state_tenant_isolation'
+                ),
+                (
                     'license_plates',
                     'license_plates_tenant_isolation'
                 ),
