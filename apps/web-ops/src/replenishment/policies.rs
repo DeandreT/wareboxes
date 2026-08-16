@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use lucide_leptos::{ArchiveX, Pencil, Play, Plus};
 use wareboxes_api_contract::v1::{
+    ReplenishmentDecisionPolicyResponse, ReplenishmentDecisionPolicySource,
     ReplenishmentPlanningOutcome, ReplenishmentPolicyReadinessEntryResponse,
 };
 
@@ -60,7 +61,7 @@ pub(super) fn PoliciesPanel(
                             <SortableHeader label="Facility" active=move || signals.sort.get().key == PolicySort::Facility direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Facility))/>
                             <SortableHeader label="Item" active=move || signals.sort.get().key == PolicySort::Item direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Item))/>
                             <SortableHeader label="Pick face" active=move || signals.sort.get().key == PolicySort::PickFace direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::PickFace))/>
-                            <th class="numeric">"Min / Target"</th>
+                            <th class="numeric">"Effective min / target"</th>
                             <SortableHeader label="Projected" active=move || signals.sort.get().key == PolicySort::Projected direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Projected)) numeric=true/>
                             <SortableHeader label="Demand" active=move || signals.sort.get().key == PolicySort::Demand direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Demand)) numeric=true/>
                             <SortableHeader label="Reserve" active=move || signals.sort.get().key == PolicySort::Reserve direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Reserve)) numeric=true/>
@@ -90,14 +91,20 @@ pub(super) fn PoliciesPanel(
                                         |plan| format!("Plan #{} / {}", plan.plan_id, compact_timestamp(&plan.planned_at)),
                                     );
                                     let suggested = suggested_text(&policy);
+                                    let decision_rule = decision_policy_label(&policy.decision_policy);
+                                    let inbound = inbound_text(
+                                        policy.snapshot.pick_face_free,
+                                        policy.observed_active_inbound,
+                                        policy.snapshot.active_inbound,
+                                    );
                                     view! {
                                         <tr>
                                             <td><strong>{policy.inventory_owner_name}</strong><small class="cell-detail">{format!("Client #{}", policy.inventory_owner_id)}</small></td>
                                             <td>{policy.facility_name}<small class="cell-detail">{format!("Facility #{}", policy.facility_id)}</small></td>
                                             <td><strong>{item}</strong><small class="cell-detail">{format!("{} / {}", sku, policy.uom)}</small></td>
                                             <td><span class="mono">{pick_face}</span><small class="cell-detail">{policy.pick_face.barcode}</small></td>
-                                            <td class="numeric"><strong>{format!("{} / {}", format_quantity(policy.minimum_quantity), format_quantity(policy.target_quantity))}</strong></td>
-                                            <td class="numeric"><strong>{format_quantity(policy.snapshot.projected_free)}</strong><small class="cell-detail numeric-detail">{inbound_text(policy.snapshot.pick_face_free, policy.snapshot.active_inbound)}</small></td>
+                                            <td class="numeric"><strong>{format!("{} / {}", format_quantity(policy.decision_policy.effective_minimum_quantity), format_quantity(policy.decision_policy.effective_target_quantity))}</strong><small class="cell-detail numeric-detail">{decision_rule}</small></td>
+                                            <td class="numeric"><strong>{format_quantity(policy.snapshot.projected_free)}</strong><small class="cell-detail numeric-detail">{inbound}</small></td>
                                             <td class="numeric">{format_quantity(policy.snapshot.unallocated_demand)}</td>
                                             <td class="numeric">{format_quantity(policy.snapshot.reserve_free)}<small class="cell-detail numeric-detail">{format!("{} sources", policy.reserve_source_location_ids.as_slice().len())}</small></td>
                                             <td class="numeric strong">{format_quantity(policy.target_gap)}<small class="cell-detail numeric-detail">{suggested}</small></td>
@@ -156,25 +163,73 @@ fn suggested_text(policy: &ReplenishmentPolicyReadinessEntryResponse) -> String 
     }
 }
 
-fn inbound_text(pick_face_free: i64, active_inbound: i64) -> String {
-    if active_inbound == 0 {
+fn inbound_text(pick_face_free: i64, observed_inbound: i64, included_inbound: i64) -> String {
+    if observed_inbound == 0 {
         format!("{} free / no inbound", format_quantity(pick_face_free))
+    } else if included_inbound == 0 {
+        format!(
+            "{} free / {} inbound excluded",
+            format_quantity(pick_face_free),
+            format_quantity(observed_inbound)
+        )
     } else {
         format!(
             "{} free + {} inbound",
             format_quantity(pick_face_free),
-            format_quantity(active_inbound)
+            format_quantity(included_inbound)
         )
+    }
+}
+
+pub(super) fn decision_policy_label(policy: &ReplenishmentDecisionPolicyResponse) -> String {
+    match policy.source {
+        ReplenishmentDecisionPolicySource::ProductDefault => {
+            "Product default / operational thresholds".to_owned()
+        }
+        ReplenishmentDecisionPolicySource::Configuration => format!(
+            "Rule #{} r{} / {}%-{}% of operational target",
+            policy.configuration_id.unwrap_or_default(),
+            policy
+                .configuration_revision
+                .map_or(0, |revision| revision.get()),
+            policy.minimum_percent.unwrap_or_default(),
+            policy.target_percent.unwrap_or_default(),
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wareboxes_api_contract::v1::{ConfigurationScope, Revision};
 
     #[test]
     fn inbound_copy_makes_projection_conservation_visible() {
-        assert_eq!(inbound_text(4, 0), "4 free / no inbound");
-        assert_eq!(inbound_text(4, 6), "4 free + 6 inbound");
+        assert_eq!(inbound_text(4, 0, 0), "4 free / no inbound");
+        assert_eq!(inbound_text(4, 6, 6), "4 free + 6 inbound");
+        assert_eq!(inbound_text(4, 6, 0), "4 free / 6 inbound excluded");
+    }
+
+    #[test]
+    fn configured_rule_label_exposes_identity_revision_and_percentage_basis() {
+        let policy = ReplenishmentDecisionPolicyResponse {
+            source: ReplenishmentDecisionPolicySource::Configuration,
+            configuration_id: Some(12),
+            configuration_revision: Some(Revision::new(4).unwrap()),
+            configuration_scope: Some(ConfigurationScope::Tenant),
+            minimum_percent: Some(30),
+            target_percent: Some(80),
+            include_inbound_projection: false,
+            operational_minimum_quantity: 2,
+            operational_target_quantity: 10,
+            effective_minimum_quantity: 3,
+            effective_target_quantity: 8,
+            policy_hash: "0".repeat(64),
+        };
+
+        assert_eq!(
+            decision_policy_label(&policy),
+            "Rule #12 r4 / 30%-80% of operational target"
+        );
     }
 }

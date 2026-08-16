@@ -1,7 +1,7 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
+use super::{ConfigurationScope, CursorPage, OpaqueCursor, PageLimit, Revision};
 
 const MAX_REPLENISHMENT_UOM_LENGTH: usize = 32;
 
@@ -55,6 +55,32 @@ pub enum ReplenishmentPlanningOutcome {
     InsufficientReserve,
     PartiallyPlanned,
     FullyPlanned,
+}
+
+/// Origin of the shared replenishment rule applied to an item policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplenishmentDecisionPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+/// Effective rule and immutable evidence used for readiness or one plan run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplenishmentDecisionPolicyResponse {
+    pub source: ReplenishmentDecisionPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<Revision>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub minimum_percent: Option<u8>,
+    pub target_percent: Option<u8>,
+    pub include_inbound_projection: bool,
+    pub operational_minimum_quantity: i64,
+    pub operational_target_quantity: i64,
+    pub effective_minimum_quantity: i64,
+    pub effective_target_quantity: i64,
+    pub policy_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -237,6 +263,9 @@ pub struct PlanReplenishmentResponse {
     pub item_id: i64,
     pub uom: String,
     pub pick_face_location_id: i64,
+    pub decision_policy: ReplenishmentDecisionPolicyResponse,
+    /// Active replenishment work observed, even when the rule excludes it.
+    pub observed_active_inbound: i64,
     pub snapshot: ReplenishmentPlanningSnapshotResponse,
     pub required_level: i64,
     pub target_gap: i64,
@@ -324,6 +353,9 @@ pub struct ReplenishmentPolicyReadinessEntryResponse {
     pub minimum_quantity: i64,
     pub target_quantity: i64,
     pub reserve_source_location_ids: ReplenishmentReserveSourceLocationIds,
+    pub decision_policy: ReplenishmentDecisionPolicyResponse,
+    /// Active replenishment work observed, even when the rule excludes it.
+    pub observed_active_inbound: i64,
     pub snapshot: ReplenishmentPlanningSnapshotResponse,
     pub required_level: i64,
     pub target_gap: i64,
@@ -729,6 +761,21 @@ mod tests {
                 target_quantity: 20,
                 reserve_source_location_ids: ReplenishmentReserveSourceLocationIds::new(vec![7])
                     .unwrap(),
+                decision_policy: ReplenishmentDecisionPolicyResponse {
+                    source: ReplenishmentDecisionPolicySource::ProductDefault,
+                    configuration_id: None,
+                    configuration_revision: None,
+                    configuration_scope: None,
+                    minimum_percent: None,
+                    target_percent: None,
+                    include_inbound_projection: true,
+                    operational_minimum_quantity: 5,
+                    operational_target_quantity: 20,
+                    effective_minimum_quantity: 5,
+                    effective_target_quantity: 20,
+                    policy_hash: "0".repeat(64),
+                },
+                observed_active_inbound: 0,
                 snapshot: ReplenishmentPlanningSnapshotResponse {
                     pick_face_free: 2,
                     active_inbound: 0,
@@ -813,6 +860,21 @@ mod tests {
             item_id: 6,
             uom: "each".into(),
             pick_face_location_id: 7,
+            decision_policy: ReplenishmentDecisionPolicyResponse {
+                source: ReplenishmentDecisionPolicySource::ProductDefault,
+                configuration_id: None,
+                configuration_revision: None,
+                configuration_scope: None,
+                minimum_percent: None,
+                target_percent: None,
+                include_inbound_projection: true,
+                operational_minimum_quantity: 5,
+                operational_target_quantity: 20,
+                effective_minimum_quantity: 5,
+                effective_target_quantity: 20,
+                policy_hash: "0".repeat(64),
+            },
+            observed_active_inbound: 3,
             snapshot: ReplenishmentPlanningSnapshotResponse {
                 pick_face_free: 2,
                 active_inbound: 3,

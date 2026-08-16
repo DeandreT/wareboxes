@@ -17,7 +17,7 @@ use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
 
-use super::{level, policy_from_row};
+use super::{decision_policy::decision_policy_from_readiness_row, level, policy_from_row};
 
 pub async fn policy_page(
     db: &Db,
@@ -121,6 +121,12 @@ pub async fn policy_page(
                       AND claim.released_at IS NULL)) AS reserve_free,
                active.work_count AS active_work_count,
                active.work_quantity AS active_work_quantity,
+               decision_config.id AS decision_configuration_id,
+               decision_config.revision AS decision_configuration_revision,
+               decision_config.scope_level AS decision_scope_level,
+               decision_config.inventory_owner_id AS decision_inventory_owner_id,
+               decision_config.facility_id AS decision_facility_id,
+               decision_config.definition AS decision_definition,
                latest.id AS latest_plan_id, latest.outcome AS latest_plan_outcome,
                latest.planned_qty AS latest_plan_planned_qty,
                latest.target_gap_qty-latest.planned_qty AS latest_plan_remaining_qty,
@@ -144,6 +150,30 @@ pub async fn policy_page(
             AND task.closed_at IS NULL
         ) active ON true
         LEFT JOIN LATERAL (
+          SELECT configuration.id,configuration.revision,configuration.scope_level,
+                 configuration.inventory_owner_id,configuration.facility_id,
+                 configuration.definition
+          FROM configuration_versions configuration
+          WHERE configuration.tenant_id=policy.tenant_id
+            AND configuration.kind='replenishment' AND configuration.status='active'
+            AND configuration.activated_at<=transaction_timestamp()
+            AND configuration.effective_from<=transaction_timestamp()
+            AND (configuration.effective_until IS NULL
+              OR configuration.effective_until>transaction_timestamp())
+            AND (configuration.inventory_owner_id IS NULL
+              OR configuration.inventory_owner_id=policy.inventory_owner_id)
+            AND (configuration.facility_id IS NULL
+              OR configuration.facility_id=policy.facility_id)
+          ORDER BY CASE configuration.scope_level
+            WHEN 'owner_facility' THEN 2
+            WHEN 'inventory_owner' THEN 1
+            WHEN 'facility' THEN 1
+            ELSE 0 END DESC,
+            configuration.effective_from DESC,configuration.revision DESC,
+            configuration.id DESC
+          LIMIT 1
+        ) decision_config ON true
+        LEFT JOIN LATERAL (
           SELECT run.id,run.outcome,run.planned_qty,run.target_gap_qty,
                  run.planned_by_user_id,run.planned_at
           FROM replenishment_plan_runs run
@@ -157,15 +187,33 @@ pub async fn policy_page(
           AND ($7::bigint IS NULL OR policy.inventory_owner_id=$7)
           AND ($8::bigint IS NULL OR policy.item_id=$8)
           AND ($9::bigint IS NULL OR policy.pick_face_location_id=$9)
-        ), decision AS (
+        ), resolved AS (
           SELECT readiness.*,
-                 readiness.pick_face_free+readiness.active_inbound AS projected_free,
-                 GREATEST(readiness.target_qty,readiness.unallocated_demand) AS required_level
+                 CASE WHEN readiness.decision_configuration_id IS NULL
+                   THEN readiness.minimum_qty
+                   ELSE floor(readiness.target_qty::numeric
+                     *(readiness.decision_definition->>'minimum_percent')::numeric/100)::bigint
+                 END AS effective_minimum_qty,
+                 CASE WHEN readiness.decision_configuration_id IS NULL
+                   THEN readiness.target_qty
+                   ELSE ceil(readiness.target_qty::numeric
+                     *(readiness.decision_definition->>'target_percent')::numeric/100)::bigint
+                 END AS effective_target_qty,
+                 CASE WHEN readiness.decision_configuration_id IS NULL
+                     OR (readiness.decision_definition->>'include_inbound_projection')::boolean
+                   THEN readiness.active_inbound ELSE 0
+                 END AS included_active_inbound
           FROM readiness
+        ), decision AS (
+          SELECT resolved.*,
+                 resolved.pick_face_free+resolved.included_active_inbound AS projected_free,
+                 GREATEST(resolved.effective_target_qty,resolved.unallocated_demand)
+                   AS required_level
+          FROM resolved
         ), sortable AS (
           SELECT decision.*,
                  CASE
-                   WHEN decision.projected_free < decision.minimum_qty
+                   WHEN decision.projected_free < decision.effective_minimum_qty
                      OR decision.projected_free < decision.unallocated_demand
                    THEN GREATEST(decision.required_level-decision.projected_free,0)
                    ELSE 0
@@ -232,18 +280,27 @@ pub async fn policy_page(
             .map_err(|error| AppError::internal(error.to_string()))?;
         let sources: Vec<i64> = row.try_get("source_ids")?;
         let policy = policy_from_row(&row, sources)?;
+        let decision_policy =
+            decision_policy_from_readiness_row(&row, policy.definition.thresholds())?;
+        let observed_active_inbound = level(row.try_get("active_inbound")?)?;
         let snapshot = ReplenishmentPlanningSnapshot::new(
             level(row.try_get("pick_face_free")?)?,
-            level(row.try_get("active_inbound")?)?,
+            level(row.try_get("included_active_inbound")?)?,
             level(row.try_get("unallocated_demand")?)?,
             level(row.try_get("reserve_free")?)?,
         )
         .map_err(|error| AppError::internal(error.to_string()))?;
-        let decision = plan_replenishment(policy.definition.thresholds(), snapshot);
+        let decision = plan_replenishment(
+            decision_policy
+                .effective_thresholds()
+                .map_err(|error| AppError::internal(error.to_string()))?,
+            snapshot,
+        );
         items.push(ReplenishmentPolicyReadinessReadModel {
             policy_id: id,
             revision: policy.revision,
             definition: policy.definition,
+            decision_policy,
             inventory_owner_name: row.try_get("inventory_owner_name")?,
             facility_name: row.try_get("facility_name")?,
             item_description: row.try_get("item_description")?,
@@ -254,6 +311,7 @@ pub async fn policy_page(
                 barcode: scan_db(row.try_get("pick_face_barcode")?)?,
                 name: row.try_get("pick_face_name")?,
             },
+            observed_active_inbound,
             snapshot,
             required_level: decision.required_level,
             target_gap: decision.target_gap,

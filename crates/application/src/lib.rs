@@ -44,6 +44,7 @@ pub mod putaway;
 pub mod putaway_policy;
 pub mod receipt_policy;
 pub mod replenishment;
+pub mod replenishment_decision_policy;
 pub mod service_account;
 pub mod shipping;
 pub mod slotting;

@@ -9,6 +9,7 @@ use super::model::{
     build_policy_request, item_label, location_label, CommandSignals, PolicyCommandAttempt,
     PolicyCommandResult, PolicyDialogMode, PolicyRequestInput, ReplenishmentReferenceData,
 };
+use super::policies::decision_policy_label;
 use crate::api;
 use crate::view_model::format_quantity;
 
@@ -440,8 +441,10 @@ fn PlanConfirmation(policy: ReplenishmentPolicyReadinessEntryResponse) -> impl I
         <dl class="replenishment-plan-facts">
             <div><dt>"Client / facility"</dt><dd>{format!("{} / {}", policy.inventory_owner_name, policy.facility_name)}</dd></div>
             <div><dt>"Item / pick face"</dt><dd>{format!("{} / {}", item, policy.pick_face.barcode)}</dd></div>
+            <div><dt>"Decision rule"</dt><dd>{decision_policy_label(&policy.decision_policy)}</dd></div>
+            <div><dt>"Effective min / target"</dt><dd>{format!("{} / {}", format_quantity(policy.decision_policy.effective_minimum_quantity), format_quantity(policy.decision_policy.effective_target_quantity))}</dd></div>
             <div><dt>"Pick-face free"</dt><dd>{format_quantity(policy.snapshot.pick_face_free)}</dd></div>
-            <div><dt>"Active inbound"</dt><dd>{format_quantity(policy.snapshot.active_inbound)}</dd></div>
+            <div><dt>"Observed / included inbound"</dt><dd>{format!("{} / {}", format_quantity(policy.observed_active_inbound), format_quantity(policy.snapshot.active_inbound))}</dd></div>
             <div><dt>"Projected free"</dt><dd>{format_quantity(policy.snapshot.projected_free)}</dd></div>
             <div><dt>"Unallocated demand"</dt><dd>{format_quantity(policy.snapshot.unallocated_demand)}</dd></div>
             <div><dt>"Reserve free"</dt><dd>{format_quantity(policy.snapshot.reserve_free)}</dd></div>
@@ -656,6 +659,7 @@ fn submit_class(mode: &PolicyDialogMode) -> &'static str {
 mod tests {
     use super::*;
     use wareboxes_api_contract::v1::{
+        ReplenishmentDecisionPolicyResponse, ReplenishmentDecisionPolicySource,
         ReplenishmentLocationResponse, ReplenishmentPlanningOutcome,
         ReplenishmentPlanningSnapshotResponse, ReplenishmentPolicyStatus,
         ReplenishmentReserveSourceLocationIds, Revision,
@@ -683,6 +687,21 @@ mod tests {
             target_quantity: 20,
             reserve_source_location_ids: ReplenishmentReserveSourceLocationIds::new(vec![11])
                 .unwrap(),
+            decision_policy: ReplenishmentDecisionPolicyResponse {
+                source: ReplenishmentDecisionPolicySource::ProductDefault,
+                configuration_id: None,
+                configuration_revision: None,
+                configuration_scope: None,
+                minimum_percent: None,
+                target_percent: None,
+                include_inbound_projection: true,
+                operational_minimum_quantity: 5,
+                operational_target_quantity: 20,
+                effective_minimum_quantity: 5,
+                effective_target_quantity: 20,
+                policy_hash: "0".repeat(64),
+            },
+            observed_active_inbound: 0,
             snapshot: ReplenishmentPlanningSnapshotResponse {
                 pick_face_free: 2,
                 active_inbound: 0,

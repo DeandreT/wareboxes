@@ -1085,6 +1085,7 @@ DECLARE
     policy_source_count bigint;
     policy_pick_face_location_id bigint;
     computed_pick_face_free_qty bigint;
+    computed_observed_active_inbound_qty bigint;
     computed_active_inbound_qty bigint;
     computed_projected_free_qty bigint;
     computed_unallocated_demand_qty bigint;
@@ -1117,8 +1118,8 @@ BEGIN
 
     IF NOT FOUND
        OR policy_revision <> NEW.policy_revision
-       OR policy_minimum_qty <> NEW.minimum_qty
-       OR policy_target_qty <> NEW.target_qty
+       OR policy_minimum_qty <> NEW.operational_minimum_qty
+       OR policy_target_qty <> NEW.operational_target_qty
        OR policy_source_count <> NEW.source_location_count
        OR policy_pick_face_location_id <> NEW.pick_face_location_id
     THEN
@@ -1261,7 +1262,7 @@ BEGIN
       AND balance.deleted IS NULL;
 
     SELECT COALESCE(sum(task.planned_qty), 0)::bigint
-    INTO computed_active_inbound_qty
+    INTO computed_observed_active_inbound_qty
     FROM public.replenishment_tasks task
     WHERE task.tenant_id = NEW.tenant_id
       AND task.inventory_owner_id = NEW.inventory_owner_id
@@ -1272,6 +1273,8 @@ BEGIN
       AND task.uom = NEW.uom
       AND task.closed_at IS NULL;
 
+    computed_active_inbound_qty := CASE WHEN NEW.include_inbound_projection
+        THEN computed_observed_active_inbound_qty ELSE 0 END;
     computed_projected_free_qty := computed_pick_face_free_qty
         + computed_active_inbound_qty;
 
@@ -1348,7 +1351,7 @@ BEGIN
       );
 
     computed_required_level_qty := GREATEST(
-        policy_target_qty,
+        NEW.target_qty,
         computed_unallocated_demand_qty
     );
     computed_target_gap_qty := GREATEST(
@@ -1356,7 +1359,7 @@ BEGIN
         0
     );
 
-    IF computed_projected_free_qty < policy_minimum_qty
+    IF computed_projected_free_qty < NEW.minimum_qty
        OR computed_projected_free_qty < computed_unallocated_demand_qty
     THEN
         computed_planned_qty := LEAST(
@@ -1376,6 +1379,7 @@ BEGIN
     END IF;
 
     IF NEW.pick_face_free_qty <> computed_pick_face_free_qty
+       OR NEW.observed_active_inbound_qty <> computed_observed_active_inbound_qty
        OR NEW.active_inbound_qty <> computed_active_inbound_qty
        OR NEW.projected_free_qty <> computed_projected_free_qty
        OR NEW.unallocated_demand_qty <> computed_unallocated_demand_qty
@@ -13998,7 +14002,20 @@ CREATE TABLE public.replenishment_plan_runs (
     minimum_qty bigint NOT NULL,
     target_qty bigint NOT NULL,
     source_location_count bigint NOT NULL,
+    decision_policy_source text NOT NULL,
+    decision_configuration_id bigint,
+    decision_configuration_revision bigint,
+    decision_scope_level text,
+    decision_inventory_owner_id bigint,
+    decision_facility_id bigint,
+    decision_minimum_percent smallint,
+    decision_target_percent smallint,
+    include_inbound_projection boolean NOT NULL,
+    operational_minimum_qty bigint NOT NULL,
+    operational_target_qty bigint NOT NULL,
+    decision_policy_hash text NOT NULL,
     pick_face_free_qty bigint NOT NULL,
+    observed_active_inbound_qty bigint NOT NULL,
     active_inbound_qty bigint NOT NULL,
     projected_free_qty bigint NOT NULL,
     unallocated_demand_qty bigint NOT NULL,
@@ -14010,9 +14027,30 @@ CREATE TABLE public.replenishment_plan_runs (
     outcome text NOT NULL,
     planned_by_user_id bigint NOT NULL,
     planned_at timestamp with time zone NOT NULL,
-    CONSTRAINT replenishment_plan_runs_projection_check CHECK ((minimum_qty >= 0) AND (target_qty > minimum_qty) AND (source_location_count > 0) AND (pick_face_free_qty >= 0) AND (active_inbound_qty >= 0) AND (projected_free_qty = (pick_face_free_qty + active_inbound_qty)) AND (unallocated_demand_qty >= 0) AND (required_level_qty = GREATEST(target_qty, unallocated_demand_qty)) AND (target_gap_qty = GREATEST((required_level_qty - projected_free_qty), (0)::bigint)) AND (reserve_free_qty >= 0) AND (planned_qty >= 0) AND (work_count >= 0)),
+    CONSTRAINT replenishment_plan_runs_projection_check CHECK ((minimum_qty >= 0) AND (target_qty > minimum_qty) AND (source_location_count > 0) AND (pick_face_free_qty >= 0) AND (observed_active_inbound_qty >= 0) AND (active_inbound_qty >= 0) AND (active_inbound_qty = CASE WHEN include_inbound_projection THEN observed_active_inbound_qty ELSE 0 END) AND (projected_free_qty = (pick_face_free_qty + active_inbound_qty)) AND (unallocated_demand_qty >= 0) AND (required_level_qty = GREATEST(target_qty, unallocated_demand_qty)) AND (target_gap_qty = GREATEST((required_level_qty - projected_free_qty), (0)::bigint)) AND (reserve_free_qty >= 0) AND (planned_qty >= 0) AND (work_count >= 0)),
     CONSTRAINT replenishment_plan_runs_outcome_check CHECK ((((outcome = 'not_needed'::text) AND (projected_free_qty >= minimum_qty) AND (projected_free_qty >= unallocated_demand_qty) AND (planned_qty = 0) AND (work_count = 0)) OR ((outcome = 'insufficient_reserve'::text) AND ((projected_free_qty < minimum_qty) OR (projected_free_qty < unallocated_demand_qty)) AND (target_gap_qty > 0) AND (reserve_free_qty = 0) AND (planned_qty = 0) AND (work_count = 0)) OR ((outcome = 'partially_planned'::text) AND ((projected_free_qty < minimum_qty) OR (projected_free_qty < unallocated_demand_qty)) AND (planned_qty = LEAST(target_gap_qty, reserve_free_qty)) AND (planned_qty > 0) AND (planned_qty < target_gap_qty) AND (work_count > 0)) OR ((outcome = 'fully_planned'::text) AND ((projected_free_qty < minimum_qty) OR (projected_free_qty < unallocated_demand_qty)) AND (planned_qty = target_gap_qty) AND (planned_qty > 0) AND (planned_qty <= reserve_free_qty) AND (work_count > 0)))),
     CONSTRAINT replenishment_plan_runs_policy_revision_check CHECK ((policy_revision > 0)),
+    CONSTRAINT replenishment_plan_runs_decision_source_check CHECK (decision_policy_source IN ('product_default','configuration')),
+    CONSTRAINT replenishment_plan_runs_decision_hash_check CHECK (decision_policy_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT replenishment_plan_runs_operational_threshold_check CHECK (operational_minimum_qty >= 0 AND operational_target_qty > operational_minimum_qty),
+    CONSTRAINT replenishment_plan_runs_decision_identity_check CHECK (
+      (decision_policy_source='product_default'
+        AND decision_configuration_id IS NULL AND decision_configuration_revision IS NULL
+        AND decision_scope_level IS NULL AND decision_inventory_owner_id IS NULL
+        AND decision_facility_id IS NULL AND decision_minimum_percent IS NULL
+        AND decision_target_percent IS NULL AND include_inbound_projection
+        AND minimum_qty=operational_minimum_qty AND target_qty=operational_target_qty)
+      OR (decision_policy_source='configuration'
+        AND decision_configuration_id IS NOT NULL AND decision_configuration_revision>0
+        AND decision_minimum_percent BETWEEN 0 AND 99
+        AND decision_target_percent BETWEEN 1 AND 100
+        AND decision_minimum_percent<decision_target_percent
+        AND minimum_qty=floor(operational_target_qty::numeric*decision_minimum_percent/100)
+        AND target_qty=ceil(operational_target_qty::numeric*decision_target_percent/100)
+        AND ((decision_scope_level='tenant' AND decision_inventory_owner_id IS NULL AND decision_facility_id IS NULL)
+          OR (decision_scope_level='inventory_owner' AND decision_inventory_owner_id IS NOT NULL AND decision_facility_id IS NULL)
+          OR (decision_scope_level='facility' AND decision_inventory_owner_id IS NULL AND decision_facility_id IS NOT NULL)
+          OR (decision_scope_level='owner_facility' AND decision_inventory_owner_id IS NOT NULL AND decision_facility_id IS NOT NULL)))),
     CONSTRAINT replenishment_plan_runs_uom_check CHECK (((uom = btrim(uom)) AND (uom <> ''::text) AND (char_length(uom) <= 32)))
 );
 
@@ -49986,3 +50024,100 @@ REVOKE ALL ON FUNCTION public.enforce_work_orchestration_dispatch_claim() FROM P
 REVOKE ALL ON FUNCTION public.advance_work_orchestration_dispatch() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.close_work_orchestration_dispatch() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.emit_work_orchestration_dispatch_event() FROM PUBLIC;
+
+-- Replenishment planning resolves the active inherited decision table while the
+-- item-specific operational policy remains the source/destination and stocking basis.
+ALTER TABLE public.replenishment_plan_runs
+ADD CONSTRAINT replenishment_plan_runs_decision_configuration_fkey
+FOREIGN KEY (tenant_id,decision_configuration_id)
+REFERENCES public.configuration_versions(tenant_id,id);
+CREATE INDEX replenishment_plan_runs_decision_configuration_idx
+ON public.replenishment_plan_runs(tenant_id,decision_configuration_id)
+WHERE decision_configuration_id IS NOT NULL;
+
+CREATE FUNCTION public.validate_replenishment_decision_policy_snapshot() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE calculated_hash text;
+DECLARE scope_component text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:replenishment',NEW.tenant_id),0));
+  SELECT configuration.id INTO resolved_configuration_id
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id
+    AND configuration.kind='replenishment' AND configuration.status='active'
+    AND configuration.activated_at<=NEW.planned_at
+    AND configuration.effective_from<=NEW.planned_at
+    AND (configuration.effective_until IS NULL OR configuration.effective_until>NEW.planned_at)
+    AND (configuration.inventory_owner_id IS NULL
+      OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level
+    WHEN 'owner_facility' THEN 2
+    WHEN 'inventory_owner' THEN 1
+    WHEN 'facility' THEN 1
+    ELSE 0 END DESC,
+    configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+
+  IF NEW.decision_policy_source='product_default' THEN
+    IF resolved_configuration_id IS NOT NULL THEN
+      RAISE EXCEPTION 'replenishment product default is not effective'
+        USING ERRCODE='23514';
+    END IF;
+    scope_component:='-';
+  ELSE
+    SELECT * INTO configuration_row FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.id=NEW.decision_configuration_id;
+    IF configuration_row.id IS NULL
+      OR resolved_configuration_id IS DISTINCT FROM configuration_row.id
+      OR configuration_row.kind<>'replenishment' OR configuration_row.status<>'active'
+      OR configuration_row.activated_at>NEW.planned_at
+      OR configuration_row.effective_from>NEW.planned_at
+      OR (configuration_row.effective_until IS NOT NULL
+        AND configuration_row.effective_until<=NEW.planned_at)
+      OR configuration_row.revision<>NEW.decision_configuration_revision
+      OR configuration_row.scope_level<>NEW.decision_scope_level
+      OR configuration_row.inventory_owner_id IS DISTINCT FROM NEW.decision_inventory_owner_id
+      OR configuration_row.facility_id IS DISTINCT FROM NEW.decision_facility_id
+      OR configuration_row.definition<>jsonb_build_object(
+        'kind','replenishment','minimum_percent',NEW.decision_minimum_percent,
+        'target_percent',NEW.decision_target_percent,
+        'include_inbound_projection',NEW.include_inbound_projection) THEN
+      RAISE EXCEPTION 'replenishment configuration snapshot is stale or inapplicable'
+        USING ERRCODE='23514';
+    END IF;
+    scope_component:=CASE NEW.decision_scope_level
+      WHEN 'tenant' THEN 'tenant'
+      WHEN 'inventory_owner' THEN 'inventory_owner:'||NEW.decision_inventory_owner_id::text
+      WHEN 'facility' THEN 'facility:'||NEW.decision_facility_id::text
+      WHEN 'owner_facility' THEN 'owner_facility:'||NEW.decision_inventory_owner_id::text
+        ||':'||NEW.decision_facility_id::text
+      ELSE NULL END;
+  END IF;
+  calculated_hash:=encode(sha256(convert_to(
+    'replenishment-decision-policy-v1|'||NEW.decision_policy_source||'|'
+    ||COALESCE(NEW.decision_configuration_id::text,'-')||'|'
+    ||COALESCE(NEW.decision_configuration_revision::text,'-')||'|'
+    ||COALESCE(NEW.decision_minimum_percent::text,'-')||'|'
+    ||COALESCE(NEW.decision_target_percent::text,'-')||'|'
+    ||NEW.operational_minimum_qty::text||'|'||NEW.operational_target_qty::text||'|'
+    ||NEW.minimum_qty::text||'|'||NEW.target_qty::text||'|'
+    ||NEW.include_inbound_projection::text||'|'||scope_component,'UTF8')),'hex');
+  IF calculated_hash IS DISTINCT FROM NEW.decision_policy_hash THEN
+    RAISE EXCEPTION 'replenishment decision policy hash does not match its evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+  RAISE EXCEPTION 'replenishment decision policy has an invalid typed value'
+    USING ERRCODE='23514';
+END $$;
+
+CREATE TRIGGER replenishment_plan_runs_decision_policy_validate
+BEFORE INSERT ON public.replenishment_plan_runs FOR EACH ROW
+EXECUTE FUNCTION public.validate_replenishment_decision_policy_snapshot();
+REVOKE ALL ON FUNCTION public.validate_replenishment_decision_policy_snapshot() FROM PUBLIC;

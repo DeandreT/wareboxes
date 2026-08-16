@@ -6,6 +6,7 @@ use wareboxes_application::replenishment::{
     PlanReplenishmentCommand, PlanReplenishmentResult, PlannedReplenishmentWork,
     PLAN_REPLENISHMENT_OPERATION,
 };
+use wareboxes_application::replenishment_decision_policy::ReplenishmentDecisionPolicyReadModel;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{TenantAccess, WorkTaskType};
 use wareboxes_domain::{
@@ -23,8 +24,9 @@ use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBin
 use crate::repo::tasks::{insert_task_tx, NewWorkTask};
 
 use super::{
-    enqueue_event_tx, level, policy_from_row, policy_sources_tx, require_scope,
-    require_stored_policy_visible_before_replay_tx, scan, PolicyRow,
+    decision_policy::resolve_decision_policy_tx, enqueue_event_tx, level, policy_from_row,
+    policy_sources_tx, require_scope, require_stored_policy_visible_before_replay_tx, scan,
+    PolicyRow,
 };
 
 #[derive(Debug, Clone)]
@@ -78,8 +80,32 @@ pub async fn plan_policy(
             "replenishment policy revision does not match expected revision",
         ));
     }
-    let (snapshot, sources) = lock_snapshot_tx(&mut tx, access.tenant_id, &policy).await?;
-    let decision = plan_replenishment(policy.definition.thresholds(), snapshot);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!(
+            "configuration-kind:{}:replenishment",
+            access.tenant_id.get()
+        ))
+        .execute(&mut *tx)
+        .await?;
+    // Capture the command timestamp after serializing with configuration activation.
+    // The database trigger resolves against this same instant, so the winner of an
+    // activation/planning race is deterministic and the frozen evidence cannot drift.
+    let planned_at = now_iso();
+    let decision_policy =
+        resolve_decision_policy_tx(&mut tx, access.tenant_id, &policy, planned_at, false).await?;
+    let (snapshot, observed_active_inbound, sources) = lock_snapshot_tx(
+        &mut tx,
+        access.tenant_id,
+        &policy,
+        decision_policy.include_inbound_projection,
+    )
+    .await?;
+    let decision = plan_replenishment(
+        decision_policy
+            .effective_thresholds()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        snapshot,
+    );
     let eligible = sources
         .iter()
         .map(|source| {
@@ -94,11 +120,12 @@ pub async fn plan_policy(
         .collect::<AppResult<Vec<_>>>()?;
     let selected = select_replenishment_sources(decision, eligible)
         .map_err(|error| AppError::conflict(error.to_string()))?;
-    let planned_at = now_iso();
     let plan_id = insert_plan_tx(
         &mut tx,
         access.tenant_id,
         &policy,
+        &decision_policy,
+        observed_active_inbound,
         decision,
         i64::try_from(selected.len())
             .map_err(|_| AppError::internal("replenishment work count overflow"))?,
@@ -138,6 +165,8 @@ pub async fn plan_policy(
         policy_id: policy.id,
         policy_revision: policy.revision,
         scope: policy.scope().clone(),
+        decision_policy,
+        observed_active_inbound,
         snapshot: decision.snapshot,
         required_level: decision.required_level,
         target_gap: decision.target_gap,
@@ -219,7 +248,12 @@ async fn lock_snapshot_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     policy: &PolicyRow,
-) -> AppResult<(ReplenishmentPlanningSnapshot, Vec<SourceRow>)> {
+    include_inbound_projection: bool,
+) -> AppResult<(
+    ReplenishmentPlanningSnapshot,
+    wareboxes_domain::ReplenishmentLevel,
+    Vec<SourceRow>,
+)> {
     let scope = policy.scope();
     let source_ids = policy
         .definition
@@ -462,14 +496,19 @@ async fn lock_snapshot_tx(
         sum.checked_add(source.free)
             .ok_or_else(|| AppError::internal("reserve free quantity overflow"))
     })?;
+    let observed_active_inbound = level(active_inbound)?;
     let snapshot = ReplenishmentPlanningSnapshot::new(
         level(pick_face_free)?,
-        level(active_inbound)?,
+        if include_inbound_projection {
+            observed_active_inbound
+        } else {
+            wareboxes_domain::ReplenishmentLevel::ZERO
+        },
         level(unallocated)?,
         level(reserve_free)?,
     )
     .map_err(|error| AppError::internal(error.to_string()))?;
-    Ok((snapshot, sources))
+    Ok((snapshot, observed_active_inbound, sources))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -477,13 +516,17 @@ async fn insert_plan_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     policy: &PolicyRow,
+    decision_policy: &ReplenishmentDecisionPolicyReadModel,
+    observed_active_inbound: wareboxes_domain::ReplenishmentLevel,
     decision: wareboxes_domain::ReplenishmentPlanDecision,
     work_count: i64,
     actor_id: i64,
     planned_at: Timestamp,
 ) -> AppResult<ReplenishmentPlanId> {
     let scope = policy.scope();
-    let thresholds = policy.definition.thresholds();
+    let thresholds = decision_policy
+        .effective_thresholds()
+        .map_err(|error| AppError::internal(error.to_string()))?;
     let source_count = i64::try_from(
         policy
             .definition
@@ -503,24 +546,101 @@ async fn insert_plan_tx(
         INSERT INTO replenishment_plan_runs (
           tenant_id,inventory_owner_id,facility_id,policy_id,policy_revision,
           pick_face_location_id,item_id,uom,minimum_qty,target_qty,source_location_count,
-          pick_face_free_qty,active_inbound_qty,projected_free_qty,unallocated_demand_qty,
+          decision_policy_source,decision_configuration_id,decision_configuration_revision,
+          decision_scope_level,decision_inventory_owner_id,decision_facility_id,
+          decision_minimum_percent,decision_target_percent,include_inbound_projection,
+          operational_minimum_qty,operational_target_qty,decision_policy_hash,
+          pick_face_free_qty,observed_active_inbound_qty,active_inbound_qty,
+          projected_free_qty,unallocated_demand_qty,
           required_level_qty,target_gap_qty,reserve_free_qty,planned_qty,work_count,outcome,
           planned_by_user_id,planned_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+          $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
         RETURNING id
         "#,
     )
-    .bind(tenant_id.get()).bind(scope.inventory_owner_id.get()).bind(scope.facility_id.get())
-    .bind(policy.id.get()).bind(policy.revision.get()).bind(scope.pick_face_location_id.get())
-    .bind(scope.item_id.get()).bind(scope.uom.as_str()).bind(thresholds.minimum().get())
-    .bind(thresholds.target().get()).bind(source_count)
-    .bind(decision.snapshot.pick_face_free().get()).bind(decision.snapshot.active_inbound().get())
-    .bind(decision.snapshot.projected_free().get()).bind(decision.snapshot.unallocated_demand().get())
-    .bind(decision.required_level.get()).bind(decision.target_gap.get())
-    .bind(decision.snapshot.reserve_free().get()).bind(decision.planned.get())
-    .bind(work_count).bind(outcome).bind(actor_id).bind(planned_at)
-    .fetch_one(&mut **tx).await?;
+    .bind(tenant_id.get())
+    .bind(scope.inventory_owner_id.get())
+    .bind(scope.facility_id.get())
+    .bind(policy.id.get())
+    .bind(policy.revision.get())
+    .bind(scope.pick_face_location_id.get())
+    .bind(scope.item_id.get())
+    .bind(scope.uom.as_str())
+    .bind(thresholds.minimum().get())
+    .bind(thresholds.target().get())
+    .bind(source_count)
+    .bind(decision_policy.source.as_str())
+    .bind(decision_policy.configuration_id.map(|id| id.get()))
+    .bind(decision_policy.configuration_revision)
+    .bind(
+        decision_policy
+            .configuration_scope
+            .map(configuration_scope_level),
+    )
+    .bind(
+        decision_policy
+            .configuration_scope
+            .and_then(configuration_scope_owner),
+    )
+    .bind(
+        decision_policy
+            .configuration_scope
+            .and_then(configuration_scope_facility),
+    )
+    .bind(decision_policy.minimum_percent.map(i16::from))
+    .bind(decision_policy.target_percent.map(i16::from))
+    .bind(decision_policy.include_inbound_projection)
+    .bind(decision_policy.operational_minimum.get())
+    .bind(decision_policy.operational_target.get())
+    .bind(&decision_policy.policy_hash)
+    .bind(decision.snapshot.pick_face_free().get())
+    .bind(observed_active_inbound.get())
+    .bind(decision.snapshot.active_inbound().get())
+    .bind(decision.snapshot.projected_free().get())
+    .bind(decision.snapshot.unallocated_demand().get())
+    .bind(decision.required_level.get())
+    .bind(decision.target_gap.get())
+    .bind(decision.snapshot.reserve_free().get())
+    .bind(decision.planned.get())
+    .bind(work_count)
+    .bind(outcome)
+    .bind(actor_id)
+    .bind(planned_at)
+    .fetch_one(&mut **tx)
+    .await?;
     ReplenishmentPlanId::new(id).map_err(|error| AppError::internal(error.to_string()))
+}
+
+const fn configuration_scope_level(scope: wareboxes_domain::ConfigurationScope) -> &'static str {
+    match scope {
+        wareboxes_domain::ConfigurationScope::Tenant => "tenant",
+        wareboxes_domain::ConfigurationScope::InventoryOwner { .. } => "inventory_owner",
+        wareboxes_domain::ConfigurationScope::Facility { .. } => "facility",
+        wareboxes_domain::ConfigurationScope::OwnerFacility { .. } => "owner_facility",
+    }
+}
+
+const fn configuration_scope_owner(scope: wareboxes_domain::ConfigurationScope) -> Option<i64> {
+    match scope {
+        wareboxes_domain::ConfigurationScope::InventoryOwner { inventory_owner_id }
+        | wareboxes_domain::ConfigurationScope::OwnerFacility {
+            inventory_owner_id, ..
+        } => Some(inventory_owner_id.get()),
+        wareboxes_domain::ConfigurationScope::Tenant
+        | wareboxes_domain::ConfigurationScope::Facility { .. } => None,
+    }
+}
+
+const fn configuration_scope_facility(scope: wareboxes_domain::ConfigurationScope) -> Option<i64> {
+    match scope {
+        wareboxes_domain::ConfigurationScope::Facility { facility_id }
+        | wareboxes_domain::ConfigurationScope::OwnerFacility { facility_id, .. } => {
+            Some(facility_id.get())
+        }
+        wareboxes_domain::ConfigurationScope::Tenant
+        | wareboxes_domain::ConfigurationScope::InventoryOwner { .. } => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

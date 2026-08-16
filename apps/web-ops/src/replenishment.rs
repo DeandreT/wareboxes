@@ -427,13 +427,21 @@ fn PlanResultBand(plan: PlanReplenishmentResponse, on_close: Callback<()>) -> im
             <div>
                 <strong>{format!("Plan #{} / Policy #{}", plan.plan_id, plan.policy_id)}</strong>
                 <span>{format!(
-                    "{} {} planned across {} tasks; {} remains. Projected free was {} with {} inbound.",
+                    "{} {} planned across {} tasks; {} remains. Projected free was {} with {} of {} observed inbound included.",
                     format_quantity(plan.planned_quantity),
                     plan.uom,
                     plan.work.len(),
                     format_quantity(plan.remaining_quantity),
                     format_quantity(plan.snapshot.projected_free),
                     format_quantity(plan.snapshot.active_inbound),
+                    format_quantity(plan.observed_active_inbound),
+                )}</span>
+                <span>{format!(
+                    "{}; effective min / target {} / {}; evidence {}",
+                    crate::replenishment::policies::decision_policy_label(&plan.decision_policy),
+                    format_quantity(plan.decision_policy.effective_minimum_quantity),
+                    format_quantity(plan.decision_policy.effective_target_quantity),
+                    plan.decision_policy.policy_hash.get(..12).unwrap_or("invalid"),
                 )}</span>
             </div>
             <button type="button" title="Dismiss plan result" aria-label="Dismiss plan result" on:click=move |_| on_close.run(())><X size=15/></button>
@@ -673,6 +681,7 @@ fn plan_result_summary(plan: &PlanReplenishmentResponse) -> String {
 mod tests {
     use super::*;
     use wareboxes_api_contract::v1::{
+        ReplenishmentDecisionPolicyResponse, ReplenishmentDecisionPolicySource,
         ReplenishmentPlanningOutcome, ReplenishmentPlanningSnapshotResponse, Revision,
     };
 
@@ -727,6 +736,21 @@ mod tests {
             item_id: 9,
             uom: "each".into(),
             pick_face_location_id: 10,
+            decision_policy: ReplenishmentDecisionPolicyResponse {
+                source: ReplenishmentDecisionPolicySource::ProductDefault,
+                configuration_id: None,
+                configuration_revision: None,
+                configuration_scope: None,
+                minimum_percent: None,
+                target_percent: None,
+                include_inbound_projection: true,
+                operational_minimum_quantity: 5,
+                operational_target_quantity: 15,
+                effective_minimum_quantity: 5,
+                effective_target_quantity: 15,
+                policy_hash: "0".repeat(64),
+            },
+            observed_active_inbound: 2,
             snapshot: ReplenishmentPlanningSnapshotResponse {
                 pick_face_free: 1,
                 active_inbound: 2,

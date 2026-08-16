@@ -1,5 +1,7 @@
 mod common;
 
+#[path = "api_v1_replenishment/decision_policy.rs"]
+mod decision_policy;
 #[path = "api_v1_replenishment/support.rs"]
 mod support;
 

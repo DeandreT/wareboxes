@@ -3,6 +3,7 @@
 mod cancellation;
 mod claim;
 mod confirmation;
+mod decision_policy;
 mod planning;
 mod policy;
 mod read_model;

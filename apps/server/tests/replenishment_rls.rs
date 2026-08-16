@@ -445,14 +445,18 @@ async fn insert_active_replenishment_fixture(
             tenant_id, inventory_owner_id, facility_id, policy_id,
             policy_revision, pick_face_location_id, item_id, uom,
             minimum_qty, target_qty, source_location_count,
-            pick_face_free_qty, active_inbound_qty, projected_free_qty,
+            decision_policy_source,include_inbound_projection,
+            operational_minimum_qty,operational_target_qty,decision_policy_hash,
+            pick_face_free_qty,observed_active_inbound_qty,active_inbound_qty,projected_free_qty,
             unallocated_demand_qty, required_level_qty, target_gap_qty,
             reserve_free_qty, planned_qty, work_count, outcome,
             planned_by_user_id, planned_at
         )
         VALUES (
             $1, $2, $3, $4, 2, $5, $6, 'each', 0, 12, 1,
-            0, 0, 0, 1, 12, 12, 12, 12, 1, 'fully_planned', $7, $8
+            'product_default',true,0,12,
+            '07a22782dd3dfb50ac3818a48d70bf95daed64a4a97dd0dd458f16012a950c05',
+            0,0,0,0,1,12,12,12,12,1,'fully_planned',$7,$8
         )
         RETURNING id
         "#,

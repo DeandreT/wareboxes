@@ -1,6 +1,9 @@
 mod cancellation;
+mod decision_policy;
 
 pub(super) use cancellation::cancel_work;
+
+use decision_policy::map_decision_policy;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -508,6 +511,8 @@ fn map_plan(result: PlanReplenishmentResult) -> V1Result<PlanReplenishmentRespon
         item_id: result.scope.item_id.get(),
         uom: result.scope.uom.as_str().to_owned(),
         pick_face_location_id: result.scope.pick_face_location_id.get(),
+        decision_policy: map_decision_policy(result.decision_policy)?,
+        observed_active_inbound: result.observed_active_inbound.get(),
         snapshot: map_snapshot(result.snapshot),
         required_level: result.required_level.get(),
         target_gap: result.target_gap.get(),
@@ -581,6 +586,8 @@ fn map_policy_readiness(
         reserve_source_location_ids: map_source_ids(
             entry.definition.reserve_source_location_ids(),
         )?,
+        decision_policy: map_decision_policy(entry.decision_policy)?,
+        observed_active_inbound: entry.observed_active_inbound.get(),
         snapshot: map_snapshot(entry.snapshot),
         required_level: entry.required_level.get(),
         target_gap: entry.target_gap.get(),

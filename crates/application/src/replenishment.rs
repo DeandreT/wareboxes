@@ -1,5 +1,6 @@
 //! Application contracts for supervisor planning and loose-stock replenishment execution.
 
+use crate::replenishment_decision_policy::ReplenishmentDecisionPolicyReadModel;
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     CatalogItemId, FacilityId, InventoryBalanceId, InventoryOwnerId, ItemBatchId, LocationId,
@@ -116,6 +117,8 @@ pub struct PlanReplenishmentResult {
     pub policy_id: ReplenishmentPolicyId,
     pub policy_revision: ReplenishmentPolicyRevision,
     pub scope: ReplenishmentPolicyScope,
+    pub decision_policy: ReplenishmentDecisionPolicyReadModel,
+    pub observed_active_inbound: ReplenishmentLevel,
     pub snapshot: ReplenishmentPlanningSnapshot,
     pub required_level: ReplenishmentLevel,
     pub target_gap: ReplenishmentLevel,
@@ -129,6 +132,10 @@ pub struct PlanReplenishmentResult {
 
 impl PlanReplenishmentResult {
     pub fn quantities_and_sequence_are_consistent(&self) -> bool {
+        let Ok(thresholds) = self.decision_policy.effective_thresholds() else {
+            return false;
+        };
+        let decision = wareboxes_domain::plan_replenishment(thresholds, self.snapshot);
         let total = self
             .work
             .iter()
@@ -141,6 +148,17 @@ impl PlanReplenishmentResult {
         });
 
         total == Some(self.planned.get())
+            && self.decision_policy.is_consistent()
+            && self.observed_active_inbound >= self.snapshot.active_inbound()
+            && (self.decision_policy.include_inbound_projection
+                || self.snapshot.active_inbound() == ReplenishmentLevel::ZERO)
+            && (!self.decision_policy.include_inbound_projection
+                || self.snapshot.active_inbound() == self.observed_active_inbound)
+            && self.required_level == decision.required_level
+            && self.target_gap == decision.target_gap
+            && self.planned == decision.planned
+            && self.remaining == decision.remaining
+            && self.outcome == decision.outcome
             && self.target_gap.get() == self.planned.get() + self.remaining.get()
             && sequence_is_contiguous
             && (self.planned == ReplenishmentLevel::ZERO) == self.work.is_empty()
@@ -219,11 +237,13 @@ pub struct ReplenishmentPolicyReadinessReadModel {
     pub policy_id: ReplenishmentPolicyId,
     pub revision: ReplenishmentPolicyRevision,
     pub definition: ReplenishmentPolicyDefinition,
+    pub decision_policy: ReplenishmentDecisionPolicyReadModel,
     pub inventory_owner_name: String,
     pub facility_name: String,
     pub item_description: Option<String>,
     pub primary_sku: Option<String>,
     pub pick_face: ReplenishmentLocationReadModel,
+    pub observed_active_inbound: ReplenishmentLevel,
     pub snapshot: ReplenishmentPlanningSnapshot,
     pub required_level: ReplenishmentLevel,
     pub target_gap: ReplenishmentLevel,
@@ -238,10 +258,18 @@ pub struct ReplenishmentPolicyReadinessReadModel {
 impl ReplenishmentPolicyReadinessReadModel {
     /// Checks repository projections against the same pure decision used by planning.
     pub fn quantities_are_consistent(&self) -> bool {
-        let decision =
-            wareboxes_domain::plan_replenishment(self.definition.thresholds(), self.snapshot);
+        let Ok(thresholds) = self.decision_policy.effective_thresholds() else {
+            return false;
+        };
+        let decision = wareboxes_domain::plan_replenishment(thresholds, self.snapshot);
         self.active_work_count >= 0
-            && self.active_work_quantity == self.snapshot.active_inbound()
+            && self.decision_policy.is_consistent()
+            && self.observed_active_inbound >= self.snapshot.active_inbound()
+            && (self.decision_policy.include_inbound_projection
+                || self.snapshot.active_inbound() == ReplenishmentLevel::ZERO)
+            && (!self.decision_policy.include_inbound_projection
+                || self.snapshot.active_inbound() == self.observed_active_inbound)
+            && self.active_work_quantity == self.observed_active_inbound
             && self.required_level == decision.required_level
             && self.target_gap == decision.target_gap
             && self.suggested_outcome == decision.outcome
@@ -539,6 +567,14 @@ mod tests {
                 uom: ReplenishmentUom::new("each").unwrap(),
                 pick_face_location_id: domain_id(8, LocationId::new),
             },
+            decision_policy: ReplenishmentDecisionPolicyReadModel::product_default(
+                ReplenishmentPolicyThresholds::new(
+                    ReplenishmentLevel::new(5).unwrap(),
+                    ReplenishmentLevel::new(20).unwrap(),
+                )
+                .unwrap(),
+            ),
+            observed_active_inbound: ReplenishmentLevel::new(1).unwrap(),
             snapshot: ReplenishmentPlanningSnapshot::new(
                 ReplenishmentLevel::new(1).unwrap(),
                 ReplenishmentLevel::new(1).unwrap(),
@@ -660,6 +696,7 @@ mod tests {
             policy_id: planning.policy_id,
             revision: planning.policy_revision,
             definition,
+            decision_policy: planning.decision_policy,
             inventory_owner_name: "Alpine".into(),
             facility_name: "Reno DC".into(),
             item_description: Some("Widget".into()),
@@ -669,6 +706,7 @@ mod tests {
                 barcode: ReplenishmentScanValue::new("PICK-01").unwrap(),
                 name: Some("Forward pick 01".into()),
             },
+            observed_active_inbound: planning.observed_active_inbound,
             snapshot: planning.snapshot,
             required_level: planning.required_level,
             target_gap: planning.target_gap,
