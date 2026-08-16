@@ -34,7 +34,11 @@ pub async fn claim_next(
         repo::tasks::claim_next_putaway_in_scope(&state.db, &user.tenant, &context, task_type)
             .await?;
 
-    Ok(Json(claim.map(map_claim)))
+    let response = match claim {
+        Some(claim) => Some(map_claim(&state, &user, claim).await?),
+        None => None,
+    };
+    Ok(Json(response))
 }
 
 pub async fn claim_by_id(
@@ -50,7 +54,7 @@ pub async fn claim_by_id(
     let claim =
         repo::tasks::claim_putaway_in_scope(&state.db, &user.tenant, &context, task_id).await?;
 
-    Ok(Json(map_claim(claim)))
+    Ok(Json(map_claim(&state, &user, claim).await?))
 }
 
 pub async fn current(
@@ -60,11 +64,21 @@ pub async fn current(
     user.require_permission(&state.db, PERMISSION).await?;
     let claim = repo::tasks::current_putaway_claim_in_scope(&state.db, &user.tenant).await?;
 
-    Ok(Json(claim.map(map_claim)))
+    let response = match claim {
+        Some(claim) => Some(map_claim(&state, &user, claim).await?),
+        None => None,
+    };
+    Ok(Json(response))
 }
 
-fn map_claim(claim: PutawayClaim) -> PutawayClaimResponse {
-    PutawayClaimResponse {
+async fn map_claim(
+    state: &AppState,
+    user: &CurrentTenant,
+    claim: PutawayClaim,
+) -> V1Result<PutawayClaimResponse> {
+    let putaway_policy =
+        repo::putaway_policy::load_task_policy(&state.db, &user.tenant, claim.task_id).await?;
+    Ok(PutawayClaimResponse {
         task_id: claim.task_id,
         inventory_owner_id: claim.inventory_owner_id.get(),
         facility_id: claim.facility_id,
@@ -82,6 +96,7 @@ fn map_claim(claim: PutawayClaim) -> PutawayClaimResponse {
             barcode: claim.destination_location.barcode,
             name: claim.destination_location.name,
         },
+        putaway_policy: super::putaway::map_policy(putaway_policy),
         work: match claim.work {
             CorePutawayClaimWork::Loose {
                 source_inventory_balance_id,
@@ -116,7 +131,7 @@ fn map_claim(claim: PutawayClaim) -> PutawayClaimResponse {
                 planned_balance_count,
             },
         },
-    }
+    })
 }
 
 fn map_inventory_status(status: InventoryStatus) -> InventoryBalanceStatus {

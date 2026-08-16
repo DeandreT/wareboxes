@@ -112,18 +112,91 @@ pub struct MovementClaimDetails {
     pub work: MovementWork,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PutawayPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutawayPolicyExpectation {
+    pub source: PutawayPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub policy_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutawayPolicy {
+    pub source: PutawayPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub require_zone_compatibility: bool,
+    pub enforce_location_capacity: bool,
+    pub allow_mixed_lots: bool,
+    pub policy_hash: String,
+}
+
+impl PutawayPolicy {
+    pub fn product_default() -> Self {
+        Self {
+            source: PutawayPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            require_zone_compatibility: false,
+            enforce_location_capacity: false,
+            allow_mixed_lots: false,
+            policy_hash: wareboxes_api_contract::v1::PRODUCT_DEFAULT_PUTAWAY_POLICY_HASH.to_owned(),
+        }
+    }
+
+    pub fn expectation(&self) -> PutawayPolicyExpectation {
+        PutawayPolicyExpectation {
+            source: self.source,
+            configuration_id: self.configuration_id,
+            configuration_revision: self.configuration_revision,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+
+    pub fn operator_label(&self) -> String {
+        self.configuration_id.map_or_else(
+            || "Product default".to_owned(),
+            |id| {
+                format!(
+                    "Policy #{id} r{}",
+                    self.configuration_revision.unwrap_or_default()
+                )
+            },
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutawayClaim {
     details: MovementClaimDetails,
+    policy: PutawayPolicy,
 }
 
 impl PutawayClaim {
     pub fn new(details: MovementClaimDetails) -> Self {
-        Self { details }
+        Self {
+            details,
+            policy: PutawayPolicy::product_default(),
+        }
+    }
+
+    pub fn with_policy(details: MovementClaimDetails, policy: PutawayPolicy) -> Self {
+        Self { details, policy }
     }
 
     pub const fn details(&self) -> &MovementClaimDetails {
         &self.details
+    }
+
+    pub const fn policy(&self) -> &PutawayPolicy {
+        &self.policy
     }
 }
 
@@ -203,11 +276,13 @@ pub enum PutawayCommand {
     ConfirmLoose {
         task_id: i64,
         destination_location_barcode: String,
+        expected_policy: PutawayPolicyExpectation,
     },
     ConfirmLicensePlate {
         task_id: i64,
         license_plate_barcode: String,
         destination_location_barcode: String,
+        expected_policy: PutawayPolicyExpectation,
     },
     Release {
         task_id: i64,
@@ -298,7 +373,7 @@ enum MovementCommand {
 }
 
 impl MovementCommand {
-    fn into_putaway(self) -> PutawayCommand {
+    fn into_putaway(self, expected_policy: PutawayPolicyExpectation) -> PutawayCommand {
         match self {
             Self::ClaimNext { workflow } => PutawayCommand::ClaimNext { workflow },
             Self::ClaimById { task_id } => PutawayCommand::ClaimById { task_id },
@@ -308,6 +383,7 @@ impl MovementCommand {
             } => PutawayCommand::ConfirmLoose {
                 task_id,
                 destination_location_barcode,
+                expected_policy,
             },
             Self::ConfirmLicensePlate {
                 task_id,
@@ -317,6 +393,7 @@ impl MovementCommand {
                 task_id,
                 license_plate_barcode,
                 destination_location_barcode,
+                expected_policy,
             },
             Self::Release {
                 task_id,
@@ -581,6 +658,13 @@ impl MovementWorkflow {
 
     pub fn claim(&self) -> Option<&MovementClaimDetails> {
         self.claim.as_ref().map(ActiveMovementClaim::details)
+    }
+
+    pub fn putaway_policy(&self) -> Option<&PutawayPolicy> {
+        match self.claim.as_ref() {
+            Some(ActiveMovementClaim::Putaway(claim)) => Some(claim.policy()),
+            _ => None,
+        }
     }
 
     pub fn scan_draft_mut(&mut self) -> &mut String {
@@ -1043,7 +1127,13 @@ impl MovementWorkflow {
             return None;
         }
         let command = match self.operation {
-            MovementOperation::Putaway => RfCommand::Putaway(command.into_putaway()),
+            MovementOperation::Putaway => {
+                let expected_policy = match self.claim.as_ref() {
+                    Some(ActiveMovementClaim::Putaway(claim)) => claim.policy().expectation(),
+                    _ => PutawayPolicy::product_default().expectation(),
+                };
+                RfCommand::Putaway(command.into_putaway(expected_policy))
+            }
             MovementOperation::InventoryRelocation => {
                 RfCommand::InventoryRelocation(command.into_relocation())
             }

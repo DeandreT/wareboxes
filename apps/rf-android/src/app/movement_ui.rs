@@ -77,6 +77,28 @@ impl RfApp {
         if let Some(instructions) = claim.instructions.as_deref() {
             Self::message_band(ui, Self::warning(), Icon::AlertTriangle, instructions);
         }
+        if let Some(policy) = self.workflow.putaway_policy() {
+            let rules = format!(
+                "{} · zone {} · capacity {} · mixed lots {}",
+                policy.operator_label(),
+                if policy.require_zone_compatibility {
+                    "required"
+                } else {
+                    "optional"
+                },
+                if policy.enforce_location_capacity {
+                    "enforced"
+                } else {
+                    "not enforced"
+                },
+                if policy.allow_mixed_lots {
+                    "allowed"
+                } else {
+                    "blocked"
+                },
+            );
+            Self::message_band(ui, Self::accent(), Icon::ShieldCheck, &rules);
+        }
 
         let lease_actions_allowed = if self.workflow.activity() == Activity::Active {
             self.heartbeat_status(ui, claim.task_id)

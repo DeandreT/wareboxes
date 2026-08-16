@@ -380,8 +380,9 @@ pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,
     PutawayCandidatePage, PutawayCandidatePageRequest, PutawayCandidateResponse,
     PutawayCandidateSort, PutawayConfirmationResponse, PutawayLocationResponse,
-    PutawaySortDirection, PutawayWorkPage, PutawayWorkPageRequest, PutawayWorkResponse,
-    PutawayWorkSort, PutawayWorkStatus,
+    PutawayPolicyExpectation, PutawayPolicyResponse, PutawayPolicySource, PutawaySortDirection,
+    PutawayWorkPage, PutawayWorkPageRequest, PutawayWorkResponse, PutawayWorkSort,
+    PutawayWorkStatus, PRODUCT_DEFAULT_PUTAWAY_POLICY_HASH,
 };
 pub use putaway_claim::{
     ClaimNextPutawayRequest, ClaimPutawayByIdRequest, HeartbeatPutawayClaimRequest,

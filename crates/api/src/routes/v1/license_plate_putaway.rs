@@ -42,8 +42,9 @@ pub async fn create(
         return Err(invalid("due_at cannot be earlier than scheduled_for"));
     }
     validate_instructions(body.instructions.as_deref())?;
+    let expected_policy = super::putaway::map_policy_expectation(body.expected_policy)?;
     let context = user.command_context(&idempotency_key);
-    let task_id = repo::tasks::create_license_plate_putaway_task_in_scope(
+    let result = repo::tasks::create_license_plate_putaway_task_with_policy_in_scope(
         &state.db,
         &user.tenant,
         &context,
@@ -54,10 +55,14 @@ pub async fn create(
         scheduled_for,
         due_at,
         body.instructions.as_deref(),
+        &expected_policy,
     )
     .await?;
 
-    Ok(Json(CreateLicensePlatePutawayTaskResponse { task_id }))
+    Ok(Json(CreateLicensePlatePutawayTaskResponse {
+        task_id: result.task_id,
+        putaway_policy: super::putaway::map_policy(result.putaway_policy),
+    }))
 }
 
 pub async fn confirm(
@@ -74,16 +79,19 @@ pub async fn confirm(
         &body.destination_location_barcode,
         "destination_location_barcode",
     )?;
+    let expected_policy = super::putaway::map_policy_expectation(body.expected_policy)?;
     let context = user.command_context(&idempotency_key);
-    let confirmation = repo::tasks::confirm_license_plate_putaway_in_scope(
+    let outcome = repo::tasks::confirm_license_plate_putaway_with_policy_in_scope(
         &state.db,
         &user.tenant,
         &context,
         task_id,
         &body.license_plate_barcode,
         &body.destination_location_barcode,
+        &expected_policy,
     )
     .await?;
+    let confirmation = outcome.confirmation;
 
     Ok(Json(LicensePlatePutawayConfirmationResponse {
         task_id: confirmation.task_id,
@@ -98,6 +106,7 @@ pub async fn confirm(
         moved_balance_count: confirmation.moved_balance_count,
         confirmed_by: confirmation.confirmed_by,
         confirmed_at: confirmation.confirmed_at.to_rfc3339(),
+        putaway_policy: super::putaway::map_policy(outcome.putaway_policy),
     }))
 }
 

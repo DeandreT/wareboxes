@@ -1,5 +1,10 @@
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use wareboxes_application::CommandContext;
+use wareboxes_application::{
+    putaway::PutawayTaskCreation,
+    putaway_policy::{PutawayPolicyExpectation, PutawayPolicyReadModel},
+    CommandContext,
+};
 use wareboxes_core::models::{
     InventoryStatus, InventoryTransactionType, PutawayConfirmation, TenantAccess, Timestamp,
     WorkTaskType,
@@ -9,8 +14,8 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::inventory;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
+use crate::repo::putaway_policy::{self, PutawayContent};
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
@@ -21,8 +26,14 @@ use super::{
     TaskDimensions,
 };
 
-const CREATE_OPERATION: &str = "task.create_putaway.v1";
-const CONFIRM_OPERATION: &str = "task.confirm_putaway.v1";
+const CREATE_OPERATION: &str = "task.create_putaway.v2";
+const CONFIRM_OPERATION: &str = "task.confirm_putaway.v2";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmPutawayOutcome {
+    pub confirmation: PutawayConfirmation,
+    pub putaway_policy: PutawayPolicyReadModel,
+}
 
 struct PutawaySource {
     inventory_owner_id: i64,
@@ -30,6 +41,7 @@ struct PutawaySource {
     location_id: i64,
     item_batch_id: i64,
     item_id: i64,
+    uom: String,
     status: InventoryStatus,
     qty_on_hand: i64,
     qty_reserved: i64,
@@ -46,6 +58,7 @@ struct PutawayTarget {
     item_id: i64,
     status: InventoryStatus,
     quantity: i64,
+    putaway_policy: PutawayPolicyReadModel,
 }
 
 struct LockedBalance {
@@ -127,6 +140,7 @@ async fn lock_source_for_creation(
                balance.location_id,
                balance.item_batch_id,
                balance.item_id,
+               balance.uom,
                balance.status,
                balance.qty_on_hand,
                balance.qty_reserved,
@@ -179,6 +193,7 @@ async fn lock_source_for_creation(
         location_id: row.try_get("location_id")?,
         item_batch_id: row.try_get("item_batch_id")?,
         item_id: row.try_get("item_id")?,
+        uom: row.try_get("uom")?,
         status,
         qty_on_hand: row.try_get("qty_on_hand")?,
         qty_reserved: row.try_get("qty_reserved")?,
@@ -220,7 +235,7 @@ async fn lock_destination(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn create_putaway_task_in_scope(
+pub async fn create_putaway_task_with_policy_in_scope(
     db: &Db,
     access: &TenantAccess,
     command: &CommandContext,
@@ -232,7 +247,8 @@ pub async fn create_putaway_task_in_scope(
     scheduled_for: Option<Timestamp>,
     due_at: Option<Timestamp>,
     instructions: Option<&str>,
-) -> AppResult<i64> {
+    expected_policy: &PutawayPolicyExpectation,
+) -> AppResult<PutawayTaskCreation> {
     command.require_actor(access.tenant_id, access.user_id)?;
     validate_creation(
         source_inventory_balance_id,
@@ -253,6 +269,7 @@ pub async fn create_putaway_task_in_scope(
             scheduled_for,
             due_at,
             instructions,
+            expected_policy,
         ),
     )?;
     let mut tx = db.begin().await?;
@@ -265,10 +282,10 @@ pub async fn create_putaway_task_in_scope(
     )
     .await?;
 
-    if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
-        require_replayed_task_visible_tx(&mut tx, access.tenant_id, task_id, &scope).await?;
+    if let Some(result) = prepared.replayed::<PutawayTaskCreation>(&mut tx).await? {
+        require_replayed_task_visible_tx(&mut tx, access.tenant_id, result.task_id, &scope).await?;
         tx.commit().await?;
-        return Ok(task_id);
+        return Ok(result);
     }
 
     let source =
@@ -298,6 +315,20 @@ pub async fn create_putaway_task_in_scope(
         inventory_journal::owner_facility_scope(source.inventory_owner_id, source.facility_id)?,
     )
     .await?;
+    let owner_id = InventoryOwnerId::new(source.inventory_owner_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let facility_id = FacilityId::new(source.facility_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let putaway_policy = putaway_policy::resolve_putaway_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        owner_id,
+        facility_id,
+        now_iso(),
+        true,
+    )
+    .await?;
+    putaway_policy::require_expected_policy(&putaway_policy, expected_policy)?;
     let available = source
         .qty_on_hand
         .checked_sub(source.qty_reserved)
@@ -308,6 +339,21 @@ pub async fn create_putaway_task_in_scope(
             "insufficient uncommitted inventory for putaway",
         ));
     }
+    putaway_policy::validate_destination_tx(
+        &mut tx,
+        access.tenant_id,
+        owner_id,
+        facility_id,
+        destination_location_id,
+        &[PutawayContent {
+            item_id: source.item_id,
+            item_batch_id: source.item_batch_id,
+            uom: source.uom.clone(),
+            quantity,
+        }],
+        &putaway_policy,
+    )
+    .await?;
 
     let existing_task: Option<i64> = sqlx::query_scalar(
         r#"
@@ -362,9 +408,17 @@ pub async fn create_putaway_task_in_scope(
             item_batch_id,
             item_id,
             inventory_status,
-            planned_quantity
+            planned_quantity,
+            putaway_policy_source,
+            putaway_policy_configuration_id,
+            putaway_policy_configuration_revision,
+            putaway_policy_scope_level,
+            putaway_policy_scope_owner_id,
+            putaway_policy_scope_facility_id,
+            putaway_policy_definition,
+            putaway_policy_hash
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
         "#,
     )
     .bind(access.tenant_id.get())
@@ -378,10 +432,55 @@ pub async fn create_putaway_task_in_scope(
     .bind(source.item_id)
     .bind(source.status.as_str())
     .bind(quantity)
+    .bind(putaway_policy::source_text(putaway_policy.source))
+    .bind(putaway_policy.configuration_id.map(|id| id.get()))
+    .bind(putaway_policy.configuration_revision)
+    .bind(putaway_policy::scope_values(putaway_policy.configuration_scope).0)
+    .bind(putaway_policy::scope_values(putaway_policy.configuration_scope).1)
+    .bind(putaway_policy::scope_values(putaway_policy.configuration_scope).2)
+    .bind(putaway_policy::definition_json(&putaway_policy))
+    .bind(&putaway_policy.policy_hash)
     .execute(&mut *tx)
     .await?;
 
-    Ok(prepared.commit(tx, task_id).await?)
+    let result = PutawayTaskCreation {
+        task_id,
+        putaway_policy,
+    };
+    Ok(prepared.commit(tx, result).await?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_putaway_task_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    source_inventory_balance_id: i64,
+    destination_location_id: i64,
+    quantity: i64,
+    priority: i64,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<&str>,
+) -> AppResult<i64> {
+    let expected = PutawayPolicyReadModel::product_default().expectation();
+    Ok(create_putaway_task_with_policy_in_scope(
+        db,
+        access,
+        command,
+        source_inventory_balance_id,
+        destination_location_id,
+        quantity,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
+        &expected,
+    )
+    .await?
+    .task_id)
 }
 
 async fn lock_putaway_target(
@@ -405,6 +504,14 @@ async fn lock_putaway_target(
                detail.item_id,
                detail.inventory_status,
                detail.planned_quantity,
+               detail.putaway_policy_source,
+               detail.putaway_policy_configuration_id,
+               detail.putaway_policy_configuration_revision,
+               detail.putaway_policy_scope_level,
+               detail.putaway_policy_scope_owner_id,
+               detail.putaway_policy_scope_facility_id,
+               detail.putaway_policy_definition,
+               detail.putaway_policy_hash,
                detail.closed_at
         FROM work_tasks task
         INNER JOIN putaway_tasks detail
@@ -422,6 +529,7 @@ async fn lock_putaway_target(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::not_found("putaway task"))?;
+    let putaway_policy = putaway_policy::frozen_policy(&row)?;
     let target = PutawayTarget {
         inventory_owner_id: row.try_get("inventory_owner_id")?,
         facility_id: row.try_get("facility_id")?,
@@ -432,6 +540,7 @@ async fn lock_putaway_target(
         item_id: row.try_get("item_id")?,
         status: parse_inventory_status(&row.try_get::<String, _>("inventory_status")?)?,
         quantity: row.try_get("planned_quantity")?,
+        putaway_policy,
     };
     let dimensions = TaskDimensions {
         facility_id: Some(target.facility_id),
@@ -513,13 +622,14 @@ async fn lock_putaway_balances(
         .collect()
 }
 
-pub async fn confirm_putaway_in_scope(
+pub async fn confirm_putaway_with_policy_in_scope(
     db: &Db,
     access: &TenantAccess,
     command: &CommandContext,
     task_id: i64,
     scanned_destination_location_barcode: &str,
-) -> AppResult<PutawayConfirmation> {
+    expected_policy: &PutawayPolicyExpectation,
+) -> AppResult<ConfirmPutawayOutcome> {
     command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request("putaway task ID must be positive"));
@@ -528,13 +638,17 @@ pub async fn confirm_putaway_in_scope(
     let prepared = PreparedCommand::new_v1(
         command,
         CONFIRM_OPERATION,
-        &(task_id, scanned_destination_location_barcode),
+        &(
+            task_id,
+            scanned_destination_location_barcode,
+            expected_policy,
+        ),
     )?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
 
-    if let Some(result) = prepared.replayed::<PutawayConfirmation>(&mut tx).await? {
+    if let Some(result) = prepared.replayed::<ConfirmPutawayOutcome>(&mut tx).await? {
         require_replayed_task_visible_tx(&mut tx, access.tenant_id, task_id, &scope).await?;
         tx.commit().await?;
         return Ok(result);
@@ -542,6 +656,7 @@ pub async fn confirm_putaway_in_scope(
 
     let target =
         lock_putaway_target(&mut tx, access, task_id, command.actor_id.get(), &scope).await?;
+    putaway_policy::require_expected_policy(&target.putaway_policy, expected_policy)?;
     let destination_location_barcode = lock_destination(
         &mut tx,
         access.tenant_id,
@@ -595,12 +710,21 @@ pub async fn confirm_putaway_in_scope(
     )
     .await?;
 
-    inventory::ensure_location_accepts_batch_tx(
+    putaway_policy::validate_destination_tx(
         &mut tx,
         access.tenant_id,
-        target.inventory_owner_id,
+        InventoryOwnerId::new(target.inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        FacilityId::new(target.facility_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         target.destination_location_id,
-        target.item_batch_id,
+        &[PutawayContent {
+            item_id: target.item_id,
+            item_batch_id: target.item_batch_id,
+            uom: source.uom.clone(),
+            quantity: target.quantity,
+        }],
+        &target.putaway_policy,
     )
     .await?;
     let confirmed_at = now_iso();
@@ -830,6 +954,7 @@ pub async fn confirm_putaway_in_scope(
         "item_id": target.item_id,
         "inventory_status": target.status.as_str(),
         "quantity": target.quantity,
+        "putaway_policy": &target.putaway_policy,
     });
     outbox::enqueue(
         &mut tx,
@@ -844,14 +969,38 @@ pub async fn confirm_putaway_in_scope(
             ordering_key: &event_key,
             aggregate_sequence: 1,
             event_type: "inventory.putaway.confirmed",
-            schema_version: 1,
+            schema_version: 2,
             payload: &payload,
             occurred_at: confirmed_at,
         },
     )
     .await?;
 
+    let outcome = ConfirmPutawayOutcome {
+        confirmation: result,
+        putaway_policy: target.putaway_policy,
+    };
     Ok(prepared
-        .commit_with_inventory_transaction(tx, result, Some(transaction_id))
+        .commit_with_inventory_transaction(tx, outcome, Some(transaction_id))
         .await?)
+}
+
+pub async fn confirm_putaway_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    task_id: i64,
+    scanned_destination_location_barcode: &str,
+) -> AppResult<PutawayConfirmation> {
+    let expected = PutawayPolicyReadModel::product_default().expectation();
+    Ok(confirm_putaway_with_policy_in_scope(
+        db,
+        access,
+        command,
+        task_id,
+        scanned_destination_location_barcode,
+        &expected,
+    )
+    .await?
+    .confirmation)
 }

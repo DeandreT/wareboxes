@@ -9642,7 +9642,7 @@ BEGIN
               'license_plate_putaway_task'
           AND transaction.reference_id = NEW.task_id
           AND transaction.operation =
-              'task.confirm_license_plate_putaway.v1'
+              'task.confirm_license_plate_putaway.v2'
     )
     INTO transaction_matches;
 
@@ -10082,7 +10082,7 @@ BEGIN
           AND transaction.actor_user_id = NEW.confirmed_by
           AND transaction.reference_type = 'putaway_task'
           AND transaction.reference_id = NEW.task_id
-          AND transaction.operation = 'task.confirm_putaway.v1'
+          AND transaction.operation = 'task.confirm_putaway.v2'
     )
     INTO transaction_matches;
 
@@ -48900,3 +48900,398 @@ REVOKE ALL ON FUNCTION public.execute_inventory_reconciliation(bigint,text,times
 FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.execute_inventory_reconciliation(bigint,text,timestamp with time zone,bigint)
 TO wareboxes_app;
+
+-- Executable putaway decision evidence. Every directed task freezes the exact
+-- effective policy used to accept its destination; execution reuses that
+-- evidence instead of silently adopting a later configuration.
+ALTER TABLE public.putaway_tasks
+  ADD COLUMN putaway_policy_source text NOT NULL,
+  ADD COLUMN putaway_policy_configuration_id bigint,
+  ADD COLUMN putaway_policy_configuration_revision bigint,
+  ADD COLUMN putaway_policy_scope_level text,
+  ADD COLUMN putaway_policy_scope_owner_id bigint,
+  ADD COLUMN putaway_policy_scope_facility_id bigint,
+  ADD COLUMN putaway_policy_definition jsonb NOT NULL,
+  ADD COLUMN putaway_policy_hash text NOT NULL;
+
+ALTER TABLE public.license_plate_putaway_tasks
+  ADD COLUMN putaway_policy_source text NOT NULL,
+  ADD COLUMN putaway_policy_configuration_id bigint,
+  ADD COLUMN putaway_policy_configuration_revision bigint,
+  ADD COLUMN putaway_policy_scope_level text,
+  ADD COLUMN putaway_policy_scope_owner_id bigint,
+  ADD COLUMN putaway_policy_scope_facility_id bigint,
+  ADD COLUMN putaway_policy_definition jsonb NOT NULL,
+  ADD COLUMN putaway_policy_hash text NOT NULL;
+
+ALTER TABLE public.putaway_tasks
+  ADD CONSTRAINT putaway_tasks_policy_configuration_fkey
+    FOREIGN KEY (tenant_id,putaway_policy_configuration_id)
+    REFERENCES public.configuration_versions(tenant_id,id),
+  ADD CONSTRAINT putaway_tasks_policy_shape_check CHECK (
+    putaway_policy_hash~'^[0-9a-f]{64}$'
+    AND jsonb_typeof(putaway_policy_definition)='object'
+    AND putaway_policy_definition ?& ARRAY[
+      'require_zone_compatibility','enforce_location_capacity','allow_mixed_lots']
+    AND putaway_policy_definition-ARRAY[
+      'require_zone_compatibility','enforce_location_capacity','allow_mixed_lots']='{}'::jsonb
+    AND jsonb_typeof(putaway_policy_definition->'require_zone_compatibility')='boolean'
+    AND jsonb_typeof(putaway_policy_definition->'enforce_location_capacity')='boolean'
+    AND jsonb_typeof(putaway_policy_definition->'allow_mixed_lots')='boolean'
+    AND ((putaway_policy_source='product_default'
+          AND putaway_policy_configuration_id IS NULL
+          AND putaway_policy_configuration_revision IS NULL
+          AND putaway_policy_scope_level IS NULL
+          AND putaway_policy_scope_owner_id IS NULL
+          AND putaway_policy_scope_facility_id IS NULL)
+      OR (putaway_policy_source='configuration'
+          AND putaway_policy_configuration_id IS NOT NULL
+          AND putaway_policy_configuration_revision>0
+          AND ((putaway_policy_scope_level='tenant'
+                AND putaway_policy_scope_owner_id IS NULL
+                AND putaway_policy_scope_facility_id IS NULL)
+            OR (putaway_policy_scope_level='inventory_owner'
+                AND putaway_policy_scope_owner_id IS NOT NULL
+                AND putaway_policy_scope_facility_id IS NULL)
+            OR (putaway_policy_scope_level='facility'
+                AND putaway_policy_scope_owner_id IS NULL
+                AND putaway_policy_scope_facility_id IS NOT NULL)
+            OR (putaway_policy_scope_level='owner_facility'
+                AND putaway_policy_scope_owner_id IS NOT NULL
+                AND putaway_policy_scope_facility_id IS NOT NULL)))));
+
+ALTER TABLE public.license_plate_putaway_tasks
+  ADD CONSTRAINT license_plate_putaway_tasks_policy_configuration_fkey
+    FOREIGN KEY (tenant_id,putaway_policy_configuration_id)
+    REFERENCES public.configuration_versions(tenant_id,id),
+  ADD CONSTRAINT license_plate_putaway_tasks_policy_shape_check CHECK (
+    putaway_policy_hash~'^[0-9a-f]{64}$'
+    AND jsonb_typeof(putaway_policy_definition)='object'
+    AND putaway_policy_definition ?& ARRAY[
+      'require_zone_compatibility','enforce_location_capacity','allow_mixed_lots']
+    AND putaway_policy_definition-ARRAY[
+      'require_zone_compatibility','enforce_location_capacity','allow_mixed_lots']='{}'::jsonb
+    AND jsonb_typeof(putaway_policy_definition->'require_zone_compatibility')='boolean'
+    AND jsonb_typeof(putaway_policy_definition->'enforce_location_capacity')='boolean'
+    AND jsonb_typeof(putaway_policy_definition->'allow_mixed_lots')='boolean'
+    AND ((putaway_policy_source='product_default'
+          AND putaway_policy_configuration_id IS NULL
+          AND putaway_policy_configuration_revision IS NULL
+          AND putaway_policy_scope_level IS NULL
+          AND putaway_policy_scope_owner_id IS NULL
+          AND putaway_policy_scope_facility_id IS NULL)
+      OR (putaway_policy_source='configuration'
+          AND putaway_policy_configuration_id IS NOT NULL
+          AND putaway_policy_configuration_revision>0
+          AND ((putaway_policy_scope_level='tenant'
+                AND putaway_policy_scope_owner_id IS NULL
+                AND putaway_policy_scope_facility_id IS NULL)
+            OR (putaway_policy_scope_level='inventory_owner'
+                AND putaway_policy_scope_owner_id IS NOT NULL
+                AND putaway_policy_scope_facility_id IS NULL)
+            OR (putaway_policy_scope_level='facility'
+                AND putaway_policy_scope_owner_id IS NULL
+                AND putaway_policy_scope_facility_id IS NOT NULL)
+            OR (putaway_policy_scope_level='owner_facility'
+                AND putaway_policy_scope_owner_id IS NOT NULL
+                AND putaway_policy_scope_facility_id IS NOT NULL)))));
+
+CREATE INDEX putaway_tasks_policy_configuration_idx
+ON public.putaway_tasks(tenant_id,putaway_policy_configuration_id)
+WHERE putaway_policy_configuration_id IS NOT NULL;
+CREATE INDEX license_plate_putaway_tasks_policy_configuration_idx
+ON public.license_plate_putaway_tasks(tenant_id,putaway_policy_configuration_id)
+WHERE putaway_policy_configuration_id IS NOT NULL;
+
+CREATE FUNCTION public.validate_putaway_policy_snapshot() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE task_created timestamp with time zone;
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE calculated_hash text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:putaway',NEW.tenant_id),0));
+  SELECT task.created INTO task_created FROM public.work_tasks task
+  WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.task_id;
+  IF task_created IS NULL THEN
+    RAISE EXCEPTION 'putaway policy requires its work task' USING ERRCODE='23514';
+  END IF;
+
+  calculated_hash:=encode(sha256(convert_to(
+    'putaway-policy-v1|'||
+    (NEW.putaway_policy_definition->>'require_zone_compatibility')||'|'||
+    (NEW.putaway_policy_definition->>'enforce_location_capacity')||'|'||
+    (NEW.putaway_policy_definition->>'allow_mixed_lots'),'UTF8')),'hex');
+  IF calculated_hash IS DISTINCT FROM NEW.putaway_policy_hash THEN
+    RAISE EXCEPTION 'putaway policy hash does not match its snapshot'
+      USING ERRCODE='23514';
+  END IF;
+
+  SELECT configuration.id INTO resolved_configuration_id
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id
+    AND configuration.kind='putaway' AND configuration.status='active'
+    AND configuration.effective_from<=task_created
+    AND (configuration.effective_until IS NULL OR configuration.effective_until>task_created)
+    AND (configuration.inventory_owner_id IS NULL
+         OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level
+             WHEN 'owner_facility' THEN 2
+             WHEN 'inventory_owner' THEN 1
+             WHEN 'facility' THEN 1 ELSE 0 END DESC,
+           configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+
+  IF NEW.putaway_policy_source='product_default' THEN
+    IF resolved_configuration_id IS NOT NULL
+       OR NEW.putaway_policy_definition<>jsonb_build_object(
+         'require_zone_compatibility',false,
+         'enforce_location_capacity',false,
+         'allow_mixed_lots',false) THEN
+      RAISE EXCEPTION 'putaway product default is not effective or exact'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  SELECT * INTO configuration_row FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id
+    AND configuration.id=NEW.putaway_policy_configuration_id;
+  IF NOT FOUND OR resolved_configuration_id IS DISTINCT FROM configuration_row.id
+     OR configuration_row.kind<>'putaway'
+     OR configuration_row.revision<>NEW.putaway_policy_configuration_revision
+     OR configuration_row.scope_level<>NEW.putaway_policy_scope_level
+     OR configuration_row.inventory_owner_id IS DISTINCT FROM NEW.putaway_policy_scope_owner_id
+     OR configuration_row.facility_id IS DISTINCT FROM NEW.putaway_policy_scope_facility_id
+     OR configuration_row.definition-'kind'<>NEW.putaway_policy_definition THEN
+    RAISE EXCEPTION 'putaway configuration snapshot is stale or inconsistent'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_putaway_policy_evidence_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.putaway_policy_source IS DISTINCT FROM OLD.putaway_policy_source
+     OR NEW.putaway_policy_configuration_id IS DISTINCT FROM OLD.putaway_policy_configuration_id
+     OR NEW.putaway_policy_configuration_revision IS DISTINCT FROM OLD.putaway_policy_configuration_revision
+     OR NEW.putaway_policy_scope_level IS DISTINCT FROM OLD.putaway_policy_scope_level
+     OR NEW.putaway_policy_scope_owner_id IS DISTINCT FROM OLD.putaway_policy_scope_owner_id
+     OR NEW.putaway_policy_scope_facility_id IS DISTINCT FROM OLD.putaway_policy_scope_facility_id
+     OR NEW.putaway_policy_definition IS DISTINCT FROM OLD.putaway_policy_definition
+     OR NEW.putaway_policy_hash IS DISTINCT FROM OLD.putaway_policy_hash THEN
+    RAISE EXCEPTION 'putaway policy evidence is immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_putaway_policy_destination() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE task_created timestamp with time zone;
+DECLARE item_row record;
+DECLARE zone_purpose text;
+DECLARE require_zone boolean;
+DECLARE enforce_capacity boolean;
+DECLARE allow_mixed boolean;
+BEGIN
+  SELECT task.created INTO task_created FROM public.work_tasks task
+  WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.task_id;
+  require_zone:=(NEW.putaway_policy_definition->>'require_zone_compatibility')::boolean;
+  enforce_capacity:=(NEW.putaway_policy_definition->>'enforce_location_capacity')::boolean;
+  allow_mixed:=(NEW.putaway_policy_definition->>'allow_mixed_lots')::boolean;
+
+  SELECT zone.purpose INTO zone_purpose
+  FROM public.storage_zone_locations member
+  JOIN public.storage_zones zone ON zone.tenant_id=member.tenant_id
+    AND zone.facility_id=member.facility_id AND zone.id=member.storage_zone_id
+  WHERE member.tenant_id=NEW.tenant_id AND member.facility_id=NEW.facility_id
+    AND member.location_id=NEW.destination_location_id
+    AND zone.effective_from<=task_created
+    AND (zone.effective_to IS NULL OR zone.effective_to>task_created)
+  ORDER BY zone.id LIMIT 1;
+
+  IF TG_TABLE_NAME='putaway_tasks' THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format(
+      'inventory-location-item:%s:%s:%s:%s',NEW.tenant_id,NEW.inventory_owner_id,
+      NEW.destination_location_id,NEW.item_id),0));
+    IF require_zone AND (zone_purpose IS NULL OR NOT EXISTS (
+      SELECT 1 FROM public.item_storage_policies policy
+      JOIN public.item_storage_policy_zone_purposes purpose
+        ON purpose.tenant_id=policy.tenant_id
+       AND purpose.inventory_owner_id=policy.inventory_owner_id
+       AND purpose.facility_id=policy.facility_id
+       AND purpose.item_storage_policy_id=policy.id
+      JOIN public.inventory_balances source ON source.tenant_id=NEW.tenant_id
+       AND source.inventory_owner_id=NEW.inventory_owner_id
+       AND source.facility_id=NEW.facility_id
+       AND source.id=NEW.source_inventory_balance_id
+      WHERE policy.tenant_id=NEW.tenant_id
+        AND policy.inventory_owner_id=NEW.inventory_owner_id
+        AND policy.facility_id=NEW.facility_id AND policy.item_id=NEW.item_id
+        AND policy.uom=source.uom AND purpose.purpose=zone_purpose
+        AND policy.effective_from<=task_created
+        AND (policy.effective_to IS NULL OR policy.effective_to>task_created))) THEN
+      RAISE EXCEPTION 'putaway destination zone violates its frozen policy'
+        USING ERRCODE='23514';
+    END IF;
+    IF enforce_capacity AND EXISTS (
+      SELECT 1 FROM public.item_storage_policies policy
+      JOIN public.inventory_balances source ON source.tenant_id=NEW.tenant_id
+       AND source.inventory_owner_id=NEW.inventory_owner_id
+       AND source.facility_id=NEW.facility_id
+       AND source.id=NEW.source_inventory_balance_id AND source.uom=policy.uom
+      WHERE policy.tenant_id=NEW.tenant_id
+        AND policy.inventory_owner_id=NEW.inventory_owner_id
+        AND policy.facility_id=NEW.facility_id AND policy.item_id=NEW.item_id
+        AND policy.effective_from<=task_created
+        AND (policy.effective_to IS NULL OR policy.effective_to>task_created)
+        AND policy.max_quantity_per_location IS NOT NULL
+        AND COALESCE((SELECT SUM(balance.qty_on_hand) FROM public.inventory_balances balance
+          WHERE balance.tenant_id=NEW.tenant_id
+            AND balance.inventory_owner_id=NEW.inventory_owner_id
+            AND balance.facility_id=NEW.facility_id
+            AND balance.location_id=NEW.destination_location_id
+            AND balance.item_id=NEW.item_id AND balance.uom=policy.uom
+            AND balance.deleted IS NULL),0)+NEW.planned_quantity>
+              policy.max_quantity_per_location) THEN
+      RAISE EXCEPTION 'putaway destination capacity violates its frozen policy'
+        USING ERRCODE='23514';
+    END IF;
+    IF NOT allow_mixed AND EXISTS (
+      SELECT 1 FROM public.inventory_balances balance
+      JOIN public.item_batches existing_batch ON existing_batch.tenant_id=balance.tenant_id
+       AND existing_batch.inventory_owner_id=balance.inventory_owner_id
+       AND existing_batch.id=balance.item_batch_id
+      JOIN public.item_batches incoming_batch ON incoming_batch.tenant_id=NEW.tenant_id
+       AND incoming_batch.inventory_owner_id=NEW.inventory_owner_id
+       AND incoming_batch.id=NEW.item_batch_id
+      WHERE balance.tenant_id=NEW.tenant_id
+        AND balance.inventory_owner_id=NEW.inventory_owner_id
+        AND balance.facility_id=NEW.facility_id
+        AND balance.location_id=NEW.destination_location_id
+        AND balance.item_id=NEW.item_id AND balance.item_batch_id<>NEW.item_batch_id
+        AND balance.deleted IS NULL AND balance.qty_on_hand>0
+        AND (existing_batch.lot IS DISTINCT FROM incoming_batch.lot
+             OR existing_batch.expiration IS DISTINCT FROM incoming_batch.expiration)) THEN
+      RAISE EXCEPTION 'putaway destination lot mix violates its frozen policy'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+  END IF;
+
+  IF (SELECT COUNT(*) FROM public.license_plate_putaway_task_contents content
+      WHERE content.tenant_id=NEW.tenant_id AND content.task_id=NEW.task_id)
+      <>NEW.planned_balance_count THEN
+    RAISE EXCEPTION 'license plate putaway policy content snapshot is incomplete'
+      USING ERRCODE='23514';
+  END IF;
+  FOR item_row IN
+    SELECT content.item_id,content.uom,SUM(content.planned_quantity)::bigint AS incoming_quantity
+    FROM public.license_plate_putaway_task_contents content
+    WHERE content.tenant_id=NEW.tenant_id AND content.task_id=NEW.task_id
+    GROUP BY content.item_id,content.uom ORDER BY content.item_id,content.uom
+  LOOP
+    PERFORM pg_advisory_xact_lock(hashtextextended(format(
+      'inventory-location-item:%s:%s:%s:%s',NEW.tenant_id,NEW.inventory_owner_id,
+      NEW.destination_location_id,item_row.item_id),0));
+    IF require_zone AND (zone_purpose IS NULL OR NOT EXISTS (
+      SELECT 1 FROM public.item_storage_policies policy
+      JOIN public.item_storage_policy_zone_purposes purpose
+        ON purpose.tenant_id=policy.tenant_id
+       AND purpose.inventory_owner_id=policy.inventory_owner_id
+       AND purpose.facility_id=policy.facility_id
+       AND purpose.item_storage_policy_id=policy.id
+      WHERE policy.tenant_id=NEW.tenant_id
+        AND policy.inventory_owner_id=NEW.inventory_owner_id
+        AND policy.facility_id=NEW.facility_id AND policy.item_id=item_row.item_id
+        AND policy.uom=item_row.uom AND purpose.purpose=zone_purpose
+        AND policy.effective_from<=task_created
+        AND (policy.effective_to IS NULL OR policy.effective_to>task_created))) THEN
+      RAISE EXCEPTION 'license plate putaway destination zone violates its frozen policy'
+        USING ERRCODE='23514';
+    END IF;
+    IF enforce_capacity AND EXISTS (
+      SELECT 1 FROM public.item_storage_policies policy
+      WHERE policy.tenant_id=NEW.tenant_id
+        AND policy.inventory_owner_id=NEW.inventory_owner_id
+        AND policy.facility_id=NEW.facility_id AND policy.item_id=item_row.item_id
+        AND policy.uom=item_row.uom AND policy.effective_from<=task_created
+        AND (policy.effective_to IS NULL OR policy.effective_to>task_created)
+        AND policy.max_quantity_per_location IS NOT NULL
+        AND COALESCE((SELECT SUM(balance.qty_on_hand) FROM public.inventory_balances balance
+          WHERE balance.tenant_id=NEW.tenant_id
+            AND balance.inventory_owner_id=NEW.inventory_owner_id
+            AND balance.facility_id=NEW.facility_id
+            AND balance.location_id=NEW.destination_location_id
+            AND balance.item_id=item_row.item_id AND balance.uom=item_row.uom
+            AND balance.deleted IS NULL),0)+item_row.incoming_quantity>
+              policy.max_quantity_per_location) THEN
+      RAISE EXCEPTION 'license plate putaway capacity violates its frozen policy'
+        USING ERRCODE='23514';
+    END IF;
+  END LOOP;
+  IF NOT allow_mixed AND (
+    EXISTS (
+      SELECT 1 FROM public.license_plate_putaway_task_contents left_content
+      JOIN public.item_batches left_batch ON left_batch.tenant_id=left_content.tenant_id
+       AND left_batch.inventory_owner_id=left_content.inventory_owner_id
+       AND left_batch.id=left_content.item_batch_id
+      JOIN public.license_plate_putaway_task_contents right_content
+        ON right_content.tenant_id=left_content.tenant_id
+       AND right_content.task_id=left_content.task_id
+       AND right_content.item_id=left_content.item_id
+       AND right_content.inventory_balance_id>left_content.inventory_balance_id
+      JOIN public.item_batches right_batch ON right_batch.tenant_id=right_content.tenant_id
+       AND right_batch.inventory_owner_id=right_content.inventory_owner_id
+       AND right_batch.id=right_content.item_batch_id
+      WHERE left_content.tenant_id=NEW.tenant_id AND left_content.task_id=NEW.task_id
+        AND (left_batch.lot IS DISTINCT FROM right_batch.lot
+             OR left_batch.expiration IS DISTINCT FROM right_batch.expiration))
+    OR EXISTS (
+      SELECT 1 FROM public.license_plate_putaway_task_contents content
+      JOIN public.item_batches incoming_batch ON incoming_batch.tenant_id=content.tenant_id
+       AND incoming_batch.inventory_owner_id=content.inventory_owner_id
+       AND incoming_batch.id=content.item_batch_id
+      JOIN public.inventory_balances balance ON balance.tenant_id=content.tenant_id
+       AND balance.inventory_owner_id=content.inventory_owner_id
+       AND balance.facility_id=content.facility_id
+       AND balance.location_id=NEW.destination_location_id
+       AND balance.item_id=content.item_id AND balance.deleted IS NULL
+       AND balance.qty_on_hand>0 AND balance.item_batch_id<>content.item_batch_id
+      JOIN public.item_batches existing_batch ON existing_batch.tenant_id=balance.tenant_id
+       AND existing_batch.inventory_owner_id=balance.inventory_owner_id
+       AND existing_batch.id=balance.item_batch_id
+      WHERE content.tenant_id=NEW.tenant_id AND content.task_id=NEW.task_id
+        AND (existing_batch.lot IS DISTINCT FROM incoming_batch.lot
+             OR existing_batch.expiration IS DISTINCT FROM incoming_batch.expiration))) THEN
+    RAISE EXCEPTION 'license plate putaway lot mix violates its frozen policy'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER putaway_tasks_validate_policy_snapshot
+BEFORE INSERT ON public.putaway_tasks FOR EACH ROW
+EXECUTE FUNCTION public.validate_putaway_policy_snapshot();
+CREATE TRIGGER license_plate_putaway_tasks_validate_policy_snapshot
+BEFORE INSERT ON public.license_plate_putaway_tasks FOR EACH ROW
+EXECUTE FUNCTION public.validate_putaway_policy_snapshot();
+CREATE TRIGGER putaway_tasks_guard_policy_evidence
+BEFORE UPDATE ON public.putaway_tasks FOR EACH ROW
+EXECUTE FUNCTION public.guard_putaway_policy_evidence_mutation();
+CREATE TRIGGER license_plate_putaway_tasks_guard_policy_evidence
+BEFORE UPDATE ON public.license_plate_putaway_tasks FOR EACH ROW
+EXECUTE FUNCTION public.guard_putaway_policy_evidence_mutation();
+CREATE CONSTRAINT TRIGGER putaway_tasks_require_policy_destination
+AFTER INSERT ON public.putaway_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_putaway_policy_destination();
+CREATE CONSTRAINT TRIGGER license_plate_putaway_tasks_require_policy_destination
+AFTER INSERT ON public.license_plate_putaway_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_putaway_policy_destination();
+
+REVOKE ALL ON FUNCTION public.validate_putaway_policy_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_putaway_policy_evidence_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_putaway_policy_destination() FROM PUBLIC;

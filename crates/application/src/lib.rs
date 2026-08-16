@@ -41,6 +41,7 @@ pub mod pick_wave;
 pub mod picking;
 pub mod purchase_order;
 pub mod putaway;
+pub mod putaway_policy;
 pub mod receipt_policy;
 pub mod replenishment;
 pub mod service_account;

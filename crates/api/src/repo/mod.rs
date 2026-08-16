@@ -50,6 +50,7 @@ pub mod packing;
 pub mod pick_wave;
 pub mod picking;
 pub mod purchase_order;
+pub(crate) mod putaway_policy;
 pub(crate) mod receipt_policy;
 pub mod replenishment;
 pub mod service_accounts;

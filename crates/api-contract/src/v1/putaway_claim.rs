@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::InventoryBalanceStatus;
+use super::{InventoryBalanceStatus, PutawayPolicyResponse};
 
 /// Typed putaway workflow selected when claiming the next available task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +122,7 @@ pub struct PutawayClaimResponse {
     pub lease_expires_at: String,
     pub source_location: PutawayClaimSourceLocation,
     pub destination_location: PutawayClaimDestinationLocation,
+    pub putaway_policy: PutawayPolicyResponse,
     pub work: PutawayClaimWork,
 }
 
@@ -184,6 +185,16 @@ mod tests {
                 location_id: 55,
                 barcode: "A-01-01".into(),
                 name: Some("A-01-01".into()),
+            },
+            putaway_policy: PutawayPolicyResponse {
+                source: crate::v1::PutawayPolicySource::ProductDefault,
+                configuration_id: None,
+                configuration_revision: None,
+                configuration_scope: None,
+                require_zone_compatibility: false,
+                enforce_location_capacity: false,
+                allow_mixed_lots: false,
+                policy_hash: crate::v1::PRODUCT_DEFAULT_PUTAWAY_POLICY_HASH.to_owned(),
             },
             work: PutawayClaimWork::Loose {
                 source_inventory_balance_id: 66,

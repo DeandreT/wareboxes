@@ -289,7 +289,9 @@ fn PlanningPanel(
     });
     destinations.sort_by(compare_putaway_destinations);
     let is_loose = candidate.workflow == PutawayWorkflow::Loose;
-    view! { <div class="putaway-planning-panel"><header><span class="eyebrow">"Directed work"</span><h2>{if is_loose { "Plan loose putaway" } else { "Plan whole-LP putaway" }}</h2><p>{format!("{} / {}",candidate.inventory_owner_name,candidate.facility_name)}</p></header><dl class="putaway-facts"><div><dt>"Source"</dt><dd>{location_label(&candidate.source_location)}</dd></div><div><dt>"Inventory"</dt><dd>{candidate_item(&candidate)}</dd></div><div><dt>"Available"</dt><dd>{format!("{} {}",format_quantity(candidate.available_quantity),candidate.uom.clone().unwrap_or_else(|| "units".into()))}</dd></div><div><dt>"Trace"</dt><dd>{candidate_trace(&candidate)}</dd></div></dl><fieldset disabled=move || signals.command_pending.get()><label><span>"Destination"</span><select required prop:value=move || option_value(drafts.destination_id.get()) on:change=move |event| drafts.destination_id.set(parse_optional_id(&event_target_value(&event)))><option value="">"Select storage location"</option>{destinations.into_iter().map(|value| { let location=value.name.clone().or(value.barcode.clone()).unwrap_or_else(|| format!("Location #{}",value.id)); let label=value.storage_zone_code.as_ref().map_or(location.clone(),|zone| format!("{zone} / {location}")); view! { <option value=value.id>{label}</option> } }).collect_view()}</select></label><Show when=move || is_loose><label><span>"Quantity"</span><input type="number" min="1" max=candidate.available_quantity prop:value=move || drafts.quantity.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.quantity.set(value); } }/></label></Show><label><span>"Priority"</span><input type="number" min="0" max="999" prop:value=move || drafts.priority.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.priority.set(value); } }/></label><label><span>"Instructions"</span><textarea maxlength="1000" prop:value=move || drafts.instructions.get() on:input=move |event| drafts.instructions.set(event_target_value(&event))></textarea></label></fieldset><Show when=move || signals.error.get().is_some()><p class="inline-command-error" role="alert">{move || signals.error.get().unwrap_or_default()}</p></Show><footer><Show when=move || signals.retry.get().is_some()><button type="button" class="button secondary-action" disabled=move || signals.command_pending.get() on:click=move |_| retry.run(())>"Retry exact command"</button></Show><button type="button" class="button primary-action" disabled=move || signals.command_pending.get() on:click=move |_| submit.run(())>{move || if signals.command_pending.get() { "Planning..." } else { "Create putaway work" }}</button></footer></div> }
+    let policy_name = policy_identity(&candidate.putaway_policy);
+    let policy_rules = policy_rules(&candidate.putaway_policy);
+    view! { <div class="putaway-planning-panel"><header><span class="eyebrow">"Directed work"</span><h2>{if is_loose { "Plan loose putaway" } else { "Plan whole-LP putaway" }}</h2><p>{format!("{} / {}",candidate.inventory_owner_name,candidate.facility_name)}</p></header><dl class="putaway-facts"><div><dt>"Source"</dt><dd>{location_label(&candidate.source_location)}</dd></div><div><dt>"Inventory"</dt><dd>{candidate_item(&candidate)}</dd></div><div><dt>"Available"</dt><dd>{format!("{} {}",format_quantity(candidate.available_quantity),candidate.uom.clone().unwrap_or_else(|| "units".into()))}</dd></div><div><dt>"Trace"</dt><dd>{candidate_trace(&candidate)}</dd></div><div><dt>"Effective policy"</dt><dd>{policy_name}</dd></div><div><dt>"Destination rules"</dt><dd>{policy_rules}</dd></div></dl><fieldset disabled=move || signals.command_pending.get()><label><span>"Destination"</span><select required prop:value=move || option_value(drafts.destination_id.get()) on:change=move |event| drafts.destination_id.set(parse_optional_id(&event_target_value(&event)))><option value="">"Select storage location"</option>{destinations.into_iter().map(|value| { let location=value.name.clone().or(value.barcode.clone()).unwrap_or_else(|| format!("Location #{}",value.id)); let label=value.storage_zone_code.as_ref().map_or(location.clone(),|zone| format!("{zone} / {location}")); view! { <option value=value.id>{label}</option> } }).collect_view()}</select></label><Show when=move || is_loose><label><span>"Quantity"</span><input type="number" min="1" max=candidate.available_quantity prop:value=move || drafts.quantity.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.quantity.set(value); } }/></label></Show><label><span>"Priority"</span><input type="number" min="0" max="999" prop:value=move || drafts.priority.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.priority.set(value); } }/></label><label><span>"Instructions"</span><textarea maxlength="1000" prop:value=move || drafts.instructions.get() on:input=move |event| drafts.instructions.set(event_target_value(&event))></textarea></label></fieldset><Show when=move || signals.error.get().is_some()><p class="inline-command-error" role="alert">{move || signals.error.get().unwrap_or_default()}</p></Show><footer><Show when=move || signals.retry.get().is_some()><button type="button" class="button secondary-action" disabled=move || signals.command_pending.get() on:click=move |_| retry.run(())>"Retry exact command"</button></Show><button type="button" class="button primary-action" disabled=move || signals.command_pending.get() on:click=move |_| submit.run(())>{move || if signals.command_pending.get() { "Planning..." } else { "Create putaway work" }}</button></footer></div> }
 }
 
 fn compare_putaway_destinations(left: &Location, right: &Location) -> std::cmp::Ordering {
@@ -304,7 +306,9 @@ fn compare_putaway_destinations(left: &Location, right: &Location) -> std::cmp::
 
 #[component]
 fn WorkDetail(work: PutawayWorkResponse) -> impl IntoView {
-    view! { <div class="putaway-work-panel"><header><span class="eyebrow">"RF execution"</span><h2>{format!("Putaway task #{}",work.task_id)}</h2><span class=work_status_class(work.status)>{work_status_label(work.status)}</span></header><dl class="putaway-facts"><div><dt>"Workflow"</dt><dd>{workflow_label(work.workflow)}</dd></div><div><dt>"Client / facility"</dt><dd>{format!("{} / {}",work.inventory_owner_name,work.facility_name)}</dd></div><div><dt>"Source"</dt><dd>{format!("{} / {}",location_label(&work.source_location),work.source_location.barcode)}</dd></div><div><dt>"Destination"</dt><dd>{format!("{} / {}",location_label(&work.destination_location),work.destination_location.barcode)}</dd></div><div><dt>"Quantity"</dt><dd>{format!("{} {}",format_quantity(work.planned_quantity),work.uom.unwrap_or_else(|| "units".into()))}</dd></div><div><dt>"Assignment"</dt><dd>{work.assigned_user_id.map_or_else(|| "Unassigned".into(),|id| format!("User #{id}"))}</dd></div><div><dt>"Created"</dt><dd>{compact_time(&work.created_at)}</dd></div><div><dt>"Lease / due"</dt><dd>{work.lease_expires_at.or(work.due_at).map_or_else(|| "None".into(),|value| compact_time(&value))}</dd></div></dl>{work.instructions.map(|value| view! { <section class="putaway-instructions"><span>"Instructions"</span><p>{value}</p></section> })}</div> }
+    let policy_name = policy_identity(&work.putaway_policy);
+    let policy_rules = policy_rules(&work.putaway_policy);
+    view! { <div class="putaway-work-panel"><header><span class="eyebrow">"RF execution"</span><h2>{format!("Putaway task #{}",work.task_id)}</h2><span class=work_status_class(work.status)>{work_status_label(work.status)}</span></header><dl class="putaway-facts"><div><dt>"Workflow"</dt><dd>{workflow_label(work.workflow)}</dd></div><div><dt>"Client / facility"</dt><dd>{format!("{} / {}",work.inventory_owner_name,work.facility_name)}</dd></div><div><dt>"Source"</dt><dd>{format!("{} / {}",location_label(&work.source_location),work.source_location.barcode)}</dd></div><div><dt>"Destination"</dt><dd>{format!("{} / {}",location_label(&work.destination_location),work.destination_location.barcode)}</dd></div><div><dt>"Quantity"</dt><dd>{format!("{} {}",format_quantity(work.planned_quantity),work.uom.unwrap_or_else(|| "units".into()))}</dd></div><div><dt>"Assignment"</dt><dd>{work.assigned_user_id.map_or_else(|| "Unassigned".into(),|id| format!("User #{id}"))}</dd></div><div><dt>"Created"</dt><dd>{compact_time(&work.created_at)}</dd></div><div><dt>"Lease / due"</dt><dd>{work.lease_expires_at.or(work.due_at).map_or_else(|| "None".into(),|value| compact_time(&value))}</dd></div><div><dt>"Frozen policy"</dt><dd>{policy_name}</dd></div><div><dt>"Destination rules"</dt><dd>{policy_rules}</dd></div></dl>{work.instructions.map(|value| view! { <section class="putaway-instructions"><span>"Instructions"</span><p>{value}</p></section> })}</div> }
 }
 
 fn prepare_create(signals: Signals, drafts: Drafts) {
@@ -325,6 +329,7 @@ fn prepare_create(signals: Signals, drafts: Drafts) {
         return;
     }
     let instructions = optional_text(&drafts.instructions.get_untracked());
+    let expected_policy = candidate.putaway_policy.expectation();
     let key = api::new_idempotency_key();
     let command = match candidate.workflow {
         PutawayWorkflow::Loose => {
@@ -351,6 +356,7 @@ fn prepare_create(signals: Signals, drafts: Drafts) {
                     scheduled_for: None,
                     due_at: None,
                     instructions,
+                    expected_policy: expected_policy.clone(),
                 },
                 key,
             }
@@ -371,6 +377,7 @@ fn prepare_create(signals: Signals, drafts: Drafts) {
                     scheduled_for: None,
                     due_at: None,
                     instructions,
+                    expected_policy,
                 },
                 key,
             }
@@ -666,6 +673,39 @@ fn candidate_key(value: &PutawayCandidateResponse) -> (PutawayWorkflow, Option<i
 }
 fn compact_time(value: &str) -> String {
     value.get(..16).unwrap_or(value).replace('T', " ")
+}
+
+fn policy_identity(value: &wareboxes_api_contract::v1::PutawayPolicyResponse) -> String {
+    value.configuration_id.map_or_else(
+        || "Product default".to_owned(),
+        |id| {
+            format!(
+                "Configuration #{id} / revision {}",
+                value.configuration_revision.unwrap_or_default()
+            )
+        },
+    )
+}
+
+fn policy_rules(value: &wareboxes_api_contract::v1::PutawayPolicyResponse) -> String {
+    format!(
+        "Zone {} · Capacity {} · Mixed lots {}",
+        if value.require_zone_compatibility {
+            "required"
+        } else {
+            "optional"
+        },
+        if value.enforce_location_capacity {
+            "enforced"
+        } else {
+            "not enforced"
+        },
+        if value.allow_mixed_lots {
+            "allowed"
+        } else {
+            "blocked"
+        },
+    )
 }
 
 #[cfg(test)]

@@ -269,7 +269,7 @@ async fn task_state(
                 FROM inventory_transactions
                 WHERE tenant_id = $1
                   AND operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
                   AND reference_type = 'license_plate_putaway_task'
                   AND reference_id = $2
             ) AS transactions,
@@ -283,7 +283,7 @@ async fn task_state(
                    AND transaction.id = entry.transaction_id
                 WHERE transaction.tenant_id = $1
                   AND transaction.operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
                   AND transaction.reference_type =
                       'license_plate_putaway_task'
                   AND transaction.reference_id = $2
@@ -298,7 +298,7 @@ async fn task_state(
                    AND transaction.id = entry.transaction_id
                 WHERE transaction.tenant_id = $1
                   AND transaction.operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
                   AND transaction.reference_type =
                       'license_plate_putaway_task'
                   AND transaction.reference_id = $2
@@ -315,8 +315,8 @@ async fn task_state(
                 FROM command_idempotency_records
                 WHERE tenant_id = $1
                   AND operation =
-                      'task.confirm_license_plate_putaway.v1'
-                  AND result_json->>'task_id' = $2::TEXT
+                      'task.confirm_license_plate_putaway.v2'
+                  AND result_json->'confirmation'->>'task_id' = $2::TEXT
             ) AS command_records,
             (
                 SELECT COUNT(*)
@@ -328,7 +328,7 @@ async fn task_state(
                    AND transaction.id = change.transaction_id
                 WHERE transaction.tenant_id = $1
                   AND transaction.operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
                   AND transaction.reference_id = $2
             ) AS projection_changes,
             (SELECT COUNT(*) FROM inventory_reconciliation)

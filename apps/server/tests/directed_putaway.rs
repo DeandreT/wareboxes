@@ -9,8 +9,9 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CreatePutawayTaskResponse, ErrorReason, ErrorResponse, PutawayCandidatePage,
-    PutawayConfirmationResponse, PutawayWorkPage,
+    ConfigurationResponse, CreatePutawayTaskResponse, ErrorReason, ErrorResponse,
+    ItemStoragePolicyResponse, PutawayCandidatePage, PutawayConfirmationResponse,
+    PutawayPolicySource, PutawayWorkPage,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryHoldReason};
@@ -80,6 +81,66 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
     serde_json::from_slice(&body).unwrap()
 }
 
+async fn grant_permission(
+    fixture: &Fixture,
+    tenant_id: TenantId,
+    user_id: i64,
+    permission_name: &str,
+    suffix: &str,
+) {
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_id,
+        permission_name,
+        Some(permission_name),
+    )
+    .await
+    .unwrap();
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        &fixture.db,
+        tenant_id,
+        &format!("putaway-policy-{permission_name}-{suffix}"),
+        None,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(&fixture.db, tenant_id, user_id, role)
+        .await
+        .unwrap();
+}
+
+async fn transition_configuration(
+    app: &axum::Router,
+    token: &str,
+    tenant_id: TenantId,
+    configuration: &ConfigurationResponse,
+    transition: &str,
+    key: &str,
+) -> ConfigurationResponse {
+    let response = send(
+        app,
+        token,
+        tenant_id,
+        &format!(
+            "/api/v1/configurations/{}/{}",
+            configuration.configuration_id, transition
+        ),
+        key,
+        json!({"expected_revision": configuration.revision.get()}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response_json(response).await
+}
+
 fn command(access: &wareboxes_core::models::TenantAccess, key: &str) -> CommandContext {
     CommandContext {
         tenant_id: access.tenant_id,
@@ -97,6 +158,17 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         .await
         .expect("WMS user has tenant access");
     let tenant_id = access.tenant_id;
+    grant_permission(&fixture, tenant_id, user.id, "admin", "operator").await;
+    let approver = fixture.user("directed-putaway-approver@test.local").await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("INSERT INTO tenant_memberships(tenant_id,user_id) VALUES ($1,$2)")
+        .bind(tenant_id.get())
+        .bind(approver.id)
+        .execute(&mut *membership_tx)
+        .await
+        .unwrap();
+    membership_tx.commit().await.unwrap();
+    grant_permission(&fixture, tenant_id, approver.id, "admin", "approver").await;
     let facility_id = fixture.facility(tenant_id, "Putaway DC").await;
     let inventory_owner_id = fixture.inventory_owner(tenant_id, "Putaway Owner").await;
     fixture
@@ -116,9 +188,20 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     )
     .await
     .unwrap();
-    let destination_location_id = fixture
-        .location(tenant_id, facility_id, "PUTAWAY-A-01")
-        .await;
+    let destination_location_id = wareboxes_persistence_postgres::locations::add_location(
+        &fixture.db,
+        tenant_id,
+        facility_id,
+        None,
+        Some("PUTAWAY-A-01"),
+        Some("Putaway A-01"),
+        "bin",
+        true,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
     let _wrong_destination_location_id = fixture
         .location(tenant_id, facility_id, "PUTAWAY-A-02")
         .await;
@@ -212,7 +295,63 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         .expect("physical receipt identifies its balance");
 
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
+    let approver_token = auth::create_session(&fixture.db, approver.id)
+        .await
+        .unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
+    let strict = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/configurations",
+        "putaway-policy-strict-create",
+        json!({
+            "scope": {
+                "level": "owner_facility",
+                "inventory_owner_id": inventory_owner_id,
+                "facility_id": facility_id
+            },
+            "effective_from": "2026-01-01T00:00:00Z",
+            "effective_until": null,
+            "rule": {
+                "kind": "putaway",
+                "require_zone_compatibility": true,
+                "enforce_location_capacity": true,
+                "allow_mixed_lots": false
+            },
+            "expected_revision": null
+        }),
+    )
+    .await;
+    assert_eq!(strict.status(), StatusCode::OK);
+    let strict: ConfigurationResponse = response_json(strict).await;
+    let strict = transition_configuration(
+        &app,
+        &token,
+        tenant_id,
+        &strict,
+        "submissions",
+        "putaway-policy-strict-submit",
+    )
+    .await;
+    let strict = transition_configuration(
+        &app,
+        &approver_token,
+        tenant_id,
+        &strict,
+        "approvals",
+        "putaway-policy-strict-approve",
+    )
+    .await;
+    let strict = transition_configuration(
+        &app,
+        &token,
+        tenant_id,
+        &strict,
+        "activations",
+        "putaway-policy-strict-activate",
+    )
+    .await;
     let candidates = get(
         &app,
         &token,
@@ -228,6 +367,269 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         Some(source_inventory_balance_id)
     );
     assert_eq!(candidates.items[0].available_quantity, 10);
+    assert_eq!(
+        candidates.items[0].putaway_policy.source,
+        PutawayPolicySource::Configuration
+    );
+    assert_eq!(
+        candidates.items[0].putaway_policy.configuration_id,
+        Some(strict.configuration_id)
+    );
+    assert!(
+        candidates.items[0]
+            .putaway_policy
+            .require_zone_compatibility
+    );
+    let strict_policy = candidates.items[0].putaway_policy.clone();
+    let strict_expectation = strict_policy.expectation();
+
+    let rejected_by_zone_policy = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-tasks",
+        "putaway-strict-zone-rejection",
+        json!({
+            "source_inventory_balance_id": source_inventory_balance_id,
+            "destination_location_id": destination_location_id,
+            "quantity": 6,
+            "priority": 80,
+            "assigned_user_id": user.id,
+            "expected_policy": strict_expectation
+        }),
+    )
+    .await;
+    assert_eq!(rejected_by_zone_policy.status(), StatusCode::CONFLICT);
+
+    let zone = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/storage-zones",
+        "putaway-policy-zone",
+        json!({
+            "facility_id": facility_id,
+            "code": "PUTAWAY-RESERVE",
+            "name": "Putaway reserve",
+            "purpose": "reserve",
+            "travel_sequence": 10,
+            "location_ids": [destination_location_id]
+        }),
+    )
+    .await;
+    assert_eq!(zone.status(), StatusCode::OK);
+    let storage_policy = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/item-storage-policies",
+        "putaway-policy-capacity",
+        json!({
+            "inventory_owner_id": inventory_owner_id,
+            "facility_id": facility_id,
+            "item_id": item_id,
+            "uom": "case",
+            "allowed_zone_purposes": ["reserve"],
+            "max_quantity_per_location": 5,
+            "expected_revision": null
+        }),
+    )
+    .await;
+    assert_eq!(storage_policy.status(), StatusCode::OK);
+    let storage_policy: ItemStoragePolicyResponse = response_json(storage_policy).await;
+
+    let rejected_by_capacity_policy = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-tasks",
+        "putaway-strict-capacity-rejection",
+        json!({
+            "source_inventory_balance_id": source_inventory_balance_id,
+            "destination_location_id": destination_location_id,
+            "quantity": 6,
+            "priority": 80,
+            "assigned_user_id": user.id,
+            "expected_policy": strict_policy.expectation()
+        }),
+    )
+    .await;
+    assert_eq!(rejected_by_capacity_policy.status(), StatusCode::CONFLICT);
+
+    let mut tamper_tx = tenant_tx(&fixture.db, tenant_id).await;
+    let raw_task_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO work_tasks(
+          tenant_id,created,task_type,status,required_permission,priority,title,
+          created_by,facility_id,inventory_owner_id)
+        VALUES($1,statement_timestamp(),'putaway','open','wms',50,
+          'Raw policy bypass attempt',$2,$3,$4)
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(user.id)
+    .bind(facility_id)
+    .bind(inventory_owner_id)
+    .fetch_one(&mut *tamper_tx)
+    .await
+    .unwrap();
+    let source_dimensions: (i64, i64, String) = sqlx::query_as(
+        "SELECT item_batch_id,item_id,status FROM inventory_balances WHERE tenant_id=$1 AND id=$2",
+    )
+    .bind(tenant_id.get())
+    .bind(source_inventory_balance_id)
+    .fetch_one(&mut *tamper_tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO putaway_tasks(
+          tenant_id,task_id,inventory_owner_id,facility_id,
+          source_inventory_balance_id,source_location_id,destination_location_id,
+          item_batch_id,item_id,inventory_status,planned_quantity,
+          putaway_policy_source,putaway_policy_configuration_id,
+          putaway_policy_configuration_revision,putaway_policy_scope_level,
+          putaway_policy_scope_owner_id,putaway_policy_scope_facility_id,
+          putaway_policy_definition,putaway_policy_hash)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,6,
+          'configuration',$11,$12,'owner_facility',$3,$4,$13,$14)
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(raw_task_id)
+    .bind(inventory_owner_id)
+    .bind(facility_id)
+    .bind(source_inventory_balance_id)
+    .bind(receiving_location_id)
+    .bind(destination_location_id)
+    .bind(source_dimensions.0)
+    .bind(source_dimensions.1)
+    .bind(source_dimensions.2)
+    .bind(strict_policy.configuration_id)
+    .bind(strict_policy.configuration_revision)
+    .bind(json!({
+        "require_zone_compatibility": true,
+        "enforce_location_capacity": true,
+        "allow_mixed_lots": false
+    }))
+    .bind(&strict_policy.policy_hash)
+    .execute(&mut *tamper_tx)
+    .await
+    .unwrap();
+    assert!(
+        tamper_tx.commit().await.is_err(),
+        "deferred database policy enforcement must reject a raw over-capacity task"
+    );
+
+    let retired_storage_policy = send(
+        &app,
+        &token,
+        tenant_id,
+        &format!(
+            "/api/v1/item-storage-policies/{}/retirements",
+            storage_policy.item_storage_policy_id
+        ),
+        "putaway-policy-capacity-retire",
+        json!({"expected_revision": storage_policy.revision.get()}),
+    )
+    .await;
+    assert_eq!(retired_storage_policy.status(), StatusCode::OK);
+
+    let strict = transition_configuration(
+        &app,
+        &token,
+        tenant_id,
+        &strict,
+        "retirements",
+        "putaway-policy-strict-retire",
+    )
+    .await;
+    let relaxed = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/configurations",
+        "putaway-policy-relaxed-create",
+        json!({
+            "scope": {
+                "level": "owner_facility",
+                "inventory_owner_id": inventory_owner_id,
+                "facility_id": facility_id
+            },
+            "effective_from": "2026-01-01T00:00:00Z",
+            "effective_until": null,
+            "rule": {
+                "kind": "putaway",
+                "require_zone_compatibility": false,
+                "enforce_location_capacity": false,
+                "allow_mixed_lots": true
+            },
+            "expected_revision": strict.revision.get()
+        }),
+    )
+    .await;
+    assert_eq!(relaxed.status(), StatusCode::OK);
+    let relaxed: ConfigurationResponse = response_json(relaxed).await;
+    let relaxed = transition_configuration(
+        &app,
+        &token,
+        tenant_id,
+        &relaxed,
+        "submissions",
+        "putaway-policy-relaxed-submit",
+    )
+    .await;
+    let relaxed = transition_configuration(
+        &app,
+        &approver_token,
+        tenant_id,
+        &relaxed,
+        "approvals",
+        "putaway-policy-relaxed-approve",
+    )
+    .await;
+    let relaxed = transition_configuration(
+        &app,
+        &token,
+        tenant_id,
+        &relaxed,
+        "activations",
+        "putaway-policy-relaxed-activate",
+    )
+    .await;
+    let refreshed_candidates = get(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-candidates?limit=100",
+    )
+    .await;
+    assert_eq!(refreshed_candidates.status(), StatusCode::OK);
+    let refreshed_candidates: PutawayCandidatePage = response_json(refreshed_candidates).await;
+    let relaxed_policy = refreshed_candidates.items[0].putaway_policy.clone();
+    assert_eq!(
+        relaxed_policy.configuration_id,
+        Some(relaxed.configuration_id)
+    );
+    assert!(relaxed_policy.allow_mixed_lots);
+    let stale_policy = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-tasks",
+        "putaway-stale-policy",
+        json!({
+            "source_inventory_balance_id": source_inventory_balance_id,
+            "destination_location_id": destination_location_id,
+            "quantity": 6,
+            "priority": 80,
+            "assigned_user_id": user.id,
+            "expected_policy": strict_expectation
+        }),
+    )
+    .await;
+    assert_eq!(stale_policy.status(), StatusCode::CONFLICT);
 
     let create_body = json!({
         "source_inventory_balance_id": source_inventory_balance_id,
@@ -235,7 +637,8 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         "quantity": 6,
         "priority": 80,
         "assigned_user_id": user.id,
-        "instructions": "Scan the directed storage location"
+        "instructions": "Scan the directed storage location",
+        "expected_policy": relaxed_policy.expectation()
     });
     let created = send(
         &app,
@@ -249,6 +652,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     assert_eq!(created.status(), StatusCode::OK);
     let created: CreatePutawayTaskResponse = response_json(created).await;
     assert!(created.task_id > 0);
+    assert_eq!(created.putaway_policy, relaxed_policy);
 
     let candidates_after_plan = get(
         &app,
@@ -328,7 +732,10 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         tenant_id,
         &format!("/api/v1/putaway-tasks/{}/confirmations", created.task_id),
         "putaway-wrong-scan",
-        json!({"destination_location_barcode": "PUTAWAY-A-02"}),
+        json!({
+            "destination_location_barcode": "PUTAWAY-A-02",
+            "expected_policy": relaxed_policy.expectation()
+        }),
     )
     .await;
     let wrong_scan_status = wrong_scan.status();
@@ -346,10 +753,17 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         tenant_id,
         &confirmation_uri,
         "putaway-confirm",
-        json!({"destination_location_barcode": "PUTAWAY-A-01"}),
+        json!({
+            "destination_location_barcode": "PUTAWAY-A-01",
+            "expected_policy": relaxed_policy.expectation()
+        }),
     )
     .await;
-    assert_eq!(confirmed.status(), StatusCode::OK);
+    let confirmed_status = confirmed.status();
+    if confirmed_status != StatusCode::OK {
+        let error = response_json::<ErrorResponse>(confirmed).await;
+        panic!("putaway confirmation failed with {confirmed_status}: {error:?}");
+    }
     let confirmed: PutawayConfirmationResponse = response_json(confirmed).await;
     assert_eq!(confirmed.task_id, created.task_id);
     assert_eq!(
@@ -361,6 +775,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     assert_eq!(confirmed.destination_location_barcode, "PUTAWAY-A-01");
     assert_eq!(confirmed.quantity, 6);
     assert_eq!(confirmed.inventory_status, "available");
+    assert_eq!(confirmed.putaway_policy, relaxed_policy);
 
     let completed_work = get(
         &app,
@@ -381,7 +796,10 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         tenant_id,
         &confirmation_uri,
         "putaway-confirm",
-        json!({"destination_location_barcode": "PUTAWAY-A-01"}),
+        json!({
+            "destination_location_barcode": "PUTAWAY-A-01",
+            "expected_policy": relaxed_policy.expectation()
+        }),
     )
     .await;
     assert_eq!(replayed_confirmation.status(), StatusCode::OK);
@@ -474,7 +892,8 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
             "source_inventory_balance_id": source_inventory_balance_id,
             "destination_location_id": destination_location_id,
             "quantity": 4,
-            "assigned_user_id": user.id
+            "assigned_user_id": user.id,
+            "expected_policy": relaxed_policy.expectation()
         }),
     )
     .await;
@@ -515,7 +934,10 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
             blocked_task.task_id
         ),
         "putaway-confirm-blocked",
-        json!({"destination_location_barcode": "PUTAWAY-A-01"}),
+        json!({
+            "destination_location_barcode": "PUTAWAY-A-01",
+            "expected_policy": relaxed_policy.expectation()
+        }),
     )
     .await;
     assert_eq!(blocked_confirmation.status(), StatusCode::CONFLICT);
@@ -549,6 +971,19 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
             .execute(&mut *tx)
             .await
             .is_err()
+    );
+    tx.rollback().await.unwrap();
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    assert!(
+        sqlx::query(
+            "UPDATE putaway_tasks SET putaway_policy_hash=repeat('0',64) WHERE task_id=$1",
+        )
+        .bind(created.task_id)
+        .execute(&mut *tx)
+        .await
+        .is_err(),
+        "frozen putaway policy evidence must be immutable"
     );
     tx.rollback().await.unwrap();
 }

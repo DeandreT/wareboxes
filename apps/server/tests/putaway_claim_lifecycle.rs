@@ -396,8 +396,8 @@ async fn lifecycle_effects(context: &LifecycleContext, task_id: i64) -> Lifecycl
                    FROM inventory_transactions
                    WHERE tenant_id = task.tenant_id
                      AND operation IN (
-                         'task.confirm_putaway.v1',
-                         'task.confirm_license_plate_putaway.v1'
+                         'task.confirm_putaway.v2',
+                         'task.confirm_license_plate_putaway.v2'
                      )
                      AND reference_id = task.id
                ) AS inventory_transaction_count,
@@ -409,8 +409,8 @@ async fn lifecycle_effects(context: &LifecycleContext, task_id: i64) -> Lifecycl
                     AND transaction.id = entry.transaction_id
                    WHERE transaction.tenant_id = task.tenant_id
                      AND transaction.operation IN (
-                         'task.confirm_putaway.v1',
-                         'task.confirm_license_plate_putaway.v1'
+                         'task.confirm_putaway.v2',
+                         'task.confirm_license_plate_putaway.v2'
                      )
                      AND transaction.reference_id = task.id
                ) AS inventory_entry_count,

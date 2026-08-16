@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, Timestamp};
 
+use crate::putaway_policy::PutawayPolicyReadModel;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PutawayWorkflow {
     Loose,
@@ -165,6 +167,7 @@ pub struct PutawayCandidateReadModel {
     pub serial: Option<String>,
     pub available_quantity: i64,
     pub received_at: Timestamp,
+    pub putaway_policy: PutawayPolicyReadModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +204,13 @@ pub struct PutawayWorkReadModel {
     pub due_at: Option<Timestamp>,
     pub created_at: Timestamp,
     pub completed_at: Option<Timestamp>,
+    pub putaway_policy: PutawayPolicyReadModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutawayTaskCreation {
+    pub task_id: i64,
+    pub putaway_policy: PutawayPolicyReadModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

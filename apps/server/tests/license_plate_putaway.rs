@@ -172,7 +172,7 @@ async fn move_effects(
                 SELECT COUNT(*)
                 FROM inventory_transactions
                 WHERE tenant_id = $1
-                  AND operation = 'task.confirm_license_plate_putaway.v1'
+                  AND operation = 'task.confirm_license_plate_putaway.v2'
                   AND reference_type = 'license_plate_putaway_task'
                   AND reference_id = $2
             ) AS transaction_count,
@@ -185,7 +185,7 @@ async fn move_effects(
                  AND transaction.id = entry.transaction_id
                 WHERE transaction.tenant_id = $1
                   AND transaction.operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
                   AND transaction.reference_type =
                       'license_plate_putaway_task'
                   AND transaction.reference_id = $2
@@ -200,7 +200,7 @@ async fn move_effects(
                  AND transaction.id = change.transaction_id
                 WHERE transaction.tenant_id = $1
                   AND transaction.operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
                   AND transaction.reference_type =
                       'license_plate_putaway_task'
                   AND transaction.reference_id = $2
@@ -230,7 +230,7 @@ async fn move_effects(
                 FROM command_idempotency_records
                 WHERE tenant_id = $1
                   AND operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
             ) AS confirmation_command_count,
             (
                 SELECT status
@@ -811,14 +811,14 @@ async fn whole_license_plate_putaway_is_atomic_replay_safe_and_rejects_content_d
             COUNT(*),
             COUNT(*) FILTER (
                 WHERE operation =
-                    'task.confirm_license_plate_putaway.v1'
+                    'task.confirm_license_plate_putaway.v2'
                   AND inventory_transaction_id = $2
             )
         FROM command_idempotency_records
         WHERE tenant_id = $1
           AND operation IN (
-              'task.create_license_plate_putaway.v1',
-              'task.confirm_license_plate_putaway.v1'
+              'task.create_license_plate_putaway.v2',
+              'task.confirm_license_plate_putaway.v2'
           )
         "#,
     )

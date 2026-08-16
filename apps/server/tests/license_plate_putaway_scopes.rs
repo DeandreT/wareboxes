@@ -258,7 +258,7 @@ async fn effects(db: &db::Db, tenant_id: TenantId) -> PutawayEffects {
                 SELECT COUNT(*)
                 FROM inventory_transactions
                 WHERE tenant_id = $1
-                  AND operation = 'task.confirm_license_plate_putaway.v1'
+                  AND operation = 'task.confirm_license_plate_putaway.v2'
             ) AS transactions,
             (
                 SELECT COUNT(*)
@@ -270,15 +270,15 @@ async fn effects(db: &db::Db, tenant_id: TenantId) -> PutawayEffects {
                    AND transaction.id = entry.transaction_id
                 WHERE entry.tenant_id = $1
                   AND transaction.operation =
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.confirm_license_plate_putaway.v2'
             ) AS entries,
             (
                 SELECT COUNT(*)
                 FROM command_idempotency_records
                 WHERE tenant_id = $1
                   AND operation IN (
-                      'task.create_license_plate_putaway.v1',
-                      'task.confirm_license_plate_putaway.v1'
+                      'task.create_license_plate_putaway.v2',
+                      'task.confirm_license_plate_putaway.v2'
                   )
             ) AS command_records
         "#,

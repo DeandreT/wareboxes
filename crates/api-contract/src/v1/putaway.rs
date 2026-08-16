@@ -1,6 +1,118 @@
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, OpaqueCursor, PageLimit, PutawayWorkflow};
+use serde::de::Error as _;
+
+use super::{ConfigurationScope, CursorPage, OpaqueCursor, PageLimit, PutawayWorkflow};
+
+pub const PRODUCT_DEFAULT_PUTAWAY_POLICY_HASH: &str =
+    "9ebb7234209756a6ff122d74733521612cd2dd38dbb8ed8490e732c9b1625971";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PutawayPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PutawayPolicyExpectation {
+    pub source: PutawayPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub policy_hash: String,
+}
+
+impl PutawayPolicyExpectation {
+    pub fn product_default() -> Self {
+        Self {
+            source: PutawayPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            policy_hash: PRODUCT_DEFAULT_PUTAWAY_POLICY_HASH.to_owned(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        let valid_identity = match self.source {
+            PutawayPolicySource::ProductDefault => {
+                self.configuration_id.is_none() && self.configuration_revision.is_none()
+            }
+            PutawayPolicySource::Configuration => {
+                self.configuration_id.is_some_and(|id| id > 0)
+                    && self
+                        .configuration_revision
+                        .is_some_and(|revision| revision > 0)
+            }
+        };
+        if !valid_identity {
+            return Err("putaway policy identity is invalid");
+        }
+        if self.policy_hash.len() != 64
+            || !self
+                .policy_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("putaway policy hash must be lowercase SHA-256 hex");
+        }
+        Ok(())
+    }
+}
+
+impl Default for PutawayPolicyExpectation {
+    fn default() -> Self {
+        Self::product_default()
+    }
+}
+
+impl<'de> Deserialize<'de> for PutawayPolicyExpectation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            source: PutawayPolicySource,
+            configuration_id: Option<i64>,
+            configuration_revision: Option<i64>,
+            policy_hash: String,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let value = Self {
+            source: raw.source,
+            configuration_id: raw.configuration_id,
+            configuration_revision: raw.configuration_revision,
+            policy_hash: raw.policy_hash,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutawayPolicyResponse {
+    pub source: PutawayPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub require_zone_compatibility: bool,
+    pub enforce_location_capacity: bool,
+    pub allow_mixed_lots: bool,
+    pub policy_hash: String,
+}
+
+impl PutawayPolicyResponse {
+    pub fn expectation(&self) -> PutawayPolicyExpectation {
+        PutawayPolicyExpectation {
+            source: self.source,
+            configuration_id: self.configuration_id,
+            configuration_revision: self.configuration_revision,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+}
 
 /// Creates one directed putaway task for loose inventory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,13 +131,16 @@ pub struct CreatePutawayTaskRequest {
     pub due_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    #[serde(default)]
+    pub expected_policy: PutawayPolicyExpectation,
 }
 
 /// Identity of a newly created directed putaway task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePutawayTaskResponse {
     pub task_id: i64,
+    pub putaway_policy: PutawayPolicyResponse,
 }
 
 /// Confirms the scanned destination for a directed putaway task.
@@ -33,6 +148,8 @@ pub struct CreatePutawayTaskResponse {
 #[serde(deny_unknown_fields)]
 pub struct ConfirmPutawayRequest {
     pub destination_location_barcode: String,
+    #[serde(default)]
+    pub expected_policy: PutawayPolicyExpectation,
 }
 
 /// Result of atomically completing a directed loose-inventory putaway.
@@ -54,6 +171,7 @@ pub struct PutawayConfirmationResponse {
     pub inventory_status: String,
     pub confirmed_by: i64,
     pub confirmed_at: String,
+    pub putaway_policy: PutawayPolicyResponse,
 }
 
 /// Stable lifecycle grouping used by the supervisor putaway monitor.
@@ -172,6 +290,7 @@ pub struct PutawayCandidateResponse {
     pub serial: Option<String>,
     pub available_quantity: i64,
     pub received_at: String,
+    pub putaway_policy: PutawayPolicyResponse,
 }
 
 pub type PutawayCandidatePage = CursorPage<PutawayCandidateResponse>;
@@ -205,6 +324,7 @@ pub struct PutawayWorkResponse {
     pub due_at: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
+    pub putaway_policy: PutawayPolicyResponse,
 }
 
 pub type PutawayWorkPage = CursorPage<PutawayWorkResponse>;
@@ -222,6 +342,7 @@ mod tests {
             .unwrap(),
             ConfirmPutawayRequest {
                 destination_location_barcode: "A-01-01".into(),
+                expected_policy: PutawayPolicyExpectation::product_default(),
             }
         );
         assert!(

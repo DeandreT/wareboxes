@@ -5,9 +5,10 @@ use wareboxes_api_contract::v1::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse, OpaqueCursor,
     PutawayCandidatePage, PutawayCandidatePageRequest, PutawayCandidateResponse,
     PutawayCandidateSort as ApiCandidateSort, PutawayConfirmationResponse, PutawayLocationResponse,
-    PutawaySortDirection as ApiSortDirection, PutawayWorkPage, PutawayWorkPageRequest,
-    PutawayWorkResponse, PutawayWorkSort as ApiWorkSort, PutawayWorkStatus as ApiWorkStatus,
-    PutawayWorkflow as ApiWorkflow,
+    PutawayPolicyExpectation as ApiPolicyExpectation, PutawayPolicyResponse as ApiPolicyResponse,
+    PutawayPolicySource as ApiPolicySource, PutawaySortDirection as ApiSortDirection,
+    PutawayWorkPage, PutawayWorkPageRequest, PutawayWorkResponse, PutawayWorkSort as ApiWorkSort,
+    PutawayWorkStatus as ApiWorkStatus, PutawayWorkflow as ApiWorkflow,
 };
 use wareboxes_application::putaway::{
     PutawayCandidatePage as ApplicationCandidatePage, PutawayCandidateQuery,
@@ -15,7 +16,10 @@ use wareboxes_application::putaway::{
     PutawaySortDirection, PutawayWorkPage as ApplicationWorkPage, PutawayWorkQuery,
     PutawayWorkReadModel, PutawayWorkSort, PutawayWorkStatus, PutawayWorkflow,
 };
-use wareboxes_domain::{FacilityId, InventoryOwnerId};
+use wareboxes_application::putaway_policy::{
+    PutawayPolicyExpectation, PutawayPolicyReadModel, PutawayPolicySource,
+};
+use wareboxes_domain::{ConfigurationScope, ConfigurationVersionId, FacilityId, InventoryOwnerId};
 
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
@@ -208,8 +212,9 @@ pub async fn create(
         return Err(invalid("due_at cannot be earlier than scheduled_for"));
     }
     validate_instructions(body.instructions.as_deref())?;
+    let expected_policy = map_policy_expectation(body.expected_policy)?;
     let context = user.command_context(&idempotency_key);
-    let task_id = repo::tasks::create_putaway_task_in_scope(
+    let result = repo::tasks::create_putaway_task_with_policy_in_scope(
         &state.db,
         &user.tenant,
         &context,
@@ -221,10 +226,14 @@ pub async fn create(
         scheduled_for,
         due_at,
         body.instructions.as_deref(),
+        &expected_policy,
     )
     .await?;
 
-    Ok(Json(CreatePutawayTaskResponse { task_id }))
+    Ok(Json(CreatePutawayTaskResponse {
+        task_id: result.task_id,
+        putaway_policy: map_policy(result.putaway_policy),
+    }))
 }
 
 pub async fn confirm(
@@ -240,15 +249,18 @@ pub async fn confirm(
         &body.destination_location_barcode,
         "destination_location_barcode",
     )?;
+    let expected_policy = map_policy_expectation(body.expected_policy)?;
     let context = user.command_context(&idempotency_key);
-    let confirmation = repo::tasks::confirm_putaway_in_scope(
+    let outcome = repo::tasks::confirm_putaway_with_policy_in_scope(
         &state.db,
         &user.tenant,
         &context,
         task_id,
         &body.destination_location_barcode,
+        &expected_policy,
     )
     .await?;
+    let confirmation = outcome.confirmation;
 
     Ok(Json(PutawayConfirmationResponse {
         task_id: confirmation.task_id,
@@ -266,6 +278,7 @@ pub async fn confirm(
         inventory_status: confirmation.inventory_status.as_str().to_owned(),
         confirmed_by: confirmation.confirmed_by,
         confirmed_at: confirmation.confirmed_at.to_rfc3339(),
+        putaway_policy: map_policy(outcome.putaway_policy),
     }))
 }
 
@@ -398,6 +411,7 @@ fn map_candidate(candidate: PutawayCandidateReadModel) -> PutawayCandidateRespon
         serial: candidate.serial,
         available_quantity: candidate.available_quantity,
         received_at: candidate.received_at.to_rfc3339(),
+        putaway_policy: map_policy(candidate.putaway_policy),
     }
 }
 
@@ -429,6 +443,65 @@ fn map_work(work: PutawayWorkReadModel) -> PutawayWorkResponse {
         due_at: work.due_at.map(|value| value.to_rfc3339()),
         created_at: work.created_at.to_rfc3339(),
         completed_at: work.completed_at.map(|value| value.to_rfc3339()),
+        putaway_policy: map_policy(work.putaway_policy),
+    }
+}
+
+pub(super) fn map_policy_expectation(
+    value: ApiPolicyExpectation,
+) -> V1Result<PutawayPolicyExpectation> {
+    let expectation = PutawayPolicyExpectation {
+        source: match value.source {
+            ApiPolicySource::ProductDefault => PutawayPolicySource::ProductDefault,
+            ApiPolicySource::Configuration => PutawayPolicySource::Configuration,
+        },
+        configuration_id: value
+            .configuration_id
+            .map(ConfigurationVersionId::new)
+            .transpose()
+            .map_err(|error| AppError::bad_request(error.to_string()))?,
+        configuration_revision: value.configuration_revision,
+        policy_hash: value.policy_hash,
+    };
+    if expectation.is_well_formed() {
+        Ok(expectation)
+    } else {
+        Err(invalid("putaway policy expectation is invalid"))
+    }
+}
+
+pub(super) fn map_policy(value: PutawayPolicyReadModel) -> ApiPolicyResponse {
+    ApiPolicyResponse {
+        source: match value.source {
+            PutawayPolicySource::ProductDefault => ApiPolicySource::ProductDefault,
+            PutawayPolicySource::Configuration => ApiPolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id.map(|id| id.get()),
+        configuration_revision: value.configuration_revision,
+        configuration_scope: value.configuration_scope.map(|scope| match scope {
+            ConfigurationScope::Tenant => wareboxes_api_contract::v1::ConfigurationScope::Tenant,
+            ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::InventoryOwner {
+                    inventory_owner_id: inventory_owner_id.get(),
+                }
+            }
+            ConfigurationScope::Facility { facility_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::Facility {
+                    facility_id: facility_id.get(),
+                }
+            }
+            ConfigurationScope::OwnerFacility {
+                inventory_owner_id,
+                facility_id,
+            } => wareboxes_api_contract::v1::ConfigurationScope::OwnerFacility {
+                inventory_owner_id: inventory_owner_id.get(),
+                facility_id: facility_id.get(),
+            },
+        }),
+        require_zone_compatibility: value.require_zone_compatibility,
+        enforce_location_capacity: value.enforce_location_capacity,
+        allow_mixed_lots: value.allow_mixed_lots,
+        policy_hash: value.policy_hash,
     }
 }
 

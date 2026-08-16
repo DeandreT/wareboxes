@@ -23,7 +23,10 @@ use wareboxes_api_contract::v1::{
     PickShortageReason as ApiPickShortageReason, PickShortageStatus as ApiPickShortageStatus,
     PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
     PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
-    PutawayWorkflow as ApiPutawayWorkflow, ReceiptPolicyExpectation as ApiReceiptPolicyExpectation,
+    PutawayPolicyExpectation as ApiPutawayPolicyExpectation,
+    PutawayPolicyResponse as ApiPutawayPolicyResponse,
+    PutawayPolicySource as ApiPutawayPolicySource, PutawayWorkflow as ApiPutawayWorkflow,
+    ReceiptPolicyExpectation as ApiReceiptPolicyExpectation,
     ReceiptPolicyResponse as ApiReceiptPolicyResponse,
     ReceiptPolicySource as ApiReceiptPolicySource, ReleaseCycleCountClaimRequest,
     ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest, ReleasePutawayClaimRequest,
@@ -55,7 +58,8 @@ use crate::picking::{
 use crate::workflow::{
     CommandOutcome, CycleCountCommand, DurableCommandDraft, InventoryRelocationClaim,
     InventoryRelocationCommand, Location, MovementClaimDetails, MovementKind, MovementOperation,
-    MovementWork, PutawayClaim, PutawayCommand, ReleaseReason, RfCommand,
+    MovementWork, PutawayClaim, PutawayCommand, PutawayPolicy, PutawayPolicyExpectation,
+    PutawayPolicySource, ReleaseReason, RfCommand,
 };
 
 mod cross_dock;
@@ -312,12 +316,14 @@ pub fn build_durable_request(
         RfCommand::Putaway(PutawayCommand::ConfirmLoose {
             task_id,
             destination_location_barcode,
+            expected_policy,
         }) => {
             validate_task_id(*task_id)?;
             (
                 format!("{API_PREFIX}/putaway-tasks/{task_id}/confirmations"),
                 serde_json::to_vec(&ConfirmPutawayRequest {
                     destination_location_barcode: destination_location_barcode.clone(),
+                    expected_policy: map_putaway_expectation(expected_policy),
                 })?,
                 ResponseKind::LooseConfirmation,
             )
@@ -326,6 +332,7 @@ pub fn build_durable_request(
             task_id,
             license_plate_barcode,
             destination_location_barcode,
+            expected_policy,
         }) => {
             validate_task_id(*task_id)?;
             (
@@ -333,6 +340,7 @@ pub fn build_durable_request(
                 serde_json::to_vec(&ConfirmLicensePlatePutawayRequest {
                     license_plate_barcode: license_plate_barcode.clone(),
                     destination_location_barcode: destination_location_barcode.clone(),
+                    expected_policy: map_putaway_expectation(expected_policy),
                 })?,
                 ResponseKind::LicensePlateConfirmation,
             )
@@ -1321,6 +1329,7 @@ fn map_claim(response: PutawayClaimResponse) -> Result<PutawayClaim, WireRespons
         return Err(WireResponseError::InvalidClaim);
     }
     let source = map_source(response.source_location)?;
+    let policy = map_putaway_policy(response.putaway_policy)?;
     let work = match response.work {
         PutawayClaimWork::Loose {
             item_id,
@@ -1347,21 +1356,63 @@ fn map_claim(response: PutawayClaimResponse) -> Result<PutawayClaim, WireRespons
             planned_balance_count,
         },
     };
-    Ok(PutawayClaim::new(MovementClaimDetails {
-        task_id: response.task_id,
-        inventory_owner_id: response.inventory_owner_id,
-        facility_id: response.facility_id,
-        priority: response.priority,
-        instructions: response.instructions,
-        lease_expires_at: response.lease_expires_at,
-        source: Some(source),
-        destination: Location {
-            location_id: response.destination_location.location_id,
-            name: response.destination_location.name,
-            barcode: Some(response.destination_location.barcode),
+    Ok(PutawayClaim::with_policy(
+        MovementClaimDetails {
+            task_id: response.task_id,
+            inventory_owner_id: response.inventory_owner_id,
+            facility_id: response.facility_id,
+            priority: response.priority,
+            instructions: response.instructions,
+            lease_expires_at: response.lease_expires_at,
+            source: Some(source),
+            destination: Location {
+                location_id: response.destination_location.location_id,
+                name: response.destination_location.name,
+                barcode: Some(response.destination_location.barcode),
+            },
+            work,
         },
-        work,
-    }))
+        policy,
+    ))
+}
+
+fn map_putaway_expectation(value: &PutawayPolicyExpectation) -> ApiPutawayPolicyExpectation {
+    ApiPutawayPolicyExpectation {
+        source: match value.source {
+            PutawayPolicySource::ProductDefault => ApiPutawayPolicySource::ProductDefault,
+            PutawayPolicySource::Configuration => ApiPutawayPolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id,
+        configuration_revision: value.configuration_revision,
+        policy_hash: value.policy_hash.clone(),
+    }
+}
+
+fn map_putaway_policy(value: ApiPutawayPolicyResponse) -> Result<PutawayPolicy, WireResponseError> {
+    if value.policy_hash.len() != 64
+        || !value
+            .policy_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || matches!(value.source, ApiPutawayPolicySource::ProductDefault)
+            && (value.configuration_id.is_some() || value.configuration_revision.is_some())
+        || matches!(value.source, ApiPutawayPolicySource::Configuration)
+            && (value.configuration_id.is_none() || value.configuration_revision.is_none())
+    {
+        return Err(WireResponseError::InvalidClaim);
+    }
+    Ok(PutawayPolicy {
+        source: match value.source {
+            ApiPutawayPolicySource::ProductDefault => PutawayPolicySource::ProductDefault,
+            ApiPutawayPolicySource::Configuration => PutawayPolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id,
+        configuration_revision: value.configuration_revision,
+        require_zone_compatibility: value.require_zone_compatibility,
+        enforce_location_capacity: value.enforce_location_capacity,
+        allow_mixed_lots: value.allow_mixed_lots,
+        policy_hash: value.policy_hash,
+    })
 }
 
 fn map_relocation_claim(
@@ -2406,13 +2457,22 @@ mod tests {
         let request = build_durable_request(&draft(PutawayCommand::ConfirmLoose {
             task_id: 42,
             destination_location_barcode: "A-01-02".into(),
+            expected_policy: PutawayPolicy::product_default().expectation(),
         }))
         .expect("loose confirmation should build");
 
         assert_eq!(request.path, "/api/v1/putaway-tasks/42/confirmations");
         assert_eq!(
             body(&request),
-            json!({"destination_location_barcode": "A-01-02"})
+            json!({
+                "destination_location_barcode": "A-01-02",
+                "expected_policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "policy_hash": wareboxes_api_contract::v1::PRODUCT_DEFAULT_PUTAWAY_POLICY_HASH
+                }
+            })
         );
         assert_eq!(request.response_kind, ResponseKind::LooseConfirmation);
     }
@@ -2423,6 +2483,7 @@ mod tests {
             task_id: 42,
             license_plate_barcode: "LP-42".into(),
             destination_location_barcode: "A-01-02".into(),
+            expected_policy: PutawayPolicy::product_default().expectation(),
         }))
         .expect("license plate confirmation should build");
 
@@ -2434,7 +2495,13 @@ mod tests {
             body(&request),
             json!({
                 "license_plate_barcode": "LP-42",
-                "destination_location_barcode": "A-01-02"
+                "destination_location_barcode": "A-01-02",
+                "expected_policy": {
+                    "source": "product_default",
+                    "configuration_id": null,
+                    "configuration_revision": null,
+                    "policy_hash": wareboxes_api_contract::v1::PRODUCT_DEFAULT_PUTAWAY_POLICY_HASH
+                }
             })
         );
         assert_eq!(
@@ -2910,6 +2977,16 @@ mod tests {
             "instructions": "Keep upright",
             "due_at": null,
             "lease_expires_at": "2026-07-27T02:00:00Z",
+            "putaway_policy": {
+                "source": "product_default",
+                "configuration_id": null,
+                "configuration_revision": null,
+                "configuration_scope": null,
+                "require_zone_compatibility": false,
+                "enforce_location_capacity": false,
+                "allow_mixed_lots": false,
+                "policy_hash": "9ebb7234209756a6ff122d74733521612cd2dd38dbb8ed8490e732c9b1625971"
+            },
             "source_location": {
                 "location_id": 11,
                 "barcode": null,

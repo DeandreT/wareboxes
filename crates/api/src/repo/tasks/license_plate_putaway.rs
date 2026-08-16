@@ -1,7 +1,10 @@
-use std::collections::BTreeMap;
-
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use wareboxes_application::CommandContext;
+use wareboxes_application::{
+    putaway::PutawayTaskCreation,
+    putaway_policy::{PutawayPolicyExpectation, PutawayPolicyReadModel},
+    CommandContext,
+};
 use wareboxes_core::models::{
     InventoryStatus, InventoryTransactionType, LicensePlatePutawayConfirmation, TenantAccess,
     Timestamp, WorkTaskType,
@@ -11,8 +14,8 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::inventory;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
+use crate::repo::putaway_policy::{self, PutawayContent};
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
@@ -24,8 +27,14 @@ use super::{
     TaskDimensions,
 };
 
-const CREATE_OPERATION: &str = "task.create_license_plate_putaway.v1";
-const CONFIRM_OPERATION: &str = "task.confirm_license_plate_putaway.v1";
+const CREATE_OPERATION: &str = "task.create_license_plate_putaway.v2";
+const CONFIRM_OPERATION: &str = "task.confirm_license_plate_putaway.v2";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmLicensePlatePutawayOutcome {
+    pub confirmation: LicensePlatePutawayConfirmation,
+    pub putaway_policy: PutawayPolicyReadModel,
+}
 
 struct PutawayTarget {
     inventory_owner_id: i64,
@@ -34,6 +43,7 @@ struct PutawayTarget {
     source_location_id: i64,
     destination_location_id: i64,
     planned_balance_count: i64,
+    putaway_policy: PutawayPolicyReadModel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,6 +253,7 @@ async fn lock_contents(
 fn positive_contents_at_source(
     contents: &[ContentLine],
     source_location_id: i64,
+    allow_mixed_lots: bool,
 ) -> AppResult<Vec<ContentLine>> {
     if contents
         .iter()
@@ -275,49 +286,25 @@ fn positive_contents_at_source(
         }
     }
 
-    let mut item_lot_expiration = BTreeMap::new();
-    for content in &positive {
-        let dimensions = (content.lot.clone(), content.expiration);
-        if item_lot_expiration
-            .insert(content.item_id, dimensions.clone())
-            .is_some_and(|existing| existing != dimensions)
-        {
-            return Err(AppError::conflict(
-                "license plate contains the same item with multiple lots or expirations",
-            ));
+    if !allow_mixed_lots {
+        let mut item_lot_expiration = std::collections::BTreeMap::new();
+        for content in &positive {
+            let dimensions = (content.lot.clone(), content.expiration);
+            if item_lot_expiration
+                .insert(content.item_id, dimensions.clone())
+                .is_some_and(|existing| existing != dimensions)
+            {
+                return Err(AppError::conflict(
+                    "putaway policy prohibits the same item with multiple lots or expirations",
+                ));
+            }
         }
     }
     Ok(positive)
 }
 
-async fn ensure_destination_compatibility(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: wareboxes_domain::TenantId,
-    inventory_owner_id: i64,
-    destination_location_id: i64,
-    contents: &[ContentLine],
-) -> AppResult<()> {
-    let mut batches = contents
-        .iter()
-        .map(|content| (content.item_id, content.item_batch_id))
-        .collect::<Vec<_>>();
-    batches.sort_unstable();
-    batches.dedup();
-    for (_, item_batch_id) in batches {
-        inventory::ensure_location_accepts_batch_tx(
-            tx,
-            tenant_id,
-            inventory_owner_id,
-            destination_location_id,
-            item_batch_id,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
-pub async fn create_license_plate_putaway_task_in_scope(
+pub async fn create_license_plate_putaway_task_with_policy_in_scope(
     db: &Db,
     access: &TenantAccess,
     command: &CommandContext,
@@ -328,7 +315,8 @@ pub async fn create_license_plate_putaway_task_in_scope(
     scheduled_for: Option<Timestamp>,
     due_at: Option<Timestamp>,
     instructions: Option<&str>,
-) -> AppResult<i64> {
+    expected_policy: &PutawayPolicyExpectation,
+) -> AppResult<PutawayTaskCreation> {
     command.require_actor(access.tenant_id, access.user_id)?;
     validate_creation(
         license_plate_id,
@@ -347,6 +335,7 @@ pub async fn create_license_plate_putaway_task_in_scope(
             scheduled_for,
             due_at,
             instructions,
+            expected_policy,
         ),
     )?;
     let mut tx = db.begin().await?;
@@ -359,10 +348,10 @@ pub async fn create_license_plate_putaway_task_in_scope(
     )
     .await?;
 
-    if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
-        require_replayed_task_visible_tx(&mut tx, access.tenant_id, task_id, &scope).await?;
+    if let Some(result) = prepared.replayed::<PutawayTaskCreation>(&mut tx).await? {
+        require_replayed_task_visible_tx(&mut tx, access.tenant_id, result.task_id, &scope).await?;
         tx.commit().await?;
-        return Ok(task_id);
+        return Ok(result);
     }
 
     let plate = lock_root_tree_tx(&mut tx, access.tenant_id, license_plate_id).await?;
@@ -385,6 +374,20 @@ pub async fn create_license_plate_putaway_task_in_scope(
         inventory_journal::owner_facility_scope(plate.inventory_owner_id, plate.facility_id)?;
     inventory_journal::lock_active_owner_facility_tx(&mut tx, access.tenant_id, owner_facility)
         .await?;
+    let owner_id = InventoryOwnerId::new(plate.inventory_owner_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let facility_id = FacilityId::new(plate.facility_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let putaway_policy = putaway_policy::resolve_putaway_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        owner_id,
+        facility_id,
+        now_iso(),
+        true,
+    )
+    .await?;
+    putaway_policy::require_expected_policy(&putaway_policy, expected_policy)?;
     let contents = lock_contents(
         &mut tx,
         access.tenant_id,
@@ -400,13 +403,27 @@ pub async fn create_license_plate_putaway_task_in_scope(
         &plate.plate_ids,
     )
     .await?;
-    let positive_contents = positive_contents_at_source(&contents, plate.location_id)?;
-    ensure_destination_compatibility(
+    let positive_contents = positive_contents_at_source(
+        &contents,
+        plate.location_id,
+        putaway_policy.allow_mixed_lots,
+    )?;
+    putaway_policy::validate_destination_tx(
         &mut tx,
         access.tenant_id,
-        plate.inventory_owner_id,
+        owner_id,
+        facility_id,
         destination_location_id,
-        &positive_contents,
+        &positive_contents
+            .iter()
+            .map(|content| PutawayContent {
+                item_id: content.item_id,
+                item_batch_id: content.item_batch_id,
+                uom: content.uom.clone(),
+                quantity: content.quantity,
+            })
+            .collect::<Vec<_>>(),
+        &putaway_policy,
     )
     .await?;
 
@@ -464,9 +481,17 @@ pub async fn create_license_plate_putaway_task_in_scope(
             license_plate_id,
             source_location_id,
             destination_location_id,
-            planned_balance_count
+            planned_balance_count,
+            putaway_policy_source,
+            putaway_policy_configuration_id,
+            putaway_policy_configuration_revision,
+            putaway_policy_scope_level,
+            putaway_policy_scope_owner_id,
+            putaway_policy_scope_facility_id,
+            putaway_policy_definition,
+            putaway_policy_hash
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         "#,
     )
     .bind(access.tenant_id.get())
@@ -477,6 +502,14 @@ pub async fn create_license_plate_putaway_task_in_scope(
     .bind(plate.location_id)
     .bind(destination_location_id)
     .bind(planned_balance_count)
+    .bind(putaway_policy::source_text(putaway_policy.source))
+    .bind(putaway_policy.configuration_id.map(|id| id.get()))
+    .bind(putaway_policy.configuration_revision)
+    .bind(putaway_policy::scope_values(putaway_policy.configuration_scope).0)
+    .bind(putaway_policy::scope_values(putaway_policy.configuration_scope).1)
+    .bind(putaway_policy::scope_values(putaway_policy.configuration_scope).2)
+    .bind(putaway_policy::definition_json(&putaway_policy))
+    .bind(&putaway_policy.policy_hash)
     .execute(&mut *tx)
     .await?;
     for content in &positive_contents {
@@ -515,7 +548,42 @@ pub async fn create_license_plate_putaway_task_in_scope(
         .await?;
     }
 
-    Ok(prepared.commit(tx, task_id).await?)
+    let result = PutawayTaskCreation {
+        task_id,
+        putaway_policy,
+    };
+    Ok(prepared.commit(tx, result).await?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_license_plate_putaway_task_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    license_plate_id: i64,
+    destination_location_id: i64,
+    priority: i64,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<&str>,
+) -> AppResult<i64> {
+    let expected = PutawayPolicyReadModel::product_default().expectation();
+    Ok(create_license_plate_putaway_task_with_policy_in_scope(
+        db,
+        access,
+        command,
+        license_plate_id,
+        destination_location_id,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
+        &expected,
+    )
+    .await?
+    .task_id)
 }
 
 async fn lock_target(
@@ -536,6 +604,14 @@ async fn lock_target(
                detail.source_location_id,
                detail.destination_location_id,
                detail.planned_balance_count,
+               detail.putaway_policy_source,
+               detail.putaway_policy_configuration_id,
+               detail.putaway_policy_configuration_revision,
+               detail.putaway_policy_scope_level,
+               detail.putaway_policy_scope_owner_id,
+               detail.putaway_policy_scope_facility_id,
+               detail.putaway_policy_definition,
+               detail.putaway_policy_hash,
                detail.closed_at
         FROM work_tasks task
         INNER JOIN license_plate_putaway_tasks detail
@@ -553,6 +629,7 @@ async fn lock_target(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::not_found("license plate putaway task"))?;
+    let putaway_policy = putaway_policy::frozen_policy(&row)?;
     let target = PutawayTarget {
         inventory_owner_id: row.try_get("inventory_owner_id")?,
         facility_id: row.try_get("facility_id")?,
@@ -560,6 +637,7 @@ async fn lock_target(
         source_location_id: row.try_get("source_location_id")?,
         destination_location_id: row.try_get("destination_location_id")?,
         planned_balance_count: row.try_get("planned_balance_count")?,
+        putaway_policy,
     };
     let dimensions = TaskDimensions {
         facility_id: Some(target.facility_id),
@@ -652,14 +730,15 @@ fn require_exact_snapshot(
     Ok(())
 }
 
-pub async fn confirm_license_plate_putaway_in_scope(
+pub async fn confirm_license_plate_putaway_with_policy_in_scope(
     db: &Db,
     access: &TenantAccess,
     command: &CommandContext,
     task_id: i64,
     scanned_license_plate_barcode: &str,
     scanned_destination_location_barcode: &str,
-) -> AppResult<LicensePlatePutawayConfirmation> {
+    expected_policy: &PutawayPolicyExpectation,
+) -> AppResult<ConfirmLicensePlatePutawayOutcome> {
     command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request(
@@ -678,6 +757,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
             task_id,
             scanned_license_plate_barcode,
             scanned_destination_location_barcode,
+            expected_policy,
         ),
     )?;
     let mut tx = db.begin().await?;
@@ -685,7 +765,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
 
     if let Some(result) = prepared
-        .replayed::<LicensePlatePutawayConfirmation>(&mut tx)
+        .replayed::<ConfirmLicensePlatePutawayOutcome>(&mut tx)
         .await?
     {
         require_replayed_task_visible_tx(&mut tx, access.tenant_id, task_id, &scope).await?;
@@ -694,6 +774,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
     }
 
     let target = lock_target(&mut tx, access, task_id, command.actor_id.get(), &scope).await?;
+    putaway_policy::require_expected_policy(&target.putaway_policy, expected_policy)?;
     let plate = lock_root_tree_tx(&mut tx, access.tenant_id, target.license_plate_id).await?;
     if plate.inventory_owner_id != target.inventory_owner_id
         || plate.facility_id != target.facility_id
@@ -729,15 +810,31 @@ pub async fn confirm_license_plate_putaway_in_scope(
         &plate.plate_ids,
     )
     .await?;
-    let positive_contents = positive_contents_at_source(&contents, target.source_location_id)?;
+    let positive_contents = positive_contents_at_source(
+        &contents,
+        target.source_location_id,
+        target.putaway_policy.allow_mixed_lots,
+    )?;
     let planned = planned_contents(&mut tx, access.tenant_id, task_id).await?;
     require_exact_snapshot(&target, &positive_contents, &planned)?;
-    ensure_destination_compatibility(
+    putaway_policy::validate_destination_tx(
         &mut tx,
         access.tenant_id,
-        target.inventory_owner_id,
+        InventoryOwnerId::new(target.inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        FacilityId::new(target.facility_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         target.destination_location_id,
-        &positive_contents,
+        &positive_contents
+            .iter()
+            .map(|content| PutawayContent {
+                item_id: content.item_id,
+                item_batch_id: content.item_batch_id,
+                uom: content.uom.clone(),
+                quantity: content.quantity,
+            })
+            .collect::<Vec<_>>(),
+        &target.putaway_policy,
     )
     .await?;
 
@@ -950,6 +1047,7 @@ pub async fn confirm_license_plate_putaway_in_scope(
         "source_location_id": target.source_location_id,
         "destination_location_id": target.destination_location_id,
         "moved_balance_count": target.planned_balance_count,
+        "putaway_policy": &target.putaway_policy,
     });
     outbox::enqueue(
         &mut tx,
@@ -964,14 +1062,40 @@ pub async fn confirm_license_plate_putaway_in_scope(
             ordering_key: &event_key,
             aggregate_sequence: 1,
             event_type: "inventory.license_plate_putaway.confirmed",
-            schema_version: 1,
+            schema_version: 2,
             payload: &payload,
             occurred_at: confirmed_at,
         },
     )
     .await?;
 
+    let outcome = ConfirmLicensePlatePutawayOutcome {
+        confirmation: result,
+        putaway_policy: target.putaway_policy,
+    };
     Ok(prepared
-        .commit_with_inventory_transaction(tx, result, Some(transaction_id))
+        .commit_with_inventory_transaction(tx, outcome, Some(transaction_id))
         .await?)
+}
+
+pub async fn confirm_license_plate_putaway_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    task_id: i64,
+    scanned_license_plate_barcode: &str,
+    scanned_destination_location_barcode: &str,
+) -> AppResult<LicensePlatePutawayConfirmation> {
+    let expected = PutawayPolicyReadModel::product_default().expectation();
+    Ok(confirm_license_plate_putaway_with_policy_in_scope(
+        db,
+        access,
+        command,
+        task_id,
+        scanned_license_plate_barcode,
+        scanned_destination_location_barcode,
+        &expected,
+    )
+    .await?
+    .confirmation)
 }

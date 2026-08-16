@@ -566,6 +566,8 @@ fn ambiguous_retry_keeps_the_request_and_changes_attempt_identity() {
                 PutawayCommand::ConfirmLoose {
                     task_id: 42,
                     destination_location_barcode: "A-01-02".into(),
+                    expected_policy: crate::workflow::PutawayPolicy::product_default()
+                        .expectation(),
                 },
             ),
         )
@@ -607,6 +609,8 @@ fn retryable_response_stays_unresolved_and_retries_the_exact_request() {
                 PutawayCommand::ConfirmLoose {
                     task_id: 42,
                     destination_location_barcode: "A-01-02".into(),
+                    expected_policy: crate::workflow::PutawayPolicy::product_default()
+                        .expectation(),
                 },
             ),
         )

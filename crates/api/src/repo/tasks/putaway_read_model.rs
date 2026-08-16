@@ -1,5 +1,7 @@
 //! Scope-bound supervisor views for putaway planning and execution.
 
+use std::collections::BTreeMap;
+
 use sqlx::Row;
 use wareboxes_application::putaway::{
     PutawayCandidatePage, PutawayCandidateQuery, PutawayCandidateReadModel, PutawayCandidateSort,
@@ -9,7 +11,7 @@ use wareboxes_application::putaway::{
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{FacilityId, InventoryOwnerId};
 
-use crate::db::{bind_tenant_context, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
 
@@ -198,11 +200,34 @@ pub async fn putaway_candidate_page(
         .fetch_all(&mut *tx)
         .await?;
     let has_more = rows.len() > usize::from(query.limit);
-    let items = rows
+    let mut items = rows
         .into_iter()
         .take(usize::from(query.limit))
         .map(map_candidate)
         .collect::<AppResult<Vec<_>>>()?;
+    let effective_at = now_iso();
+    let mut policies =
+        BTreeMap::<(i64, i64), wareboxes_application::putaway_policy::PutawayPolicyReadModel>::new(
+        );
+    for item in &mut items {
+        let key = (item.inventory_owner_id.get(), item.facility_id.get());
+        let policy = if let Some(policy) = policies.get(&key) {
+            policy.clone()
+        } else {
+            let policy = crate::repo::putaway_policy::resolve_putaway_policy_tx(
+                &mut tx,
+                access.tenant_id,
+                item.inventory_owner_id,
+                item.facility_id,
+                effective_at,
+                false,
+            )
+            .await?;
+            policies.insert(key, policy.clone());
+            policy
+        };
+        item.putaway_policy = policy;
+    }
     let next_cursor = has_more.then_some(PutawayCursor {
         offset: u64::try_from(offset)
             .map_err(|_| AppError::internal("putaway cursor is negative"))?
@@ -256,7 +281,29 @@ pub async fn putaway_work_page(
                  COALESCE(loose.planned_quantity,plate_summary.planned_quantity)
                    AS planned_quantity,
                  task.priority,task.instructions,task.assigned_user_id,
-                 task.lease_expires_at,task.due_at,task.created,task.completed_at
+                 task.lease_expires_at,task.due_at,task.created,task.completed_at,
+                 COALESCE(loose.putaway_policy_source,plate.putaway_policy_source)
+                   AS putaway_policy_source,
+                 COALESCE(loose.putaway_policy_configuration_id,
+                          plate.putaway_policy_configuration_id)
+                   AS putaway_policy_configuration_id,
+                 COALESCE(loose.putaway_policy_configuration_revision,
+                          plate.putaway_policy_configuration_revision)
+                   AS putaway_policy_configuration_revision,
+                 COALESCE(loose.putaway_policy_scope_level,
+                          plate.putaway_policy_scope_level)
+                   AS putaway_policy_scope_level,
+                 COALESCE(loose.putaway_policy_scope_owner_id,
+                          plate.putaway_policy_scope_owner_id)
+                   AS putaway_policy_scope_owner_id,
+                 COALESCE(loose.putaway_policy_scope_facility_id,
+                          plate.putaway_policy_scope_facility_id)
+                   AS putaway_policy_scope_facility_id,
+                 COALESCE(loose.putaway_policy_definition,
+                          plate.putaway_policy_definition)
+                   AS putaway_policy_definition,
+                 COALESCE(loose.putaway_policy_hash,plate.putaway_policy_hash)
+                   AS putaway_policy_hash
           FROM work_tasks task
           LEFT JOIN putaway_tasks loose ON loose.tenant_id=task.tenant_id
             AND loose.task_id=task.id
@@ -405,6 +452,8 @@ fn map_candidate(row: sqlx::postgres::PgRow) -> AppResult<PutawayCandidateReadMo
         serial: row.try_get("serial")?,
         available_quantity: row.try_get("available_quantity")?,
         received_at: row.try_get("received_at")?,
+        putaway_policy:
+            wareboxes_application::putaway_policy::PutawayPolicyReadModel::product_default(),
     })
 }
 
@@ -436,6 +485,7 @@ fn map_work(row: sqlx::postgres::PgRow) -> AppResult<PutawayWorkReadModel> {
         due_at: row.try_get("due_at")?,
         created_at: row.try_get("created")?,
         completed_at: row.try_get("completed_at")?,
+        putaway_policy: crate::repo::putaway_policy::frozen_policy(&row)?,
     })
 }
 
