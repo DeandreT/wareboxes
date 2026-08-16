@@ -171,6 +171,14 @@ pub fn router() -> Router<AppState> {
             get(work_orchestration::get_plan),
         )
         .route(
+            "/work-orchestration/plans/{plan_id}/dispatches",
+            post(work_orchestration::activate),
+        )
+        .route(
+            "/work-orchestration/dispatches/{dispatch_id}/cancellations",
+            post(work_orchestration::cancel),
+        )
+        .route(
             "/work-orchestration/workers",
             get(work_orchestration::list_workers),
         )

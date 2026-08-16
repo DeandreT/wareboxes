@@ -183,6 +183,7 @@ pub use yard::{
 };
 mod work_orchestration;
 pub use work_orchestration::{
+    activate_work_orchestration_dispatch, cancel_work_orchestration_dispatch,
     configure_work_orchestration_policy, generate_work_orchestration_plan,
     record_resource_capacity_signal, record_zone_congestion_signal, work_orchestration_plan,
     work_orchestration_plans, work_orchestration_policies, work_orchestration_signals,

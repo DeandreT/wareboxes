@@ -945,6 +945,8 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('work_orchestration_resource_signals','work_orchestration_resource_signals_tenant_isolation'),
                 ('work_orchestration_plans','work_orchestration_plans_tenant_isolation'),
                 ('work_orchestration_plan_items','work_orchestration_plan_items_tenant_isolation'),
+                ('work_orchestration_dispatches','work_orchestration_dispatches_tenant_isolation'),
+                ('work_orchestration_dispatch_items','work_orchestration_dispatch_items_tenant_isolation'),
                 (
                     'license_plate_putaway_tasks',
                     'license_plate_putaway_tasks_tenant_isolation'

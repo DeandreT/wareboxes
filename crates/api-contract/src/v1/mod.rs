@@ -483,16 +483,19 @@ pub use vendor_return::{
     VendorReturnPageResponse, VendorReturnReason, VendorReturnResponse, VendorReturnStatus,
 };
 pub use work_orchestration::{
+    ActivateWorkOrchestrationDispatchRequest, CancelWorkOrchestrationDispatchRequest,
     ConfigureWorkOrchestrationPolicyRequest, GenerateWorkOrchestrationPlanRequest,
     OrchestrationPlanMode, OrchestrationScoreEvidenceResponse, OrchestrationScoreResponse,
     OrchestrationSignalWorkspaceRequest, OrchestrationSignalWorkspaceResponse,
     OrchestrationWorkKind, RecordResourceCapacitySignalRequest, RecordZoneCongestionSignalRequest,
-    ResourceCapacitySignalResponse, WorkOrchestrationMode, WorkOrchestrationPlanItemResponse,
-    WorkOrchestrationPlanPage, WorkOrchestrationPlanPageRequest, WorkOrchestrationPlanResponse,
-    WorkOrchestrationPlanSummaryResponse, WorkOrchestrationPolicyPage,
-    WorkOrchestrationPolicyPageRequest, WorkOrchestrationPolicyResponse,
-    WorkOrchestrationWorkerOptionResponse, WorkOrchestrationWorkerPage,
-    WorkOrchestrationWorkerPageRequest, WorkResourceKind, ZoneCongestionSignalResponse,
+    ResourceCapacitySignalResponse, WorkOrchestrationDispatchCancellationReason,
+    WorkOrchestrationDispatchResponse, WorkOrchestrationDispatchStatus, WorkOrchestrationMode,
+    WorkOrchestrationPlanItemResponse, WorkOrchestrationPlanPage, WorkOrchestrationPlanPageRequest,
+    WorkOrchestrationPlanResponse, WorkOrchestrationPlanSummaryResponse,
+    WorkOrchestrationPolicyPage, WorkOrchestrationPolicyPageRequest,
+    WorkOrchestrationPolicyResponse, WorkOrchestrationWorkerOptionResponse,
+    WorkOrchestrationWorkerPage, WorkOrchestrationWorkerPageRequest, WorkResourceKind,
+    ZoneCongestionSignalResponse,
 };
 pub use workforce_identity::{
     EmployeeIdentityChangeKind, EmployeeIdentityChangeResponse, LinkEmployeeIdentityRequest,

@@ -1,11 +1,12 @@
 use wareboxes_api_contract::v1::{
+    ActivateWorkOrchestrationDispatchRequest, CancelWorkOrchestrationDispatchRequest,
     ConfigureWorkOrchestrationPolicyRequest, GenerateWorkOrchestrationPlanRequest,
     OrchestrationSignalWorkspaceRequest, OrchestrationSignalWorkspaceResponse,
     RecordResourceCapacitySignalRequest, RecordZoneCongestionSignalRequest,
-    ResourceCapacitySignalResponse, WorkOrchestrationPlanPage, WorkOrchestrationPlanPageRequest,
-    WorkOrchestrationPlanResponse, WorkOrchestrationPolicyPage, WorkOrchestrationPolicyPageRequest,
-    WorkOrchestrationPolicyResponse, WorkOrchestrationWorkerPage,
-    WorkOrchestrationWorkerPageRequest, ZoneCongestionSignalResponse,
+    ResourceCapacitySignalResponse, WorkOrchestrationDispatchResponse, WorkOrchestrationPlanPage,
+    WorkOrchestrationPlanPageRequest, WorkOrchestrationPlanResponse, WorkOrchestrationPolicyPage,
+    WorkOrchestrationPolicyPageRequest, WorkOrchestrationPolicyResponse,
+    WorkOrchestrationWorkerPage, WorkOrchestrationWorkerPageRequest, ZoneCongestionSignalResponse,
 };
 
 use super::ApiError;
@@ -85,6 +86,57 @@ command!(
     ZoneCongestionSignalResponse,
     "/api/v1/work-orchestration/signals/congestion"
 );
+
+#[cfg(target_arch = "wasm32")]
+pub async fn activate_work_orchestration_dispatch(
+    plan_id: i64,
+    request: &ActivateWorkOrchestrationDispatchRequest,
+    idempotency_key: &str,
+) -> Result<WorkOrchestrationDispatchResponse, ApiError> {
+    super::browser::post(&dispatch_activation_path(plan_id), request, idempotency_key).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn activate_work_orchestration_dispatch(
+    _plan_id: i64,
+    _request: &ActivateWorkOrchestrationDispatchRequest,
+    _idempotency_key: &str,
+) -> Result<WorkOrchestrationDispatchResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn cancel_work_orchestration_dispatch(
+    dispatch_id: i64,
+    request: &CancelWorkOrchestrationDispatchRequest,
+    idempotency_key: &str,
+) -> Result<WorkOrchestrationDispatchResponse, ApiError> {
+    super::browser::post(
+        &dispatch_cancellation_path(dispatch_id),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cancel_work_orchestration_dispatch(
+    _dispatch_id: i64,
+    _request: &CancelWorkOrchestrationDispatchRequest,
+    _idempotency_key: &str,
+) -> Result<WorkOrchestrationDispatchResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn dispatch_activation_path(plan_id: i64) -> String {
+    format!("/api/v1/work-orchestration/plans/{plan_id}/dispatches")
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn dispatch_cancellation_path(dispatch_id: i64) -> String {
+    format!("/api/v1/work-orchestration/dispatches/{dispatch_id}/cancellations")
+}
 command!(
     record_resource_capacity_signal,
     RecordResourceCapacitySignalRequest,
@@ -281,6 +333,18 @@ mod tests {
         assert_eq!(
             worker_page_path(&request),
             "/api/v1/work-orchestration/workers?facility_id=8&limit=60&inventory_owner_id=12&cursor=wow1.worker%2Fa%2Bb"
+        );
+    }
+
+    #[test]
+    fn dispatch_command_paths_are_bound_to_their_immutable_targets() {
+        assert_eq!(
+            dispatch_activation_path(41),
+            "/api/v1/work-orchestration/plans/41/dispatches"
+        );
+        assert_eq!(
+            dispatch_cancellation_path(73),
+            "/api/v1/work-orchestration/dispatches/73/cancellations"
         );
     }
 }

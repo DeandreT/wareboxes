@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     FacilityId, InventoryOwnerId, LocationId, OrchestrationPlanMode, OrchestrationScore,
     OrchestrationScoreEvidence, OrchestrationWorkKind, ResourceCapacitySignal, StorageZoneId,
-    TenantId, Timestamp, UserId, WorkOrchestrationPlanId, WorkOrchestrationPlanItemId,
+    TenantId, Timestamp, UserId, WorkOrchestrationDispatchCancellationReason,
+    WorkOrchestrationDispatchId, WorkOrchestrationDispatchRevision,
+    WorkOrchestrationDispatchStatus, WorkOrchestrationPlanId, WorkOrchestrationPlanItemId,
     WorkOrchestrationPolicyDefinition, WorkOrchestrationPolicyId, WorkOrchestrationPolicyRevision,
     WorkOrchestrationSignalId, WorkResourceKind, ZoneCongestionSignal,
 };
@@ -24,6 +26,10 @@ pub const RECORD_RESOURCE_CAPACITY_OPERATION: &str =
     "optimization.work_orchestration.resource_signal.record.v1";
 pub const GENERATE_WORK_ORCHESTRATION_PLAN_OPERATION: &str =
     "optimization.work_orchestration.plan.generate.v1";
+pub const ACTIVATE_WORK_ORCHESTRATION_DISPATCH_OPERATION: &str =
+    "optimization.work_orchestration.dispatch.activate.v1";
+pub const CANCEL_WORK_ORCHESTRATION_DISPATCH_OPERATION: &str =
+    "optimization.work_orchestration.dispatch.cancel.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfigureWorkOrchestrationPolicyCommand {
@@ -57,6 +63,21 @@ pub struct GenerateWorkOrchestrationPlanCommand {
     pub generated_for_user_id: Option<UserId>,
     pub expected_policy_id: WorkOrchestrationPolicyId,
     pub expected_policy_revision: WorkOrchestrationPolicyRevision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ActivateWorkOrchestrationDispatchCommand {
+    pub tenant_id: TenantId,
+    pub plan_id: WorkOrchestrationPlanId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelWorkOrchestrationDispatchCommand {
+    pub tenant_id: TenantId,
+    pub dispatch_id: WorkOrchestrationDispatchId,
+    pub expected_revision: WorkOrchestrationDispatchRevision,
+    pub reason: WorkOrchestrationDispatchCancellationReason,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +138,30 @@ pub struct WorkOrchestrationPlanItemReadModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkOrchestrationDispatchReadModel {
+    pub dispatch_id: WorkOrchestrationDispatchId,
+    pub tenant_id: TenantId,
+    pub facility_id: FacilityId,
+    pub inventory_owner_id: Option<InventoryOwnerId>,
+    pub plan_id: WorkOrchestrationPlanId,
+    pub worker_user_id: UserId,
+    pub status: WorkOrchestrationDispatchStatus,
+    pub revision: WorkOrchestrationDispatchRevision,
+    pub current_sequence: Option<u16>,
+    pub current_work_task_id: Option<i64>,
+    pub current_work_kind: Option<OrchestrationWorkKind>,
+    pub completed_item_count: i64,
+    pub cancelled_item_count: i64,
+    pub remaining_item_count: i64,
+    pub activated_by: UserId,
+    pub activated_at: Timestamp,
+    pub ended_by: Option<UserId>,
+    pub ended_at: Option<Timestamp>,
+    pub cancellation_reason: Option<WorkOrchestrationDispatchCancellationReason>,
+    pub cancellation_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkOrchestrationPlanReadModel {
     pub plan_id: WorkOrchestrationPlanId,
     pub tenant_id: TenantId,
@@ -136,6 +181,7 @@ pub struct WorkOrchestrationPlanReadModel {
     pub item_count: i64,
     pub generated_by: UserId,
     pub generated_at: Timestamp,
+    pub dispatch: Option<WorkOrchestrationDispatchReadModel>,
     pub items: Vec<WorkOrchestrationPlanItemReadModel>,
 }
 
@@ -158,12 +204,15 @@ pub struct WorkOrchestrationPlanSummaryReadModel {
     pub item_count: i64,
     pub generated_by: UserId,
     pub generated_at: Timestamp,
+    pub dispatch: Option<WorkOrchestrationDispatchReadModel>,
 }
 
 pub type ConfigureWorkOrchestrationPolicyResult = WorkOrchestrationPolicyReadModel;
 pub type RecordZoneCongestionResult = ZoneCongestionSignalReadModel;
 pub type RecordResourceCapacityResult = ResourceCapacitySignalReadModel;
 pub type GenerateWorkOrchestrationPlanResult = WorkOrchestrationPlanReadModel;
+pub type ActivateWorkOrchestrationDispatchResult = WorkOrchestrationDispatchReadModel;
+pub type CancelWorkOrchestrationDispatchResult = WorkOrchestrationDispatchReadModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkOrchestrationPolicyCursor {

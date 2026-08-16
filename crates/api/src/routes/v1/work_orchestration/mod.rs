@@ -1,5 +1,8 @@
+mod dispatch;
 mod workers;
 
+use dispatch::map_dispatch;
+pub use dispatch::{activate, cancel};
 pub use workers::list_workers;
 
 use axum::extract::{Path, Query, State};
@@ -412,6 +415,7 @@ fn map_plan(value: WorkOrchestrationPlanReadModel) -> V1Result<WorkOrchestration
         item_count: value.item_count,
         generated_by: value.generated_by.get(),
         generated_at: value.generated_at.to_rfc3339(),
+        dispatch: value.dispatch.map(map_dispatch).transpose()?,
         items: value.items.into_iter().map(map_plan_item).collect(),
     })
 }
@@ -436,6 +440,7 @@ fn map_plan_summary(
         item_count: value.item_count,
         generated_by: value.generated_by.get(),
         generated_at: value.generated_at.to_rfc3339(),
+        dispatch: value.dispatch.map(map_dispatch).transpose()?,
     })
 }
 

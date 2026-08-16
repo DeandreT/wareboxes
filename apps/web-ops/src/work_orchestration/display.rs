@@ -2,8 +2,9 @@ use chrono::{DateTime, Utc};
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
     OrchestrationPlanMode, OrchestrationWorkKind, ResourceCapacitySignalResponse,
-    WorkOrchestrationMode, WorkOrchestrationPlanItemResponse, WorkOrchestrationPolicyResponse,
-    WorkResourceKind, ZoneCongestionSignalResponse,
+    WorkOrchestrationDispatchStatus, WorkOrchestrationMode, WorkOrchestrationPlanItemResponse,
+    WorkOrchestrationPlanResponse, WorkOrchestrationPolicyResponse, WorkResourceKind,
+    ZoneCongestionSignalResponse,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::models::Location;
@@ -269,7 +270,12 @@ pub(super) fn plan_panel(signals: Signals, access: StoredValue<AccessScopeWorksp
     }.into_any()
 }
 
-pub(super) fn plan_detail(signals: Signals, access: StoredValue<AccessScopeWorkspace>) -> AnyView {
+pub(super) fn plan_detail(
+    signals: Signals,
+    access: StoredValue<AccessScopeWorkspace>,
+    drafts: Drafts,
+    can_supervise: bool,
+) -> AnyView {
     let Some(plan) = signals.selected_plan.get() else {
         return view! { <section class="orchestration-detail-empty"><strong>"Select a plan to inspect its frozen decision evidence."</strong><span>"Plans are advisory snapshots; viewing one never claims or changes work."</span></section> }.into_any();
     };
@@ -284,10 +290,11 @@ pub(super) fn plan_detail(signals: Signals, access: StoredValue<AccessScopeWorks
                 <div><p class="eyebrow">"Frozen plan evidence"</p><h2>{format!("Plan #{}",plan.plan_id)}</h2><span>{format!("{} · current position {}",scope,plan.current_location_label)}</span></div>
                 <div class="orchestration-detail-summary"><span class=plan_mode_class(plan.plan_mode)>{plan_mode_label(plan.plan_mode)}</span><strong>{format!("{} tasks",plan.item_count)}</strong><small>{format!("{} eligible candidates",plan.candidate_count)}</small></div>
             </header>
+            {dispatch_controls(signals,drafts,plan.clone(),can_supervise)}
             {if fallback {
-                view!{<div class="orchestration-fallback-banner"><strong>"Manual FIFO fallback was intentional"</strong><span>{format!("Policy #{} revision {} had optimization disabled. Eligible tasks remain unclaimed and are ordered by their canonical FIFO sequence.",plan.policy_id,plan.policy_revision.get())}</span></div>}.into_any()
+                view!{<div class="orchestration-fallback-banner"><strong>"Manual FIFO fallback was intentional"</strong><span>{format!("Policy #{} revision {} had optimization disabled. Eligible tasks stay advisory until dispatch and are ordered by their canonical FIFO sequence.",plan.policy_id,plan.policy_revision.get())}</span></div>}.into_any()
             } else {
-                view!{<div class="orchestration-advisory-banner"><strong>"Optimized, not auto-assigned"</strong><span>"Scores explain the proposed sequence. Canonical tasks remain independently claimable through their owning workflows."</span></div>}.into_any()
+                view!{<div class="orchestration-advisory-banner"><strong>"Optimized with explicit dispatch"</strong><span>"Scores explain the proposed sequence. A supervisor may activate a worker-bound plan; execution still occurs through each task's owning workflow."</span></div>}.into_any()
             }}
             <div class="orchestration-plan-metadata">
                 <div><span>"Policy"</span><strong>{format!("#{} · rev {}",plan.policy_id,plan.policy_revision.get())}</strong></div>
@@ -300,6 +307,56 @@ pub(super) fn plan_detail(signals: Signals, access: StoredValue<AccessScopeWorks
                 {plan.items.into_iter().map(plan_item).collect_view()}
             </div>
         </section>
+    }.into_any()
+}
+
+fn dispatch_controls(
+    signals: Signals,
+    drafts: Drafts,
+    plan: WorkOrchestrationPlanResponse,
+    can_supervise: bool,
+) -> AnyView {
+    let Some(active) = plan.dispatch.clone() else {
+        let worker = plan.generated_for_user_id;
+        let can_activate = can_supervise && worker.is_some() && plan.item_count > 0;
+        let activation_plan = plan.clone();
+        return view! {
+            <div class="orchestration-dispatch-state advisory">
+                <div><span>"Dispatch"</span><strong>"Advisory only"</strong><small>{worker.map_or_else(||"Generate for a worker before activation.".to_owned(),|id|format!("Ready for worker #{id}."))}</small></div>
+                {can_activate.then(||view!{<button class="button primary-action compact" type="button" on:click=move |_| { signals.command_error.set(None); signals.dialog.set(Some(Dialog::Activate(Box::new(activation_plan.clone())))); }>"Activate dispatch"</button>})}
+            </div>
+        }.into_any();
+    };
+    let current = match (
+        active.current_sequence,
+        active.current_work_task_id,
+        active.current_work_kind,
+    ) {
+        (Some(sequence), Some(task_id), Some(kind)) => format!(
+            "Next {:02} · {} task #{}",
+            sequence,
+            work_kind_label(kind),
+            task_id
+        ),
+        _ => "No remaining reserved task".to_owned(),
+    };
+    let active_for_cancel = active.clone();
+    let status_label = match active.status {
+        WorkOrchestrationDispatchStatus::Active => "Active",
+        WorkOrchestrationDispatchStatus::Completed => "Completed",
+        WorkOrchestrationDispatchStatus::Cancelled => "Cancelled",
+    };
+    let cancel = move |_| {
+        drafts.reset_cancellation(signals);
+        signals
+            .dialog
+            .set(Some(Dialog::Cancel(active_for_cancel.clone())));
+    };
+    view! {
+        <div class="orchestration-dispatch-state" class:active=active.status==WorkOrchestrationDispatchStatus::Active>
+            <div><span>{format!("Dispatch #{} · rev {}",active.dispatch_id,active.revision.get())}</span><strong>{format!("{status_label} for worker #{}",active.worker_user_id)}</strong><small>{format!("{current} · {} completed · {} cancelled · {} remaining",active.completed_item_count,active.cancelled_item_count,active.remaining_item_count)}</small></div>
+            {(can_supervise && active.status==WorkOrchestrationDispatchStatus::Active).then(||view!{<button class="button danger-action compact" type="button" on:click=cancel>"Cancel dispatch"</button>})}
+        </div>
     }.into_any()
 }
 

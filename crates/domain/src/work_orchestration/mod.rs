@@ -40,6 +40,66 @@ pub enum OrchestrationPlanMode {
     ManualFifo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrchestrationDispatchStatus {
+    Active,
+    Completed,
+    Cancelled,
+}
+
+impl WorkOrchestrationDispatchStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "completed" => Some(Self::Completed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrchestrationDispatchCancellationReason {
+    OperatorCancelled,
+    WorkerUnavailable,
+    ScopeChanged,
+    PlanInvalidated,
+    Other,
+}
+
+impl WorkOrchestrationDispatchCancellationReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OperatorCancelled => "operator_cancelled",
+            Self::WorkerUnavailable => "worker_unavailable",
+            Self::ScopeChanged => "scope_changed",
+            Self::PlanInvalidated => "plan_invalidated",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "operator_cancelled" => Some(Self::OperatorCancelled),
+            "worker_unavailable" => Some(Self::WorkerUnavailable),
+            "scope_changed" => Some(Self::ScopeChanged),
+            "plan_invalidated" => Some(Self::PlanInvalidated),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
 impl OrchestrationPlanMode {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -181,6 +241,34 @@ impl WorkOrchestrationPolicyRevision {
             Some(value) => Some(Self(value)),
             None => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct WorkOrchestrationDispatchRevision(i64);
+
+impl WorkOrchestrationDispatchRevision {
+    pub const fn new(value: i64) -> Result<Self, WorkOrchestrationError> {
+        if value > 0 {
+            Ok(Self(value))
+        } else {
+            Err(WorkOrchestrationError::InvalidRevision(value))
+        }
+    }
+
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkOrchestrationDispatchRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        Self::new(i64::deserialize(deserializer)?).map_err(D::Error::custom)
     }
 }
 

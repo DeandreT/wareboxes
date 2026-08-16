@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_work_orchestration/dispatch.rs"]
+mod dispatch;
 #[path = "api_v1_work_orchestration/hardening.rs"]
 mod hardening;
 

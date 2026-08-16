@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use sqlx::Row;
 use wareboxes_application::work_orchestration::{
-    ResourceCapacitySignalReadModel, WorkOrchestrationPlanCursor,
-    WorkOrchestrationPlanItemReadModel, WorkOrchestrationPlanPage, WorkOrchestrationPlanPageQuery,
-    WorkOrchestrationPlanReadModel, WorkOrchestrationPlanSummaryReadModel,
-    WorkOrchestrationPolicyCursor, WorkOrchestrationPolicyPage, WorkOrchestrationPolicyPageQuery,
+    ResourceCapacitySignalReadModel, WorkOrchestrationDispatchReadModel,
+    WorkOrchestrationPlanCursor, WorkOrchestrationPlanItemReadModel, WorkOrchestrationPlanPage,
+    WorkOrchestrationPlanPageQuery, WorkOrchestrationPlanReadModel,
+    WorkOrchestrationPlanSummaryReadModel, WorkOrchestrationPolicyCursor,
+    WorkOrchestrationPolicyPage, WorkOrchestrationPolicyPageQuery,
     WorkOrchestrationPolicyReadModel, WorkOrchestrationSignalCursor, WorkOrchestrationSignalQuery,
     WorkOrchestrationSignalWorkspace, ZoneCongestionSignalReadModel,
 };
@@ -11,9 +14,11 @@ use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     FacilityId, InventoryOwnerId, LocationId, OrchestrationPlanMode, OrchestrationScore,
     OrchestrationScoreEvidence, OrchestrationWorkKind, ResourceCapacitySignal, StorageZoneId,
-    TenantId, UserId, WorkOrchestrationMode, WorkOrchestrationPlanId, WorkOrchestrationPlanItemId,
-    WorkOrchestrationPolicyDefinition, WorkOrchestrationPolicyId, WorkOrchestrationPolicyRevision,
-    WorkOrchestrationSignalId, WorkResourceKind, ZoneCongestionSignal,
+    TenantId, UserId, WorkOrchestrationDispatchCancellationReason, WorkOrchestrationDispatchId,
+    WorkOrchestrationDispatchRevision, WorkOrchestrationDispatchStatus, WorkOrchestrationMode,
+    WorkOrchestrationPlanId, WorkOrchestrationPlanItemId, WorkOrchestrationPolicyDefinition,
+    WorkOrchestrationPolicyId, WorkOrchestrationPolicyRevision, WorkOrchestrationSignalId,
+    WorkResourceKind, ZoneCongestionSignal,
 };
 
 use super::scope::{invalid_data, require_facility_scope, require_owner_scope};
@@ -39,6 +44,26 @@ fn parse_mode(value: &str) -> AppResult<WorkOrchestrationMode> {
 fn parse_plan_mode(value: &str) -> AppResult<OrchestrationPlanMode> {
     OrchestrationPlanMode::parse(value)
         .ok_or_else(|| AppError::internal(format!("invalid orchestration plan mode: {value}")))
+}
+
+fn parse_dispatch_status(value: &str) -> AppResult<WorkOrchestrationDispatchStatus> {
+    WorkOrchestrationDispatchStatus::parse(value).ok_or_else(|| {
+        AppError::internal(format!("invalid orchestration dispatch status: {value}"))
+    })
+}
+
+fn optional_cancellation_reason(
+    value: Option<String>,
+) -> AppResult<Option<WorkOrchestrationDispatchCancellationReason>> {
+    value
+        .map(|value| {
+            WorkOrchestrationDispatchCancellationReason::parse(&value).ok_or_else(|| {
+                AppError::internal(format!(
+                    "invalid orchestration cancellation reason: {value}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn parse_work_kind(value: &str) -> AppResult<OrchestrationWorkKind> {
@@ -187,6 +212,7 @@ fn plan_summary_from_row(
         item_count: row.try_get("item_count")?,
         generated_by: UserId::new(row.try_get("generated_by_user_id")?).map_err(invalid_data)?,
         generated_at: row.try_get("generated_at")?,
+        dispatch: None,
     })
 }
 
@@ -275,6 +301,130 @@ fn plan_item_from_row(
     })
 }
 
+fn dispatch_from_row(row: &sqlx::postgres::PgRow) -> AppResult<WorkOrchestrationDispatchReadModel> {
+    Ok(WorkOrchestrationDispatchReadModel {
+        dispatch_id: WorkOrchestrationDispatchId::new(row.try_get("id")?).map_err(invalid_data)?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?).map_err(invalid_data)?,
+        facility_id: FacilityId::new(row.try_get("facility_id")?).map_err(invalid_data)?,
+        inventory_owner_id: row
+            .try_get::<Option<i64>, _>("inventory_owner_id")?
+            .map(InventoryOwnerId::new)
+            .transpose()
+            .map_err(invalid_data)?,
+        plan_id: WorkOrchestrationPlanId::new(row.try_get("plan_id")?).map_err(invalid_data)?,
+        worker_user_id: UserId::new(row.try_get("worker_user_id")?).map_err(invalid_data)?,
+        status: parse_dispatch_status(&row.try_get::<String, _>("status")?)?,
+        revision: WorkOrchestrationDispatchRevision::new(row.try_get("revision")?)
+            .map_err(invalid_data)?,
+        current_sequence: row
+            .try_get::<Option<i64>, _>("current_sequence")?
+            .map(|value| i64_to_u16(value, "dispatch sequence"))
+            .transpose()?,
+        current_work_task_id: row.try_get("current_work_task_id")?,
+        current_work_kind: optional_work_kind(row.try_get("current_work_kind")?)?,
+        completed_item_count: row.try_get("completed_item_count")?,
+        cancelled_item_count: row.try_get("cancelled_item_count")?,
+        remaining_item_count: row.try_get("remaining_item_count")?,
+        activated_by: UserId::new(row.try_get("activated_by_user_id")?).map_err(invalid_data)?,
+        activated_at: row.try_get("activated_at")?,
+        ended_by: row
+            .try_get::<Option<i64>, _>("ended_by_user_id")?
+            .map(UserId::new)
+            .transpose()
+            .map_err(invalid_data)?,
+        ended_at: row.try_get("ended_at")?,
+        cancellation_reason: optional_cancellation_reason(row.try_get("cancellation_reason")?)?,
+        cancellation_note: row.try_get("cancellation_note")?,
+    })
+}
+
+pub(super) async fn dispatches_for_plans_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    plan_ids: &[i64],
+) -> AppResult<HashMap<i64, WorkOrchestrationDispatchReadModel>> {
+    if plan_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"SELECT dispatch.*,
+          current_item.sequence AS current_sequence,
+          current_item.work_task_id AS current_work_task_id,
+          current_item.work_kind AS current_work_kind,
+          counts.completed_item_count,counts.cancelled_item_count,counts.remaining_item_count
+        FROM work_orchestration_dispatches dispatch
+        LEFT JOIN LATERAL (
+          SELECT item.sequence,item.work_task_id,plan_item.work_kind
+          FROM work_orchestration_dispatch_items item
+          JOIN work_orchestration_plan_items plan_item
+            ON plan_item.tenant_id=item.tenant_id AND plan_item.id=item.plan_item_id
+          WHERE item.tenant_id=dispatch.tenant_id AND item.dispatch_id=dispatch.id
+            AND item.state='reserved' ORDER BY item.sequence LIMIT 1
+        ) current_item ON true
+        JOIN LATERAL (
+          SELECT count(*) FILTER (WHERE item.state='completed')::bigint
+              AS completed_item_count,
+            count(*) FILTER (WHERE item.state='cancelled')::bigint
+              AS cancelled_item_count,
+            count(*) FILTER (WHERE item.state='reserved')::bigint
+              AS remaining_item_count
+          FROM work_orchestration_dispatch_items item
+          WHERE item.tenant_id=dispatch.tenant_id AND item.dispatch_id=dispatch.id
+        ) counts ON true
+        WHERE dispatch.tenant_id=$1 AND dispatch.plan_id=ANY($2)"#,
+    )
+    .bind(tenant_id.get())
+    .bind(plan_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let dispatch = dispatch_from_row(row)?;
+            Ok((dispatch.plan_id.get(), dispatch))
+        })
+        .collect()
+}
+
+pub(super) async fn read_dispatch_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    dispatch_id: WorkOrchestrationDispatchId,
+) -> AppResult<WorkOrchestrationDispatchReadModel> {
+    let row = sqlx::query(
+        r#"SELECT dispatch.*,
+          current_item.sequence AS current_sequence,
+          current_item.work_task_id AS current_work_task_id,
+          current_item.work_kind AS current_work_kind,
+          counts.completed_item_count,counts.cancelled_item_count,counts.remaining_item_count
+        FROM work_orchestration_dispatches dispatch
+        LEFT JOIN LATERAL (
+          SELECT item.sequence,item.work_task_id,plan_item.work_kind
+          FROM work_orchestration_dispatch_items item
+          JOIN work_orchestration_plan_items plan_item
+            ON plan_item.tenant_id=item.tenant_id AND plan_item.id=item.plan_item_id
+          WHERE item.tenant_id=dispatch.tenant_id AND item.dispatch_id=dispatch.id
+            AND item.state='reserved' ORDER BY item.sequence LIMIT 1
+        ) current_item ON true
+        JOIN LATERAL (
+          SELECT count(*) FILTER (WHERE item.state='completed')::bigint
+              AS completed_item_count,
+            count(*) FILTER (WHERE item.state='cancelled')::bigint
+              AS cancelled_item_count,
+            count(*) FILTER (WHERE item.state='reserved')::bigint
+              AS remaining_item_count
+          FROM work_orchestration_dispatch_items item
+          WHERE item.tenant_id=dispatch.tenant_id AND item.dispatch_id=dispatch.id
+        ) counts ON true
+        WHERE dispatch.tenant_id=$1 AND dispatch.id=$2"#,
+    )
+    .bind(tenant_id.get())
+    .bind(dispatch_id.get())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("work orchestration dispatch"))?;
+    dispatch_from_row(&row)
+}
+
 pub(super) async fn read_plan_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
@@ -298,6 +448,9 @@ pub(super) async fn read_plan_tx(
         .iter()
         .map(plan_item_from_row)
         .collect::<AppResult<Vec<_>>>()?;
+    let dispatch = dispatches_for_plans_tx(tx, tenant_id, &[plan_id.get()])
+        .await?
+        .remove(&plan_id.get());
     Ok(WorkOrchestrationPlanReadModel {
         plan_id: summary.plan_id,
         tenant_id: summary.tenant_id,
@@ -317,6 +470,7 @@ pub(super) async fn read_plan_tx(
         item_count: summary.item_count,
         generated_by: summary.generated_by,
         generated_at: summary.generated_at,
+        dispatch,
         items,
     })
 }
@@ -527,11 +681,19 @@ pub async fn plan_page(
     .bind(i64::from(query.limit) + 1)
     .fetch_all(&mut *tx)
     .await?;
-    let items = rows
+    let mut items = rows
         .iter()
         .take(usize::from(query.limit))
         .map(plan_summary_from_row)
         .collect::<AppResult<Vec<_>>>()?;
+    let plan_ids = items
+        .iter()
+        .map(|item| item.plan_id.get())
+        .collect::<Vec<_>>();
+    let mut dispatches = dispatches_for_plans_tx(&mut tx, access.tenant_id, &plan_ids).await?;
+    for item in &mut items {
+        item.dispatch = dispatches.remove(&item.plan_id.get());
+    }
     let next_cursor = if rows.len() > usize::from(query.limit) {
         items.last().map(|item| WorkOrchestrationPlanCursor {
             after_generated_at: item.generated_at,

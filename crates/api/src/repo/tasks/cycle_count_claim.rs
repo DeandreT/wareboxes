@@ -237,7 +237,7 @@ pub async fn claim_next_cycle_count_in_scope(
     .await?;
     release_inaccessible_active_tasks_tx(&mut tx, access.tenant_id, command.actor_id.get(), &scope)
         .await?;
-    if operator_has_active_task_tx(&mut tx, access, command.actor_id.get()).await? {
+    if operator_has_conflicting_active_task_tx(&mut tx, access, command.actor_id.get()).await? {
         return Err(AppError::conflict(
             "user already has active work; resume or release it first",
         ));
@@ -275,7 +275,8 @@ pub async fn claim_next_cycle_count_in_scope(
              AND plate.id = balance.license_plate_id
             WHERE task.tenant_id = $1
               AND task.task_type = 'cycle_count_item_location'
-              AND task.status = 'open'
+              AND ((task.status = 'assigned' AND task.assigned_user_id = $3)
+                OR (task.status = 'open' AND task.assigned_user_id IS NULL))
               AND task.deleted IS NULL
               AND (task.scheduled_for IS NULL OR task.scheduled_for <= $2)
               AND ($4 OR task.facility_id = ANY($5))
@@ -304,7 +305,8 @@ pub async fn claim_next_cycle_count_in_scope(
                       AND BTRIM(COALESCE(plate.barcode, '')) <> ''
                   )
               )
-            ORDER BY task.priority DESC, task.due_at ASC NULLS LAST,
+            ORDER BY CASE WHEN task.status='assigned' THEN 0 ELSE 1 END,
+                     task.priority DESC, task.due_at ASC NULLS LAST,
                      COALESCE(task.scheduled_for, task.created), task.created, task.id
             FOR UPDATE OF task SKIP LOCKED
             LIMIT 1
@@ -353,7 +355,7 @@ pub async fn claim_next_cycle_count_in_scope(
     Ok(prepared.commit(tx, claim).await?)
 }
 
-async fn operator_has_active_task_tx(
+async fn operator_has_conflicting_active_task_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
     actor_user_id: i64,
@@ -366,6 +368,7 @@ async fn operator_has_active_task_tx(
           AND assigned_user_id = $2
           AND status IN ('assigned', 'in_progress')
           AND deleted IS NULL
+          AND NOT (status='assigned' AND task_type='cycle_count_item_location')
         LIMIT 1
         "#,
     )
@@ -379,6 +382,7 @@ async fn operator_has_active_task_tx(
 async fn task_is_scannable_in_scope_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
+    actor_user_id: i64,
     task_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<()> {
@@ -452,8 +456,10 @@ async fn task_is_scannable_in_scope_tx(
     if !dimensions.is_allowed_by(scope) {
         return Err(AppError::not_found("cycle count task"));
     }
-    if row.try_get::<String, _>("status")? != "open"
-        || row.try_get::<Option<i64>, _>("assigned_user_id")?.is_some()
+    let status: String = row.try_get("status")?;
+    let assigned_user_id: Option<i64> = row.try_get("assigned_user_id")?;
+    if !((status == "open" && assigned_user_id.is_none())
+        || (status == "assigned" && assigned_user_id == Some(actor_user_id)))
         || !row.try_get::<bool, _>("scannable")?
     {
         return Err(AppError::conflict(
@@ -482,8 +488,8 @@ async fn claim_specific_tx(
         WHERE tenant_id = $3
           AND id = $4
           AND task_type = 'cycle_count_item_location'
-          AND status = 'open'
-          AND assigned_user_id IS NULL
+          AND ((status='assigned' AND assigned_user_id=$1)
+            OR (status='open' AND assigned_user_id IS NULL))
           AND deleted IS NULL
         "#,
     )
@@ -531,12 +537,22 @@ pub async fn claim_cycle_count_by_id_in_scope(
     .await?;
     release_inaccessible_active_tasks_tx(&mut tx, access.tenant_id, command.actor_id.get(), &scope)
         .await?;
-    if operator_has_active_task_tx(&mut tx, access, command.actor_id.get()).await? {
+    let conflicting_active: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM work_tasks
+        WHERE tenant_id=$1 AND assigned_user_id=$2 AND deleted IS NULL
+          AND status IN ('assigned','in_progress') AND id<>$3)"#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(command.actor_id.get())
+    .bind(task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if conflicting_active {
         return Err(AppError::conflict(
             "user already has active work; resume or release it first",
         ));
     }
-    task_is_scannable_in_scope_tx(&mut tx, access, task_id, &scope).await?;
+    task_is_scannable_in_scope_tx(&mut tx, access, command.actor_id.get(), task_id, &scope).await?;
     if !claim_specific_tx(&mut tx, access, command.actor_id.get(), task_id).await? {
         return Err(AppError::conflict(
             "cycle count task is not available for scanner execution",

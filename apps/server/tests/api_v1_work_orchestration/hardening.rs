@@ -150,18 +150,20 @@ async fn orchestration_scope_rls_grants_and_evidence_guards_fail_closed() {
     assert_eq!(guessed.status(), StatusCode::NOT_FOUND);
 
     let mut unbound = rig.fixture.db.begin().await.unwrap();
-    let unbound_counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+    let unbound_counts: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"SELECT
           (SELECT count(*) FROM work_orchestration_policies),
           (SELECT count(*) FROM work_orchestration_zone_signals),
           (SELECT count(*) FROM work_orchestration_resource_signals),
           (SELECT count(*) FROM work_orchestration_plans),
-          (SELECT count(*) FROM work_orchestration_plan_items)"#,
+          (SELECT count(*) FROM work_orchestration_plan_items),
+          (SELECT count(*) FROM work_orchestration_dispatches),
+          (SELECT count(*) FROM work_orchestration_dispatch_items)"#,
     )
     .fetch_one(&mut *unbound)
     .await
     .unwrap();
-    assert_eq!(unbound_counts, (0, 0, 0, 0, 0));
+    assert_eq!(unbound_counts, (0, 0, 0, 0, 0, 0, 0));
     unbound.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&rig.fixture.db, rig.tenant_id).await;
@@ -190,18 +192,27 @@ async fn orchestration_scope_rls_grants_and_evidence_guards_fail_closed() {
           has_table_privilege('wareboxes_app','work_orchestration_resource_signals','DELETE'),
           has_table_privilege('wareboxes_app','work_orchestration_plans','UPDATE'),
           has_table_privilege('wareboxes_app','work_orchestration_plan_items','DELETE'),
+          has_table_privilege('wareboxes_app','work_orchestration_dispatches','UPDATE'),
+          has_table_privilege('wareboxes_app','work_orchestration_dispatches','DELETE'),
+          has_table_privilege('wareboxes_app','work_orchestration_dispatch_items','UPDATE'),
+          has_table_privilege('wareboxes_app','work_orchestration_dispatch_items','DELETE'),
           has_sequence_privilege('wareboxes_app','work_orchestration_policies_id_seq','USAGE'),
           has_sequence_privilege('wareboxes_app','work_orchestration_zone_signals_id_seq','USAGE'),
           has_sequence_privilege('wareboxes_app','work_orchestration_resource_signals_id_seq','USAGE'),
           has_sequence_privilege('wareboxes_app','work_orchestration_plans_id_seq','USAGE'),
-          has_sequence_privilege('wareboxes_app','work_orchestration_plan_items_id_seq','USAGE')]"#,
+          has_sequence_privilege('wareboxes_app','work_orchestration_plan_items_id_seq','USAGE'),
+          has_sequence_privilege('wareboxes_app','work_orchestration_dispatches_id_seq','USAGE'),
+          has_sequence_privilege('wareboxes_app','work_orchestration_dispatch_items_id_seq','USAGE')]"#,
     )
     .fetch_one(&admin)
     .await
     .unwrap();
     assert_eq!(
         grants,
-        vec![true, true, true, false, false, false, false, false, true, true, true, true, true]
+        vec![
+            true, true, true, false, false, false, false, false, true, false, true, false, true,
+            true, true, true, true, true, true
+        ]
     );
 
     let mut immutable = admin.begin().await.unwrap();

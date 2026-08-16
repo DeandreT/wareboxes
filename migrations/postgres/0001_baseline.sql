@@ -47017,6 +47017,7 @@ BEGIN
     OR NEW.resource_kind<>(CASE WHEN NEW.work_kind IN
       ('cycle_count_item_location','cycle_count_location')
       THEN 'inventory_control' ELSE 'material_handling' END)
+    OR (plan.generated_for_user_id IS NOT NULL AND NEW.work_kind='cycle_count_location')
     OR (plan.plan_mode='optimized' AND (
       NEW.priority_score<>LEAST(NEW.task_priority,1000)*10*priority_weight
       OR NEW.due_urgency_score<>NEW.due_urgency_basis_points*due_weight
@@ -49511,3 +49512,477 @@ EXECUTE FUNCTION public.require_wave_policy_consistency();
 REVOKE ALL ON FUNCTION public.validate_wave_policy_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_wave_policy_evidence_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_wave_policy_consistency() FROM PUBLIC;
+
+--
+-- Executable work-orchestration dispatches. Plans remain immutable evidence;
+-- dispatch items reserve their typed work without bypassing workflow claims.
+--
+
+CREATE TABLE public.work_orchestration_dispatches (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  inventory_owner_id bigint,
+  plan_id bigint NOT NULL,
+  worker_user_id bigint NOT NULL,
+  status text NOT NULL DEFAULT 'active',
+  revision bigint NOT NULL DEFAULT 1,
+  activated_by_user_id bigint NOT NULL,
+  activated_at timestamptz NOT NULL,
+  ended_by_user_id bigint,
+  ended_at timestamptz,
+  cancellation_reason text,
+  cancellation_note text,
+  UNIQUE (tenant_id,id),
+  UNIQUE (tenant_id,plan_id),
+  CHECK (status IN ('active','completed','cancelled')),
+  CHECK (revision>0),
+  CHECK (cancellation_reason IS NULL OR cancellation_reason IN (
+    'operator_cancelled','worker_unavailable','scope_changed','plan_invalidated','other')),
+  CHECK (cancellation_note IS NULL OR (
+    cancellation_note=btrim(cancellation_note) AND cancellation_note<>''
+    AND char_length(cancellation_note)<=500 AND cancellation_note!~'[[:cntrl:]]')),
+  CHECK ((status='active' AND revision=1 AND ended_by_user_id IS NULL
+      AND ended_at IS NULL AND cancellation_reason IS NULL AND cancellation_note IS NULL)
+    OR (status='completed' AND revision=2 AND ended_by_user_id IS NOT NULL
+      AND ended_at IS NOT NULL AND cancellation_reason IS NULL AND cancellation_note IS NULL)
+    OR (status='cancelled' AND revision=2 AND ended_by_user_id IS NOT NULL
+      AND ended_at IS NOT NULL AND cancellation_reason IS NOT NULL
+      AND (cancellation_reason<>'other' OR cancellation_note IS NOT NULL))),
+  FOREIGN KEY (tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY (tenant_id,plan_id)
+    REFERENCES public.work_orchestration_plans(tenant_id,id),
+  FOREIGN KEY (tenant_id,worker_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY (tenant_id,activated_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY (tenant_id,ended_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE UNIQUE INDEX work_orchestration_dispatches_active_worker_idx
+ON public.work_orchestration_dispatches(tenant_id,worker_user_id)
+WHERE status='active';
+CREATE INDEX work_orchestration_dispatches_scope_page_idx
+ON public.work_orchestration_dispatches(tenant_id,facility_id,inventory_owner_id,activated_at DESC,id DESC);
+
+CREATE TABLE public.work_orchestration_dispatch_items (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  dispatch_id bigint NOT NULL,
+  plan_item_id bigint NOT NULL,
+  sequence bigint NOT NULL,
+  work_task_id bigint NOT NULL,
+  state text NOT NULL DEFAULT 'reserved',
+  released_at timestamptz,
+  UNIQUE (tenant_id,id),
+  UNIQUE (tenant_id,dispatch_id,sequence),
+  UNIQUE (tenant_id,dispatch_id,plan_item_id),
+  CHECK (sequence BETWEEN 1 AND 500),
+  CHECK (state IN ('reserved','completed','cancelled')),
+  CHECK ((state='reserved' AND released_at IS NULL)
+    OR (state IN ('completed','cancelled') AND released_at IS NOT NULL)),
+  FOREIGN KEY (tenant_id,dispatch_id)
+    REFERENCES public.work_orchestration_dispatches(tenant_id,id),
+  FOREIGN KEY (tenant_id,plan_item_id)
+    REFERENCES public.work_orchestration_plan_items(tenant_id,id),
+  FOREIGN KEY (tenant_id,work_task_id)
+    REFERENCES public.work_tasks(tenant_id,id)
+);
+CREATE UNIQUE INDEX work_orchestration_dispatch_items_reserved_task_idx
+ON public.work_orchestration_dispatch_items(tenant_id,work_task_id)
+WHERE state='reserved';
+CREATE INDEX work_orchestration_dispatch_items_dispatch_idx
+ON public.work_orchestration_dispatch_items(tenant_id,dispatch_id,sequence);
+
+CREATE FUNCTION public.work_orchestration_dispatch_worker_eligible(
+  checked_tenant_id bigint,checked_user_id bigint,checked_facility_id bigint,
+  checked_owner_id bigint,checked_at timestamptz) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  SELECT EXISTS(
+    SELECT 1 FROM public.employees employee
+    JOIN public.employee_facilities assignment
+      ON assignment.tenant_id=employee.tenant_id AND assignment.employee_id=employee.id
+      AND assignment.facility_id=checked_facility_id AND assignment.deleted IS NULL
+    JOIN public.tenant_memberships membership
+      ON membership.tenant_id=employee.tenant_id AND membership.user_id=employee.user_id
+      AND membership.deleted IS NULL
+    WHERE employee.tenant_id=checked_tenant_id AND employee.user_id=checked_user_id
+      AND employee.deleted IS NULL AND employee.hired<=checked_at
+      AND (employee.terminated IS NULL OR employee.terminated>checked_at)
+      AND (membership.all_facilities OR EXISTS(
+        SELECT 1 FROM public.user_facilities facility_scope
+        WHERE facility_scope.tenant_id=membership.tenant_id
+          AND facility_scope.user_id=membership.user_id
+          AND facility_scope.facility_id=checked_facility_id
+          AND facility_scope.deleted IS NULL))
+      AND (checked_owner_id IS NULL OR membership.all_inventory_owners OR EXISTS(
+        SELECT 1 FROM public.user_inventory_owners owner_scope
+        WHERE owner_scope.tenant_id=membership.tenant_id
+          AND owner_scope.user_id=membership.user_id
+          AND owner_scope.inventory_owner_id=checked_owner_id
+          AND owner_scope.deleted IS NULL))
+      AND public.work_orchestration_user_has_permission(
+        checked_tenant_id,checked_user_id,'wms'))
+$$;
+
+CREATE FUNCTION public.validate_work_orchestration_dispatch_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE plan public.work_orchestration_plans%ROWTYPE;
+DECLARE plan_found boolean;
+BEGIN
+  SELECT * INTO plan FROM public.work_orchestration_plans candidate
+  WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id=NEW.plan_id;
+  plan_found:=FOUND;
+  PERFORM task.id FROM public.work_orchestration_plan_items item
+  JOIN public.work_tasks task ON task.tenant_id=item.tenant_id AND task.id=item.work_task_id
+  WHERE item.tenant_id=NEW.tenant_id AND item.plan_id=NEW.plan_id
+  ORDER BY task.id FOR UPDATE OF task;
+  IF NOT plan_found OR plan.facility_id<>NEW.facility_id
+    OR plan.requested_inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+    OR plan.generated_for_user_id IS DISTINCT FROM NEW.worker_user_id
+    OR plan.item_count<=0
+    OR NEW.activated_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.activated_by_user_id)
+    OR NOT public.work_orchestration_dispatch_worker_eligible(
+      NEW.tenant_id,NEW.worker_user_id,NEW.facility_id,NEW.inventory_owner_id,NEW.activated_at)
+    OR NEW.activated_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.activated_at>clock_timestamp()+INTERVAL '1 minute'
+    OR EXISTS(SELECT 1 FROM public.work_tasks task
+      WHERE task.tenant_id=NEW.tenant_id AND task.assigned_user_id=NEW.worker_user_id
+        AND task.deleted IS NULL AND task.status IN ('assigned','in_progress'))
+    OR EXISTS(SELECT 1 FROM public.pick_tasks task
+      WHERE task.tenant_id=NEW.tenant_id AND task.assigned_user_id=NEW.worker_user_id
+        AND task.status='in_progress')
+    OR EXISTS(SELECT 1 FROM public.work_orchestration_plan_items item
+      LEFT JOIN public.work_tasks task ON task.tenant_id=item.tenant_id
+        AND task.id=item.work_task_id
+      WHERE item.tenant_id=NEW.tenant_id AND item.plan_id=NEW.plan_id
+        AND (task.id IS NULL OR task.deleted IS NOT NULL OR task.status<>'open'
+          OR task.assigned_user_id IS NOT NULL)) THEN
+    RAISE EXCEPTION 'invalid or stale work orchestration dispatch'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_work_orchestration_dispatch_item_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NOT EXISTS(
+    SELECT 1 FROM public.work_orchestration_dispatches dispatch
+    JOIN public.work_orchestration_plan_items item
+      ON item.tenant_id=dispatch.tenant_id AND item.plan_id=dispatch.plan_id
+    JOIN public.work_tasks task
+      ON task.tenant_id=item.tenant_id AND task.id=item.work_task_id
+    WHERE dispatch.tenant_id=NEW.tenant_id AND dispatch.id=NEW.dispatch_id
+      AND dispatch.status='active' AND item.id=NEW.plan_item_id
+      AND item.sequence=NEW.sequence AND item.work_task_id=NEW.work_task_id
+      AND task.status='open' AND task.assigned_user_id IS NULL AND task.deleted IS NULL) THEN
+    RAISE EXCEPTION 'invalid work orchestration dispatch item' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_work_orchestration_dispatch_item_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.dispatch_id<>OLD.dispatch_id OR NEW.plan_item_id<>OLD.plan_item_id
+    OR NEW.sequence<>OLD.sequence OR NEW.work_task_id<>OLD.work_task_id
+    OR OLD.state<>'reserved' OR NEW.state NOT IN ('completed','cancelled')
+    OR NEW.released_at IS NULL OR pg_trigger_depth()<=1 THEN
+    RAISE EXCEPTION 'work orchestration dispatch items are immutable'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_work_orchestration_dispatch_items() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE expected_count bigint; actual_count bigint;
+BEGIN
+  SELECT plan.item_count INTO expected_count
+  FROM public.work_orchestration_dispatches dispatch
+  JOIN public.work_orchestration_plans plan
+    ON plan.tenant_id=dispatch.tenant_id AND plan.id=dispatch.plan_id
+  WHERE dispatch.tenant_id=NEW.tenant_id AND dispatch.id=NEW.id;
+  SELECT count(*) INTO actual_count FROM public.work_orchestration_dispatch_items item
+  WHERE item.tenant_id=NEW.tenant_id AND item.dispatch_id=NEW.id;
+  IF expected_count IS NULL OR expected_count<>actual_count THEN
+    RAISE EXCEPTION 'work orchestration dispatch item count does not reconcile'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.guard_work_orchestration_dispatch_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.facility_id<>OLD.facility_id
+    OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+    OR NEW.plan_id<>OLD.plan_id OR NEW.worker_user_id<>OLD.worker_user_id
+    OR NEW.activated_by_user_id<>OLD.activated_by_user_id
+    OR NEW.activated_at<>OLD.activated_at OR OLD.status<>'active'
+    OR NEW.revision<>OLD.revision+1
+    OR (pg_trigger_depth()<=1 AND NEW.ended_by_user_id IS DISTINCT FROM actor_id)
+    OR NEW.ended_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.ended_at>clock_timestamp()+INTERVAL '1 minute' THEN
+    RAISE EXCEPTION 'invalid work orchestration dispatch transition'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.status='completed' THEN
+    IF pg_trigger_depth()<=1 OR NEW.cancellation_reason IS NOT NULL
+      OR NEW.cancellation_note IS NOT NULL OR EXISTS(
+        SELECT 1 FROM public.work_orchestration_dispatch_items item
+        WHERE item.tenant_id=OLD.tenant_id AND item.dispatch_id=OLD.id
+          AND item.state='reserved') THEN
+      RAISE EXCEPTION 'dispatch cannot complete with reserved work'
+        USING ERRCODE='23514';
+    END IF;
+  ELSIF NEW.status='cancelled' THEN
+    IF NEW.cancellation_reason='scope_changed' AND pg_trigger_depth()>1 THEN
+      IF public.work_orchestration_dispatch_worker_eligible(
+        OLD.tenant_id,OLD.worker_user_id,OLD.facility_id,
+        OLD.inventory_owner_id,NEW.ended_at) THEN
+        RAISE EXCEPTION 'dispatch worker scope remains valid' USING ERRCODE='23514';
+      END IF;
+    ELSIF NEW.cancellation_reason='plan_invalidated' AND pg_trigger_depth()>1 THEN
+      IF NOT EXISTS(SELECT 1 FROM public.work_orchestration_dispatch_items item
+        WHERE item.tenant_id=OLD.tenant_id AND item.dispatch_id=OLD.id
+          AND item.state='cancelled') THEN
+        RAISE EXCEPTION 'dispatch plan remains executable' USING ERRCODE='23514';
+      END IF;
+    ELSIF NOT public.slotting_user_has_supervisor_permission(OLD.tenant_id,actor_id) THEN
+      RAISE EXCEPTION 'dispatch cancellation requires supervisor permission'
+        USING ERRCODE='23514';
+    END IF;
+    IF EXISTS(SELECT 1 FROM public.work_orchestration_dispatch_items item
+      JOIN public.work_tasks task ON task.tenant_id=item.tenant_id
+        AND task.id=item.work_task_id
+      WHERE item.tenant_id=OLD.tenant_id AND item.dispatch_id=OLD.id
+        AND item.state='reserved' AND task.status='in_progress') THEN
+      RAISE EXCEPTION 'release in-progress work before cancelling its dispatch'
+        USING ERRCODE='55000';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'invalid work orchestration dispatch status'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.enforce_work_orchestration_dispatch_claim() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE reserved_dispatch record; worker_dispatch record; expected_task_id bigint;
+BEGIN
+  IF NEW.deleted IS NOT NULL OR NEW.status NOT IN ('assigned','in_progress')
+    OR (NEW.status IS NOT DISTINCT FROM OLD.status
+      AND NEW.assigned_user_id IS NOT DISTINCT FROM OLD.assigned_user_id) THEN
+    RETURN NEW;
+  END IF;
+  SELECT dispatch.id,dispatch.worker_user_id INTO reserved_dispatch
+  FROM public.work_orchestration_dispatch_items item
+  JOIN public.work_orchestration_dispatches dispatch
+    ON dispatch.tenant_id=item.tenant_id AND dispatch.id=item.dispatch_id
+  WHERE item.tenant_id=NEW.tenant_id AND item.work_task_id=NEW.id
+    AND item.state='reserved' AND dispatch.status='active';
+  IF FOUND AND NEW.assigned_user_id IS DISTINCT FROM reserved_dispatch.worker_user_id THEN
+    RAISE EXCEPTION 'work task is reserved by an active orchestration dispatch'
+      USING ERRCODE='23514';
+  END IF;
+  SELECT dispatch.id INTO worker_dispatch
+  FROM public.work_orchestration_dispatches dispatch
+  WHERE dispatch.tenant_id=NEW.tenant_id AND dispatch.worker_user_id=NEW.assigned_user_id
+    AND dispatch.status='active';
+  IF FOUND THEN
+    SELECT item.work_task_id INTO expected_task_id
+    FROM public.work_orchestration_dispatch_items item
+    WHERE item.tenant_id=NEW.tenant_id AND item.dispatch_id=worker_dispatch.id
+      AND item.state='reserved' ORDER BY item.sequence LIMIT 1;
+    IF expected_task_id IS DISTINCT FROM NEW.id THEN
+      RAISE EXCEPTION 'claim the next task in the active orchestration dispatch'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.advance_work_orchestration_dispatch() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE dispatch public.work_orchestration_dispatches%ROWTYPE;
+DECLARE next_task record; actor_id bigint; transition_state text;
+BEGIN
+  IF NEW.status IS NOT DISTINCT FROM OLD.status AND NEW.deleted IS NOT DISTINCT FROM OLD.deleted THEN
+    RETURN NULL;
+  END IF;
+  SELECT target.* INTO dispatch
+  FROM public.work_orchestration_dispatch_items item
+  JOIN public.work_orchestration_dispatches target
+    ON target.tenant_id=item.tenant_id AND target.id=item.dispatch_id
+  WHERE item.tenant_id=NEW.tenant_id AND item.work_task_id=NEW.id
+    AND item.state='reserved' AND target.status='active' FOR UPDATE OF target;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  actor_id:=COALESCE(
+    NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint,
+    NEW.completed_by,OLD.assigned_user_id);
+  IF NOT public.work_orchestration_dispatch_worker_eligible(
+    dispatch.tenant_id,dispatch.worker_user_id,dispatch.facility_id,
+    dispatch.inventory_owner_id,transaction_timestamp()) THEN
+    UPDATE public.work_orchestration_dispatches SET status='cancelled',revision=revision+1,
+      ended_by_user_id=actor_id,ended_at=transaction_timestamp(),
+      cancellation_reason='scope_changed',cancellation_note=NULL
+    WHERE tenant_id=dispatch.tenant_id AND id=dispatch.id AND status='active';
+    RETURN NULL;
+  END IF;
+  IF NEW.deleted IS NOT NULL OR NEW.status IN ('completed','cancelled') THEN
+    transition_state:=CASE WHEN NEW.status='completed' THEN 'completed' ELSE 'cancelled' END;
+    UPDATE public.work_orchestration_dispatch_items
+    SET state=transition_state,released_at=transaction_timestamp()
+    WHERE tenant_id=dispatch.tenant_id AND dispatch_id=dispatch.id
+      AND work_task_id=NEW.id AND state='reserved';
+  END IF;
+  SELECT item.work_task_id,task.status,task.assigned_user_id INTO next_task
+  FROM public.work_orchestration_dispatch_items item
+  JOIN public.work_tasks task ON task.tenant_id=item.tenant_id AND task.id=item.work_task_id
+  WHERE item.tenant_id=dispatch.tenant_id AND item.dispatch_id=dispatch.id
+    AND item.state='reserved' ORDER BY item.sequence LIMIT 1;
+  IF NOT FOUND THEN
+    UPDATE public.work_orchestration_dispatches SET
+      status=CASE WHEN EXISTS(SELECT 1 FROM public.work_orchestration_dispatch_items item
+        WHERE item.tenant_id=dispatch.tenant_id AND item.dispatch_id=dispatch.id
+          AND item.state='cancelled') THEN 'cancelled' ELSE 'completed' END,
+      revision=revision+1,ended_by_user_id=actor_id,ended_at=transaction_timestamp(),
+      cancellation_reason=CASE WHEN EXISTS(
+        SELECT 1 FROM public.work_orchestration_dispatch_items item
+        WHERE item.tenant_id=dispatch.tenant_id AND item.dispatch_id=dispatch.id
+          AND item.state='cancelled') THEN 'plan_invalidated' ELSE NULL END
+    WHERE tenant_id=dispatch.tenant_id AND id=dispatch.id AND status='active';
+  ELSIF next_task.status='open' AND next_task.assigned_user_id IS NULL THEN
+    UPDATE public.work_tasks SET status='assigned',assigned_user_id=dispatch.worker_user_id,
+      modified=transaction_timestamp()
+    WHERE tenant_id=dispatch.tenant_id AND id=next_task.work_task_id
+      AND status='open' AND assigned_user_id IS NULL AND deleted IS NULL;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.close_work_orchestration_dispatch() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.status='cancelled' AND OLD.status='active' THEN
+    UPDATE public.work_orchestration_dispatch_items SET state='cancelled',released_at=NEW.ended_at
+    WHERE tenant_id=NEW.tenant_id AND dispatch_id=NEW.id AND state='reserved';
+    UPDATE public.work_tasks task SET status='open',assigned_user_id=NULL,modified=NEW.ended_at
+    FROM public.work_orchestration_dispatch_items item
+    WHERE item.tenant_id=NEW.tenant_id AND item.dispatch_id=NEW.id
+      AND item.work_task_id=task.id AND task.tenant_id=NEW.tenant_id
+      AND task.status='assigned' AND task.assigned_user_id=NEW.worker_user_id
+      AND task.deleted IS NULL;
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.emit_work_orchestration_dispatch_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE transition_name text; event_actor bigint; event_time timestamptz;
+DECLARE ordering_value text; event_key_value text; sequence_value bigint;
+BEGIN
+  IF TG_OP='INSERT' THEN
+    transition_name:='activated'; event_actor:=NEW.activated_by_user_id;
+    event_time:=NEW.activated_at;
+  ELSIF NEW.status IS DISTINCT FROM OLD.status THEN
+    transition_name:=NEW.status; event_actor:=NEW.ended_by_user_id; event_time:=NEW.ended_at;
+  ELSE RETURN NULL; END IF;
+  ordering_value:='work_orchestration_dispatch:'||NEW.id::text;
+  event_key_value:=ordering_value||':'||transition_name;
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'outbox-sequence:'||NEW.tenant_id::text||':'||ordering_value,0));
+  INSERT INTO public.outbox_event_keys(tenant_id,event_key,created)
+  VALUES (NEW.tenant_id,event_key_value,clock_timestamp());
+  INSERT INTO public.outbox_aggregate_sequences(tenant_id,ordering_key,last_sequence,updated)
+  VALUES (NEW.tenant_id,ordering_value,1,clock_timestamp())
+  ON CONFLICT (tenant_id,ordering_key) DO UPDATE
+  SET last_sequence=public.outbox_aggregate_sequences.last_sequence+1,
+      updated=clock_timestamp()
+  RETURNING last_sequence INTO sequence_value;
+  INSERT INTO public.outbox_events(
+    tenant_id,inventory_owner_id,facility_id,actor_user_id,created,event_key,
+    aggregate_type,aggregate_id,ordering_key,aggregate_sequence,event_type,
+    schema_version,payload,occurred_at,available_at)
+  VALUES (NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,event_actor,
+    clock_timestamp(),event_key_value,'work_orchestration_dispatch',NEW.id::text,
+    ordering_value,sequence_value,
+    'optimization.work_orchestration.dispatch.'||transition_name,1,
+    jsonb_build_object('dispatch_id',NEW.id,'plan_id',NEW.plan_id,
+      'worker_user_id',NEW.worker_user_id,'status',NEW.status,'revision',NEW.revision,
+      'facility_id',NEW.facility_id,'inventory_owner_id',NEW.inventory_owner_id,
+      'activated_at',NEW.activated_at,'ended_at',NEW.ended_at,
+      'cancellation_reason',NEW.cancellation_reason),event_time,clock_timestamp());
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER work_orchestration_dispatches_validate BEFORE INSERT
+ON public.work_orchestration_dispatches FOR EACH ROW
+EXECUTE FUNCTION public.validate_work_orchestration_dispatch_insert();
+CREATE TRIGGER work_orchestration_dispatches_guard BEFORE UPDATE OR DELETE
+ON public.work_orchestration_dispatches FOR EACH ROW
+EXECUTE FUNCTION public.guard_work_orchestration_dispatch_mutation();
+CREATE TRIGGER work_orchestration_dispatches_close AFTER UPDATE OF status
+ON public.work_orchestration_dispatches FOR EACH ROW
+EXECUTE FUNCTION public.close_work_orchestration_dispatch();
+CREATE TRIGGER work_orchestration_dispatches_emit AFTER INSERT OR UPDATE OF status
+ON public.work_orchestration_dispatches FOR EACH ROW
+EXECUTE FUNCTION public.emit_work_orchestration_dispatch_event();
+CREATE CONSTRAINT TRIGGER work_orchestration_dispatch_require_items
+AFTER INSERT ON public.work_orchestration_dispatches DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_work_orchestration_dispatch_items();
+CREATE TRIGGER work_orchestration_dispatch_items_validate BEFORE INSERT
+ON public.work_orchestration_dispatch_items FOR EACH ROW
+EXECUTE FUNCTION public.validate_work_orchestration_dispatch_item_insert();
+CREATE TRIGGER work_orchestration_dispatch_items_guard BEFORE UPDATE OR DELETE
+ON public.work_orchestration_dispatch_items FOR EACH ROW
+EXECUTE FUNCTION public.guard_work_orchestration_dispatch_item_mutation();
+CREATE TRIGGER work_tasks_enforce_orchestration_dispatch BEFORE UPDATE OF status,assigned_user_id
+ON public.work_tasks FOR EACH ROW
+EXECUTE FUNCTION public.enforce_work_orchestration_dispatch_claim();
+CREATE TRIGGER work_tasks_advance_orchestration_dispatch AFTER UPDATE OF status,deleted
+ON public.work_tasks FOR EACH ROW
+EXECUTE FUNCTION public.advance_work_orchestration_dispatch();
+
+ALTER TABLE public.work_orchestration_dispatches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_dispatches FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_dispatch_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_dispatch_items FORCE ROW LEVEL SECURITY;
+CREATE POLICY work_orchestration_dispatches_tenant_isolation
+ON public.work_orchestration_dispatches
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY work_orchestration_dispatch_items_tenant_isolation
+ON public.work_orchestration_dispatch_items
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT,UPDATE ON public.work_orchestration_dispatches TO wareboxes_app;
+GRANT SELECT,INSERT,UPDATE ON public.work_orchestration_dispatch_items TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.work_orchestration_dispatches_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.work_orchestration_dispatch_items_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.work_orchestration_dispatch_worker_eligible(
+  bigint,bigint,bigint,bigint,timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_work_orchestration_dispatch_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_work_orchestration_dispatch_item_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_work_orchestration_dispatch_item_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_work_orchestration_dispatch_items() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_work_orchestration_dispatch_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_work_orchestration_dispatch_claim() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.advance_work_orchestration_dispatch() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.close_work_orchestration_dispatch() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.emit_work_orchestration_dispatch_event() FROM PUBLIC;

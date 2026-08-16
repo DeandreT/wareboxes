@@ -1,10 +1,12 @@
 //! Tenant-scoped, explainable advisory planning over canonical work tasks.
 
+mod dispatch;
 mod events;
 mod query;
 mod scope;
 mod workers;
 
+pub use dispatch::{activate_dispatch, cancel_dispatch};
 use events::{enqueue_event_tx, OrchestrationEvent};
 pub use query::{plan_by_id, plan_page, policy_page, signal_workspace};
 use scope::{
@@ -554,6 +556,7 @@ async fn candidate_rows_tx(
           AND (task.scheduled_for IS NULL OR task.scheduled_for<=$4)
           AND task.task_type IN ('cycle_count_item_location','cycle_count_location','putaway',
             'license_plate_putaway','inventory_relocation','replenishment','cross_dock')
+          AND ($5::bigint IS NULL OR task.task_type<>'cycle_count_location')
           AND ($5::bigint IS NULL OR EXISTS(
             SELECT 1 FROM tenant_memberships membership
             WHERE membership.tenant_id=task.tenant_id AND membership.user_id=$5

@@ -2,9 +2,12 @@ use std::collections::BTreeMap;
 
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
+    ActivateWorkOrchestrationDispatchRequest, CancelWorkOrchestrationDispatchRequest,
     ConfigureWorkOrchestrationPolicyRequest, GenerateWorkOrchestrationPlanRequest,
     OrchestrationWorkKind, RecordResourceCapacitySignalRequest, RecordZoneCongestionSignalRequest,
-    WorkOrchestrationMode, WorkOrchestrationPolicyResponse, WorkResourceKind,
+    WorkOrchestrationDispatchCancellationReason, WorkOrchestrationDispatchResponse,
+    WorkOrchestrationMode, WorkOrchestrationPlanResponse, WorkOrchestrationPolicyResponse,
+    WorkResourceKind,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::Location;
@@ -37,6 +40,8 @@ pub(super) struct Drafts {
     current_location_id: RwSignal<Option<i64>>,
     previous_work_kind: RwSignal<Option<OrchestrationWorkKind>>,
     generated_for_user_id: RwSignal<Option<i64>>,
+    cancellation_reason: RwSignal<WorkOrchestrationDispatchCancellationReason>,
+    cancellation_note: RwSignal<String>,
 }
 
 impl Drafts {
@@ -64,6 +69,10 @@ impl Drafts {
             current_location_id: RwSignal::new(None),
             previous_work_kind: RwSignal::new(None),
             generated_for_user_id: RwSignal::new(None),
+            cancellation_reason: RwSignal::new(
+                WorkOrchestrationDispatchCancellationReason::OperatorCancelled,
+            ),
+            cancellation_note: RwSignal::new(String::new()),
         }
     }
 
@@ -167,6 +176,13 @@ impl Drafts {
         self.generated_for_user_id.set(None);
         clear_command_state(signals);
     }
+
+    pub(super) fn reset_cancellation(self, signals: Signals) {
+        self.cancellation_reason
+            .set(WorkOrchestrationDispatchCancellationReason::OperatorCancelled);
+        self.cancellation_note.set(String::new());
+        clear_command_state(signals);
+    }
 }
 
 pub(super) fn command_dialog(
@@ -189,6 +205,8 @@ pub(super) fn command_dialog(
         Dialog::Congestion => congestion_form(signals, drafts, locations),
         Dialog::Resource => resource_form(signals, drafts),
         Dialog::Generate(policy) => generate_form(signals, drafts, locations, policy),
+        Dialog::Activate(plan) => activate_form(signals, *plan),
+        Dialog::Cancel(dispatch) => cancel_form(signals, drafts, dispatch),
     };
     let title = match dialog {
         Dialog::Configure {
@@ -202,6 +220,8 @@ pub(super) fn command_dialog(
         Dialog::Congestion => "Record zone congestion",
         Dialog::Resource => "Record resource capacity",
         Dialog::Generate(_) => "Generate advisory plan",
+        Dialog::Activate(_) => "Activate worker dispatch",
+        Dialog::Cancel(_) => "Cancel worker dispatch",
     };
     view! {
         <div class="orchestration-dialog-backdrop" role="presentation">
@@ -464,6 +484,94 @@ fn generate_form(
     }.into_any()
 }
 
+fn activate_form(signals: Signals, plan: WorkOrchestrationPlanResponse) -> AnyView {
+    let plan_id = plan.plan_id;
+    let worker_user_id = plan.generated_for_user_id;
+    let item_count = plan.item_count;
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        dispatch(
+            signals,
+            PendingCommand::Activate {
+                plan_id,
+                request: ActivateWorkOrchestrationDispatchRequest::default(),
+                key: api::new_idempotency_key(),
+            },
+        );
+    };
+    view! {
+        <form on:submit=submit>
+            <div class="orchestration-plan-safety executable">
+                <strong>"This reserves executable work"</strong>
+                <span>{format!("The first of {item_count} tasks will be assigned to worker #{}. Later tasks remain reserved in this exact sequence and advance only through their owning workflows.",worker_user_id.unwrap_or_default())}</span>
+            </div>
+            {command_feedback(signals)}
+            <footer><button class="button secondary-action" type="button" disabled=move || signals.command_pending.get() on:click=move |_| signals.dialog.set(None)>"Keep advisory"</button><button class="button primary-action" type="submit" disabled=move || signals.command_pending.get()>{move || if signals.command_pending.get(){"Activating..."}else{"Activate dispatch"}}</button></footer>
+        </form>
+    }.into_any()
+}
+
+fn cancel_form(
+    signals: Signals,
+    drafts: Drafts,
+    active: WorkOrchestrationDispatchResponse,
+) -> AnyView {
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        let reason = drafts.cancellation_reason.get_untracked();
+        let note = drafts.cancellation_note.get_untracked();
+        if reason == WorkOrchestrationDispatchCancellationReason::Other && note.trim().is_empty() {
+            signals.command_error.set(Some(
+                "Enter a note for the other cancellation reason.".into(),
+            ));
+            return;
+        }
+        dispatch(
+            signals,
+            PendingCommand::Cancel {
+                dispatch_id: active.dispatch_id,
+                request: CancelWorkOrchestrationDispatchRequest {
+                    expected_revision: active.revision,
+                    reason,
+                    note: (!note.trim().is_empty()).then(|| note.trim().to_owned()),
+                },
+                key: api::new_idempotency_key(),
+            },
+        );
+    };
+    view! {
+        <form on:submit=submit>
+            <p class="orchestration-form-intro">"Cancellation releases assigned-but-unstarted work and all remaining reservations. In-progress work must be released through its typed workflow first."</p>
+            <div class="orchestration-form-grid">
+                <label><span>"Reason"</span><select prop:value=move || cancellation_reason_wire(drafts.cancellation_reason.get()) on:change=move |event| drafts.cancellation_reason.set(parse_cancellation_reason(&event_target_value(&event)))><option value="operator_cancelled">"Operator cancelled"</option><option value="worker_unavailable">"Worker unavailable"</option><option value="scope_changed">"Scope changed"</option><option value="plan_invalidated">"Plan invalidated"</option><option value="other">"Other"</option></select></label>
+                <label class="wide"><span>"Note"</span><textarea maxlength="500" prop:value=move || drafts.cancellation_note.get() on:input=move |event| drafts.cancellation_note.set(event_target_value(&event))></textarea></label>
+            </div>
+            {command_feedback(signals)}
+            <footer><button class="button secondary-action" type="button" disabled=move || signals.command_pending.get() on:click=move |_| signals.dialog.set(None)>"Keep active"</button><button class="button danger-action" type="submit" disabled=move || signals.command_pending.get()>{move || if signals.command_pending.get(){"Cancelling..."}else{"Cancel dispatch"}}</button></footer>
+        </form>
+    }.into_any()
+}
+
+fn cancellation_reason_wire(value: WorkOrchestrationDispatchCancellationReason) -> &'static str {
+    match value {
+        WorkOrchestrationDispatchCancellationReason::OperatorCancelled => "operator_cancelled",
+        WorkOrchestrationDispatchCancellationReason::WorkerUnavailable => "worker_unavailable",
+        WorkOrchestrationDispatchCancellationReason::ScopeChanged => "scope_changed",
+        WorkOrchestrationDispatchCancellationReason::PlanInvalidated => "plan_invalidated",
+        WorkOrchestrationDispatchCancellationReason::Other => "other",
+    }
+}
+
+fn parse_cancellation_reason(value: &str) -> WorkOrchestrationDispatchCancellationReason {
+    match value {
+        "worker_unavailable" => WorkOrchestrationDispatchCancellationReason::WorkerUnavailable,
+        "scope_changed" => WorkOrchestrationDispatchCancellationReason::ScopeChanged,
+        "plan_invalidated" => WorkOrchestrationDispatchCancellationReason::PlanInvalidated,
+        "other" => WorkOrchestrationDispatchCancellationReason::Other,
+        _ => WorkOrchestrationDispatchCancellationReason::OperatorCancelled,
+    }
+}
+
 fn command_feedback(signals: Signals) -> AnyView {
     let retry = move |_| {
         if let Some(command) = signals.retry.get_untracked() {
@@ -690,6 +798,18 @@ mod tests {
         );
         for kind in all_work_kinds() {
             assert_eq!(parse_work_kind(work_kind_value(kind)), Some(kind));
+        }
+        for reason in [
+            WorkOrchestrationDispatchCancellationReason::OperatorCancelled,
+            WorkOrchestrationDispatchCancellationReason::WorkerUnavailable,
+            WorkOrchestrationDispatchCancellationReason::ScopeChanged,
+            WorkOrchestrationDispatchCancellationReason::PlanInvalidated,
+            WorkOrchestrationDispatchCancellationReason::Other,
+        ] {
+            assert_eq!(
+                parse_cancellation_reason(cancellation_reason_wire(reason)),
+                reason
+            );
         }
     }
 

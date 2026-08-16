@@ -3,11 +3,13 @@ mod forms;
 
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
+    ActivateWorkOrchestrationDispatchRequest, CancelWorkOrchestrationDispatchRequest,
     ConfigureWorkOrchestrationPolicyRequest, GenerateWorkOrchestrationPlanRequest,
     OrchestrationPlanMode, OrchestrationSignalWorkspaceRequest,
     OrchestrationSignalWorkspaceResponse, RecordResourceCapacitySignalRequest,
-    RecordZoneCongestionSignalRequest, WorkOrchestrationPlanPage, WorkOrchestrationPlanPageRequest,
-    WorkOrchestrationPlanResponse, WorkOrchestrationPolicyPage, WorkOrchestrationPolicyPageRequest,
+    RecordZoneCongestionSignalRequest, WorkOrchestrationDispatchResponse,
+    WorkOrchestrationPlanPage, WorkOrchestrationPlanPageRequest, WorkOrchestrationPlanResponse,
+    WorkOrchestrationPolicyPage, WorkOrchestrationPolicyPageRequest,
     WorkOrchestrationPolicyResponse, WorkOrchestrationWorkerPage,
     WorkOrchestrationWorkerPageRequest,
 };
@@ -27,6 +29,8 @@ enum Dialog {
     Congestion,
     Resource,
     Generate(WorkOrchestrationPolicyResponse),
+    Activate(Box<WorkOrchestrationPlanResponse>),
+    Cancel(WorkOrchestrationDispatchResponse),
 }
 
 #[derive(Clone)]
@@ -35,6 +39,16 @@ enum PendingCommand {
     Congestion(RecordZoneCongestionSignalRequest, String),
     Resource(RecordResourceCapacitySignalRequest, String),
     Generate(GenerateWorkOrchestrationPlanRequest, String),
+    Activate {
+        plan_id: i64,
+        request: ActivateWorkOrchestrationDispatchRequest,
+        key: String,
+    },
+    Cancel {
+        dispatch_id: i64,
+        request: CancelWorkOrchestrationDispatchRequest,
+        key: String,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -254,7 +268,7 @@ pub(crate) fn WorkOrchestrationWorkspace(
             </section>
 
             {move || display::plan_panel(signals, access)}
-            {move || display::plan_detail(signals, access)}
+            {move || display::plan_detail(signals, access, drafts, can_supervise)}
 
             {move || signals.dialog.get().map(|dialog| {
                 forms::command_dialog(signals, drafts, access, locations, dialog)
@@ -506,6 +520,40 @@ fn dispatch(signals: Signals, command: PendingCommand) {
                     Err(error) => command_failed(signals, command, error),
                 }
             }
+            PendingCommand::Activate {
+                plan_id,
+                request,
+                key,
+            } => match api::activate_work_orchestration_dispatch(plan_id, &request, &key).await {
+                Ok(active) => {
+                    signals.dialog.set(None);
+                    signals.command_pending.set(false);
+                    signals.toasts.success(format!(
+                        "Dispatch #{} activated for worker #{}.",
+                        active.dispatch_id, active.worker_user_id
+                    ));
+                    load_plan_detail(signals, active.plan_id);
+                    load_plans(signals, None, false);
+                }
+                Err(error) => command_failed(signals, command, error),
+            },
+            PendingCommand::Cancel {
+                dispatch_id,
+                request,
+                key,
+            } => match api::cancel_work_orchestration_dispatch(dispatch_id, &request, &key).await {
+                Ok(cancelled) => {
+                    signals.dialog.set(None);
+                    signals.command_pending.set(false);
+                    signals.toasts.success(format!(
+                        "Dispatch #{} cancelled; unstarted work was released.",
+                        cancelled.dispatch_id
+                    ));
+                    load_plan_detail(signals, cancelled.plan_id);
+                    load_plans(signals, None, false);
+                }
+                Err(error) => command_failed(signals, command, error),
+            },
         }
     });
 }

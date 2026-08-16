@@ -480,6 +480,10 @@ positive_id!(
     WorkOrchestrationPlanItemId,
     "work orchestration plan item ID"
 );
+positive_id!(
+    WorkOrchestrationDispatchId,
+    "work orchestration dispatch ID"
+);
 positive_id!(InboundAsnId, "inbound ASN ID");
 positive_id!(InboundAsnLineId, "inbound ASN line ID");
 positive_id!(InboundAsnLoadPlanId, "inbound ASN load plan ID");

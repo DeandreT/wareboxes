@@ -25,6 +25,24 @@ pub enum OrchestrationPlanMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum WorkOrchestrationDispatchStatus {
+    Active,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOrchestrationDispatchCancellationReason {
+    OperatorCancelled,
+    WorkerUnavailable,
+    ScopeChanged,
+    PlanInvalidated,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OrchestrationWorkKind {
     CycleCountItemLocation,
     CycleCountLocation,
@@ -210,6 +228,19 @@ pub struct GenerateWorkOrchestrationPlanRequest {
     pub expected_policy_revision: Revision,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ActivateWorkOrchestrationDispatchRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelWorkOrchestrationDispatchRequest {
+    pub expected_revision: Revision,
+    pub reason: WorkOrchestrationDispatchCancellationReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrchestrationScoreEvidenceResponse {
@@ -272,6 +303,30 @@ pub struct WorkOrchestrationPlanItemResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WorkOrchestrationDispatchResponse {
+    pub dispatch_id: i64,
+    pub facility_id: i64,
+    pub inventory_owner_id: Option<i64>,
+    pub plan_id: i64,
+    pub worker_user_id: i64,
+    pub status: WorkOrchestrationDispatchStatus,
+    pub revision: Revision,
+    pub current_sequence: Option<u16>,
+    pub current_work_task_id: Option<i64>,
+    pub current_work_kind: Option<OrchestrationWorkKind>,
+    pub completed_item_count: i64,
+    pub cancelled_item_count: i64,
+    pub remaining_item_count: i64,
+    pub activated_by: i64,
+    pub activated_at: String,
+    pub ended_by: Option<i64>,
+    pub ended_at: Option<String>,
+    pub cancellation_reason: Option<WorkOrchestrationDispatchCancellationReason>,
+    pub cancellation_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkOrchestrationPlanResponse {
     pub plan_id: i64,
     pub facility_id: i64,
@@ -290,6 +345,7 @@ pub struct WorkOrchestrationPlanResponse {
     pub item_count: i64,
     pub generated_by: i64,
     pub generated_at: String,
+    pub dispatch: Option<WorkOrchestrationDispatchResponse>,
     pub items: Vec<WorkOrchestrationPlanItemResponse>,
 }
 
@@ -312,6 +368,7 @@ pub struct WorkOrchestrationPlanSummaryResponse {
     pub item_count: i64,
     pub generated_by: i64,
     pub generated_at: String,
+    pub dispatch: Option<WorkOrchestrationDispatchResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -374,5 +431,26 @@ mod tests {
         assert!(!signals.include_history);
         assert!(signals.zone_cursor.is_none());
         assert!(signals.resource_cursor.is_none());
+        assert!(
+            serde_json::from_value::<ActivateWorkOrchestrationDispatchRequest>(serde_json::json!(
+                {}
+            ))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ActivateWorkOrchestrationDispatchRequest>(
+                serde_json::json!({"unsafe_auto_claim":true})
+            )
+            .is_err()
+        );
+        let cancellation: CancelWorkOrchestrationDispatchRequest = serde_json::from_value(
+            serde_json::json!({"expected_revision":1,"reason":"worker_unavailable"}),
+        )
+        .unwrap();
+        assert_eq!(cancellation.expected_revision.get(), 1);
+        assert_eq!(
+            cancellation.reason,
+            WorkOrchestrationDispatchCancellationReason::WorkerUnavailable
+        );
     }
 }
