@@ -411,6 +411,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_cluster_members_tenant_isolation'
                 ),
                 (
+                    'pick_zone_claims',
+                    'pick_zone_claims_tenant_isolation'
+                ),
+                (
                     'pick_task_contents',
                     'pick_task_contents_tenant_isolation'
                 ),

@@ -9,6 +9,8 @@ mod common;
 mod decision_policy;
 #[path = "api_v1_picking/pallet_pick.rs"]
 mod pallet_pick;
+#[path = "api_v1_picking/zone_pick.rs"]
+mod zone_pick;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -1468,6 +1470,7 @@ async fn picking_ledgers_are_tenant_isolated_immutable_and_minimally_granted() {
         ("pick_clusters", true, false),
         ("pick_cluster_orders", false, false),
         ("pick_cluster_members", false, false),
+        ("pick_zone_claims", false, false),
     ] {
         let privileges: (bool, bool, bool, bool) = sqlx::query_as(
             r#"

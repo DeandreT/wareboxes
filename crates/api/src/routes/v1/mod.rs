@@ -40,6 +40,7 @@ pub(crate) mod packing;
 mod pick_clusters;
 mod pick_shortages;
 pub(crate) mod pick_waves;
+mod pick_zones;
 mod picking;
 mod purchase_orders;
 pub(crate) mod putaway;
@@ -915,6 +916,11 @@ pub fn router() -> Router<AppState> {
         .route(
             "/pick-clusters/{cluster_id}/cancellations",
             post(pick_clusters::cancel),
+        )
+        .route("/pick-zones/workspace", get(pick_zones::workspace))
+        .route(
+            "/pick-zones/{storage_zone_id}/claims/next",
+            post(pick_zones::claim_next),
         )
         .route("/picking-claims/{task_id}", post(picking::claim_by_id))
         .route(

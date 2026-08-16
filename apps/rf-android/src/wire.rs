@@ -5,8 +5,8 @@ use thiserror::Error;
 use wareboxes_api_contract::v1::{
     API_PREFIX, ClaimCycleCountByIdRequest, ClaimInventoryRelocationByIdRequest,
     ClaimNextCycleCountRequest, ClaimNextInventoryRelocationRequest, ClaimNextPickRequest,
-    ClaimNextPutawayRequest, ClaimPickByIdRequest, ClaimPutawayByIdRequest,
-    ConfigurationScope as ApiConfigurationScope, ConfirmCycleCountRequest,
+    ClaimNextPutawayRequest, ClaimNextZonePickRequest, ClaimPickByIdRequest,
+    ClaimPutawayByIdRequest, ConfigurationScope as ApiConfigurationScope, ConfirmCycleCountRequest,
     ConfirmExpectedReceiptRequest, ConfirmInventoryRelocationRequest,
     ConfirmLicensePlatePutawayRequest, ConfirmPickContentRequest, ConfirmPutawayRequest,
     ConfirmUnexpectedReceiptRequest, CycleCountClaimHeartbeatResponse,
@@ -481,6 +481,14 @@ pub fn build_durable_request(
                 serde_json::to_vec(
                     &wareboxes_api_contract::v1::ClaimNextClusterPickRequest::default(),
                 )?,
+                ResponseKind::PickOptionalClaim,
+            )
+        }
+        RfCommand::Picking(PickingCommand::ClaimZone { storage_zone_id }) => {
+            validate_task_id(*storage_zone_id)?;
+            (
+                format!("{API_PREFIX}/pick-zones/{storage_zone_id}/claims/next"),
+                serde_json::to_vec(&ClaimNextZonePickRequest::default())?,
                 ResponseKind::PickOptionalClaim,
             )
         }
@@ -1546,6 +1554,14 @@ fn map_cycle_count_claim(
     })
 }
 
+fn zone_evidence_is_present(execution: &wareboxes_api_contract::v1::PickExecutionResponse) -> bool {
+    execution.zone_claim_id.is_some()
+        || execution.storage_zone_id.is_some()
+        || execution.storage_zone_code.is_some()
+        || execution.storage_zone_revision.is_some()
+        || execution.storage_zone_travel_sequence.is_some()
+}
+
 fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponseError> {
     let content = response.content;
     let policy = response.pick_policy;
@@ -1635,6 +1651,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || response.execution.sequence.is_some()
                     || response.execution.task_count.is_some()
                     || response.execution.batch_total_quantity.is_some()
+                    || zone_evidence_is_present(&response.execution)
                     || content.uom.eq_ignore_ascii_case("case")
                 {
                     return Err(WireResponseError::InvalidClaim);
@@ -1648,6 +1665,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || response.execution.sequence.is_some()
                     || response.execution.task_count.is_some()
                     || response.execution.batch_total_quantity.is_some()
+                    || zone_evidence_is_present(&response.execution)
                     || !content.uom.eq_ignore_ascii_case("case")
                 {
                     return Err(WireResponseError::InvalidClaim);
@@ -1661,6 +1679,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || response.execution.sequence.is_some()
                     || response.execution.task_count.is_some()
                     || response.execution.batch_total_quantity.is_some()
+                    || zone_evidence_is_present(&response.execution)
                     || content.source_license_plate_id.is_none()
                     || content.source_license_plate_barcode.is_none()
                     || response
@@ -1685,6 +1704,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || execution.sequence.is_none_or(|value| value <= 0)
                     || execution.task_count.is_none_or(|value| value < 2)
                     || execution.batch_total_quantity.is_some()
+                    || zone_evidence_is_present(&execution)
                 {
                     return Err(WireResponseError::InvalidClaim);
                 }
@@ -1696,6 +1716,11 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     sequence: execution.sequence,
                     task_count: execution.task_count,
                     batch_total_quantity: None,
+                    zone_claim_id: None,
+                    storage_zone_id: None,
+                    storage_zone_code: None,
+                    storage_zone_revision: None,
+                    storage_zone_travel_sequence: None,
                 }
             }
             wareboxes_api_contract::v1::PickExecutionMethod::BatchCart => {
@@ -1714,6 +1739,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || execution
                         .batch_total_quantity
                         .is_none_or(|value| value <= 0)
+                    || zone_evidence_is_present(&execution)
                 {
                     return Err(WireResponseError::InvalidClaim);
                 }
@@ -1725,6 +1751,47 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     sequence: execution.sequence,
                     task_count: execution.task_count,
                     batch_total_quantity: execution.batch_total_quantity,
+                    zone_claim_id: None,
+                    storage_zone_id: None,
+                    storage_zone_code: None,
+                    storage_zone_revision: None,
+                    storage_zone_travel_sequence: None,
+                }
+            }
+            wareboxes_api_contract::v1::PickExecutionMethod::Zone => {
+                let execution = response.execution;
+                if execution.cluster_id.is_some()
+                    || execution.cart_barcode.is_some()
+                    || execution.slot_code.is_some()
+                    || execution.sequence.is_some()
+                    || execution.task_count.is_some()
+                    || execution.batch_total_quantity.is_some()
+                    || execution.zone_claim_id.is_none_or(|value| value <= 0)
+                    || execution.storage_zone_id.is_none_or(|value| value <= 0)
+                    || execution
+                        .storage_zone_code
+                        .as_ref()
+                        .is_none_or(|value| value.trim().is_empty())
+                    || execution
+                        .storage_zone_revision
+                        .is_none_or(|value| value <= 0)
+                    || execution.storage_zone_travel_sequence.is_none()
+                {
+                    return Err(WireResponseError::InvalidClaim);
+                }
+                crate::picking::PickExecutionEvidence {
+                    method: crate::picking::PickExecutionMethod::Zone,
+                    cluster_id: None,
+                    cart_barcode: None,
+                    slot_code: None,
+                    sequence: None,
+                    task_count: None,
+                    batch_total_quantity: None,
+                    zone_claim_id: execution.zone_claim_id,
+                    storage_zone_id: execution.storage_zone_id,
+                    storage_zone_code: execution.storage_zone_code,
+                    storage_zone_revision: execution.storage_zone_revision,
+                    storage_zone_travel_sequence: execution.storage_zone_travel_sequence,
                 }
             }
         },
@@ -2942,6 +3009,14 @@ mod tests {
         assert_eq!(body(&cluster), json!({}));
         assert_eq!(cluster.response_kind, ResponseKind::PickOptionalClaim);
 
+        let zone = build_durable_request(&pick_draft(PickingCommand::ClaimZone {
+            storage_zone_id: 17,
+        }))
+        .unwrap();
+        assert_eq!(zone.path, "/api/v1/pick-zones/17/claims/next");
+        assert_eq!(body(&zone), json!({}));
+        assert_eq!(zone.response_kind, ResponseKind::PickOptionalClaim);
+
         let confirmation = build_durable_request(&pick_draft(PickingCommand::Confirm {
             task_id: 71,
             content_id: 81,
@@ -3152,6 +3227,44 @@ mod tests {
                 ResponseKind::PickOptionalClaim,
                 200,
                 &serde_json::to_vec(&batch).unwrap(),
+            ),
+            Err(WireResponseError::InvalidClaim)
+        ));
+
+        let mut zone = response.clone();
+        zone["execution"] = json!({
+            "method": "zone",
+            "cluster_id": null,
+            "cart_barcode": null,
+            "slot_code": null,
+            "sequence": null,
+            "task_count": null,
+            "batch_total_quantity": null,
+            "zone_claim_id": 91,
+            "storage_zone_id": 17,
+            "storage_zone_code": "PICK-A",
+            "storage_zone_revision": 3,
+            "storage_zone_travel_sequence": 20
+        });
+        let CommandOutcome::PickClaimed(Some(zone_claim)) = decode_command_response(
+            ResponseKind::PickOptionalClaim,
+            200,
+            &serde_json::to_vec(&zone).unwrap(),
+        )
+        .unwrap() else {
+            panic!("expected zone claim");
+        };
+        assert_eq!(
+            zone_claim.execution.method,
+            crate::picking::PickExecutionMethod::Zone
+        );
+        assert_eq!(zone_claim.execution.storage_zone_id, Some(17));
+        zone["execution"]["storage_zone_revision"] = json!(0);
+        assert!(matches!(
+            decode_command_response(
+                ResponseKind::PickOptionalClaim,
+                200,
+                &serde_json::to_vec(&zone).unwrap(),
             ),
             Err(WireResponseError::InvalidClaim)
         ));

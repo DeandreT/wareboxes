@@ -465,6 +465,7 @@ positive_id!(PickCartId, "pick cart ID");
 positive_id!(PickCartSlotId, "pick cart slot ID");
 positive_id!(PickClusterId, "pick cluster ID");
 positive_id!(PickClusterMemberId, "pick cluster member ID");
+positive_id!(PickZoneClaimId, "pick zone claim ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");
 positive_id!(PickConfirmationId, "pick confirmation ID");

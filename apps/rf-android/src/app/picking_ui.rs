@@ -81,6 +81,29 @@ impl RfApp {
             self.emit_pick(effect);
         }
 
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("ZONE PICKING").small().strong());
+        ui.horizontal(|ui| {
+            ui.label("Zone");
+            ui.add(
+                egui::TextEdit::singleline(self.picking.zone_id_draft_mut())
+                    .hint_text("Scan pick zone ID"),
+            );
+        });
+        let zone_clicked = Self::full_width_button(
+            ui,
+            can_claim,
+            egui::Button::new(egui::RichText::new("Get next pick in zone").strong())
+                .fill(Self::primary_fill(can_claim)),
+            52.0,
+        )
+        .clicked();
+        if zone_clicked {
+            let (command_id, key) = Self::command_identity("pick-zone-claim");
+            let effect = self.picking.begin_zone_claim(command_id, key);
+            self.emit_pick(effect);
+        }
+
         if let Some(notice) = self.picking.notice() {
             ui.add_space(12.0);
             ui.colored_label(Self::warning(), notice);
@@ -154,6 +177,29 @@ impl RfApp {
                         ));
                     }
                 }
+            });
+        } else if claim.execution.method == PickExecutionMethod::Zone {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("ZONE PICK").small().strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(
+                        claim
+                            .execution
+                            .storage_zone_code
+                            .as_deref()
+                            .unwrap_or("Unknown zone"),
+                    );
+                    if let Some(zone_id) = claim.execution.storage_zone_id {
+                        ui.monospace(format!("Zone ID {zone_id}"));
+                    }
+                    if let (Some(revision), Some(sequence)) = (
+                        claim.execution.storage_zone_revision,
+                        claim.execution.storage_zone_travel_sequence,
+                    ) {
+                        ui.label(format!("Revision {revision} · route {sequence}"));
+                    }
+                });
+                ui.label("Complete or release this task before requesting the next zone stop.");
             });
         } else if claim.execution.method == PickExecutionMethod::Case {
             ui.group(|ui| {

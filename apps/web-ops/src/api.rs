@@ -138,6 +138,8 @@ pub use pick_cluster::{
     create_cart as create_pick_cart, plan as plan_pick_cluster,
     workspace as pick_cluster_workspace,
 };
+mod pick_zone;
+pub use pick_zone::workspace as pick_zone_workspace;
 mod putaway;
 pub use putaway::{create_license_plate_putaway, create_putaway, putaway_candidates, putaway_work};
 mod purchase_order;

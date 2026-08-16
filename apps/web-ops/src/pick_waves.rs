@@ -13,6 +13,7 @@ use wareboxes_core::models::{Location, Order, OrderStatus};
 
 use crate::api;
 use crate::pick_clusters::PickClustersWorkspace;
+use crate::pick_zones::PickZonesWorkspace;
 use crate::sorting::{SortDirection, SortableHeader};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
@@ -80,6 +81,7 @@ pub(crate) fn PickWavesWorkspace(
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let cluster_access = access.clone();
+    let zone_access = access.clone();
     let signals = Signals {
         page: RwSignal::new(initial_page),
         selected: RwSignal::new(None),
@@ -230,6 +232,7 @@ pub(crate) fn PickWavesWorkspace(
     });
 
     view! {
+        <PickZonesWorkspace access=zone_access on_unauthorized/>
         <PickClustersWorkspace access=cluster_access on_unauthorized/>
         <section class="pick-wave-page operations-page">
             <header class="page-heading pick-wave-heading">

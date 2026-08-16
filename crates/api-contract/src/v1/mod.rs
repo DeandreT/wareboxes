@@ -43,6 +43,7 @@ mod outbound_qa;
 mod packing;
 mod pick_cluster;
 mod pick_wave;
+mod pick_zone;
 mod picking;
 mod purchase_order;
 mod putaway;
@@ -364,6 +365,10 @@ pub use pick_wave::{
     PlanPickWaveOrderRequest, PlanPickWaveRequest, ReleasePickWaveRequest,
     ResolvePickWavePoliciesRequest, ResolvePickWavePolicyOrderRequest, WavePolicyExpectation,
     WavePolicyResponse, WavePolicySource, PRODUCT_DEFAULT_WAVE_POLICY_HASH,
+};
+pub use pick_zone::{
+    ClaimNextZonePickRequest, PickZoneQueueResponse, PickZoneWorkspaceRequest,
+    PickZoneWorkspaceResponse,
 };
 pub use picking::{
     AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,

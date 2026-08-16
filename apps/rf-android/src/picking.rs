@@ -5,8 +5,10 @@ use crate::workflow::{
     WorkflowEffect,
 };
 
+mod batch;
 mod shortage;
 
+use batch::{BatchScanEvidence, batch_evidence_matches_claim};
 pub use shortage::{
     PickControlledEvidence, PickShortageCommand, PickShortageDisposition, PickShortageDraft,
     PickShortageOutcome, PickShortageReason, PickShortageReportResult, PickShortageStatus,
@@ -70,6 +72,7 @@ pub enum PickExecutionMethod {
     Pallet,
     ClusterCart,
     BatchCart,
+    Zone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +84,11 @@ pub struct PickExecutionEvidence {
     pub sequence: Option<i64>,
     pub task_count: Option<i64>,
     pub batch_total_quantity: Option<i64>,
+    pub zone_claim_id: Option<i64>,
+    pub storage_zone_id: Option<i64>,
+    pub storage_zone_code: Option<String>,
+    pub storage_zone_revision: Option<i64>,
+    pub storage_zone_travel_sequence: Option<u32>,
 }
 
 impl PickExecutionEvidence {
@@ -93,6 +101,11 @@ impl PickExecutionEvidence {
             sequence: None,
             task_count: None,
             batch_total_quantity: None,
+            zone_claim_id: None,
+            storage_zone_id: None,
+            storage_zone_code: None,
+            storage_zone_revision: None,
+            storage_zone_travel_sequence: None,
         }
     }
 
@@ -105,6 +118,11 @@ impl PickExecutionEvidence {
             sequence: None,
             task_count: None,
             batch_total_quantity: None,
+            zone_claim_id: None,
+            storage_zone_id: None,
+            storage_zone_code: None,
+            storage_zone_revision: None,
+            storage_zone_travel_sequence: None,
         }
     }
 
@@ -117,6 +135,11 @@ impl PickExecutionEvidence {
             sequence: None,
             task_count: None,
             batch_total_quantity: None,
+            zone_claim_id: None,
+            storage_zone_id: None,
+            storage_zone_code: None,
+            storage_zone_revision: None,
+            storage_zone_travel_sequence: None,
         }
     }
 }
@@ -215,6 +238,9 @@ pub enum PickingCommand {
     ClaimCluster {
         cluster_id: i64,
     },
+    ClaimZone {
+        storage_zone_id: i64,
+    },
     ClaimById {
         task_id: i64,
     },
@@ -247,16 +273,6 @@ enum Lane {
 }
 
 #[derive(Debug, Clone)]
-struct BatchScanEvidence {
-    cluster_id: i64,
-    source_inventory_balance_id: i64,
-    item_batch_id: i64,
-    source_location_barcode: Option<String>,
-    item_barcode: Option<String>,
-    source_license_plate_barcode: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct PickingWorkflow {
     claim: Option<PickClaim>,
     lane: Lane,
@@ -269,6 +285,7 @@ pub struct PickingWorkflow {
     shortage: Option<PickShortageDraft>,
     scan_draft: String,
     cluster_id_draft: String,
+    zone_id_draft: String,
     error: Option<String>,
     notice: Option<String>,
     reconcile_reason: Option<String>,
@@ -289,6 +306,7 @@ impl Default for PickingWorkflow {
             shortage: None,
             scan_draft: String::new(),
             cluster_id_draft: String::new(),
+            zone_id_draft: String::new(),
             error: None,
             notice: None,
             reconcile_reason: None,
@@ -446,6 +464,10 @@ impl PickingWorkflow {
         &mut self.cluster_id_draft
     }
 
+    pub fn zone_id_draft_mut(&mut self) -> &mut String {
+        &mut self.zone_id_draft
+    }
+
     pub fn expected_scan(&self) -> Option<PickScanStage> {
         if self.activity() != Activity::Active {
             return None;
@@ -515,6 +537,25 @@ impl PickingWorkflow {
         };
         self.begin_idle(
             PickingCommand::ClaimCluster { cluster_id },
+            command_id,
+            idempotency_key,
+        )
+    }
+
+    pub fn begin_zone_claim(
+        &mut self,
+        command_id: String,
+        idempotency_key: String,
+    ) -> Option<WorkflowEffect> {
+        let storage_zone_id = match self.zone_id_draft.trim().parse::<i64>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                self.error = Some("Scan or enter a positive pick zone ID".into());
+                return None;
+            }
+        };
+        self.begin_idle(
+            PickingCommand::ClaimZone { storage_zone_id },
             command_id,
             idempotency_key,
         )
@@ -1084,47 +1125,6 @@ impl PickingWorkflow {
             self.source_license_plate_scan = evidence.source_license_plate_barcode.clone();
         }
     }
-
-    fn retain_batch_scan_evidence(&mut self) {
-        let Some(claim) = self.claim.as_ref() else {
-            return;
-        };
-        let Some(cluster_id) = claim
-            .execution
-            .cluster_id
-            .filter(|_| claim.execution.method == PickExecutionMethod::BatchCart)
-        else {
-            self.batch_scan_evidence = None;
-            return;
-        };
-        self.batch_scan_evidence = Some(BatchScanEvidence {
-            cluster_id,
-            source_inventory_balance_id: claim.content.source_inventory_balance_id,
-            item_batch_id: claim.content.item_batch_id,
-            source_location_barcode: self
-                .source_location_was_scanned
-                .then(|| self.source_location_scan.clone())
-                .flatten(),
-            item_barcode: self
-                .item_was_scanned
-                .then(|| self.item_scan.clone())
-                .flatten(),
-            source_license_plate_barcode: self.source_license_plate_scan.clone(),
-        });
-    }
-
-    fn batch_evidence_matches(&self, claim: &PickClaim) -> bool {
-        self.batch_scan_evidence
-            .as_ref()
-            .is_some_and(|evidence| batch_evidence_matches_claim(evidence, claim))
-    }
-}
-
-fn batch_evidence_matches_claim(evidence: &BatchScanEvidence, claim: &PickClaim) -> bool {
-    claim.execution.method == PickExecutionMethod::BatchCart
-        && claim.execution.cluster_id == Some(evidence.cluster_id)
-        && claim.content.source_inventory_balance_id == evidence.source_inventory_balance_id
-        && claim.content.item_batch_id == evidence.item_batch_id
 }
 
 fn outcome_matches(command: &RfCommand, outcome: &CommandOutcome) -> bool {
@@ -1134,6 +1134,13 @@ fn outcome_matches(command: &RfCommand, outcome: &CommandOutcome) -> bool {
             RfCommand::Picking(PickingCommand::ClaimCluster { .. }),
             CommandOutcome::PickClaimed(_),
         ) => true,
+        (
+            RfCommand::Picking(PickingCommand::ClaimZone { storage_zone_id }),
+            CommandOutcome::PickClaimed(claim),
+        ) => claim.as_ref().is_none_or(|claim| {
+            claim.execution.method == PickExecutionMethod::Zone
+                && claim.execution.storage_zone_id == Some(*storage_zone_id)
+        }),
         (
             RfCommand::Picking(PickingCommand::ClaimById { task_id }),
             CommandOutcome::PickClaimed(Some(claim)),

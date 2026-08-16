@@ -40,6 +40,7 @@ pub mod packing;
 pub mod packing_decision_policy;
 pub mod pick_cluster;
 pub mod pick_wave;
+pub mod pick_zone;
 pub mod picking;
 pub mod picking_decision_policy;
 pub mod purchase_order;

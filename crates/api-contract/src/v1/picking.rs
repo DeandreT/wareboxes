@@ -766,6 +766,11 @@ mod tests {
                 sequence: None,
                 task_count: None,
                 batch_total_quantity: None,
+                zone_claim_id: None,
+                storage_zone_id: None,
+                storage_zone_code: None,
+                storage_zone_revision: None,
+                storage_zone_travel_sequence: None,
             },
             pick_policy: PickDecisionPolicyResponse {
                 source: PickDecisionPolicySource::ProductDefault,

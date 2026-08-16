@@ -241,6 +241,7 @@ pub(crate) fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
                 PickExecutionMethod::Pallet => ApiPickExecutionMethod::Pallet,
                 PickExecutionMethod::ClusterCart => ApiPickExecutionMethod::ClusterCart,
                 PickExecutionMethod::BatchCart => ApiPickExecutionMethod::BatchCart,
+                PickExecutionMethod::Zone => ApiPickExecutionMethod::Zone,
             },
             cluster_id: claim.execution.cluster_id.map(|id| id.get()),
             cart_barcode: claim.execution.cart_barcode,
@@ -248,6 +249,14 @@ pub(crate) fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
             sequence: claim.execution.sequence,
             task_count: claim.execution.task_count,
             batch_total_quantity: claim.execution.batch_total_quantity,
+            zone_claim_id: claim.execution.zone_claim_id.map(|id| id.get()),
+            storage_zone_id: claim.execution.storage_zone_id.map(|id| id.get()),
+            storage_zone_code: claim.execution.storage_zone_code,
+            storage_zone_revision: claim.execution.storage_zone_revision,
+            storage_zone_travel_sequence: claim
+                .execution
+                .storage_zone_travel_sequence
+                .map(|sequence| sequence.get()),
         },
         pick_policy: map_pick_policy(claim.pick_policy),
         suggested_destination_license_plate_barcode: claim

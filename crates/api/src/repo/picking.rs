@@ -11,6 +11,7 @@ mod short_shipment;
 mod shortage;
 mod shortage_read_model;
 mod shortage_reallocation;
+mod zone;
 
 pub use claim::{claim_by_id, claim_next, current};
 pub use cluster::{
@@ -25,6 +26,7 @@ pub use short_shipment::accept_short_shipment;
 pub use shortage::report_shortage;
 pub use shortage_read_model::{get_shortage, list_shortages};
 pub use shortage_reallocation::reallocate_shortage;
+pub use zone::{claim_next as claim_next_zone, workspace as zone_workspace};
 
 const CLAIM_NEXT_OPERATION: &str = "picking.claim_next.v1";
 const CLAIM_BY_ID_OPERATION: &str = "picking.claim_by_id.v1";

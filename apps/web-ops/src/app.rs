@@ -292,6 +292,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/packing.css"/>
                 <link rel="stylesheet" href="/pick-waves.css"/>
                 <link rel="stylesheet" href="/pick-clusters/workspace.css"/>
+                <link rel="stylesheet" href="/pick-zones/workspace.css"/>
                 <link rel="stylesheet" href="/shipping.css"/>
                 <link rel="stylesheet" href="/outbound-loads.css"/>
                 <link rel="stylesheet" href="/yard.css"/>

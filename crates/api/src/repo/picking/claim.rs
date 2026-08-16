@@ -8,8 +8,8 @@ use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId,
     LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, PickClusterId, PickContentId,
-    PickContentState, PickExecutionMethod, PickQuantity, PickScanValue, PickTaskId, TenantId,
-    Timestamp,
+    PickContentState, PickExecutionMethod, PickQuantity, PickScanValue, PickTaskId,
+    PickZoneClaimId, StorageZoneId, StorageZoneTravelSequence, TenantId, Timestamp,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -68,6 +68,20 @@ pub async fn claim_next(
             WHERE member.tenant_id=pick_tasks.tenant_id
               AND member.task_id=pick_tasks.id
               AND cluster.status IN('planned','in_progress')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM pick_task_contents content
+            JOIN storage_zone_locations member
+              ON member.tenant_id=content.tenant_id
+             AND member.facility_id=content.facility_id
+             AND member.location_id=content.source_location_id
+            JOIN storage_zones zone
+              ON zone.tenant_id=member.tenant_id
+             AND zone.facility_id=member.facility_id
+             AND zone.id=member.storage_zone_id
+            WHERE content.tenant_id=pick_tasks.tenant_id
+              AND content.task_id=pick_tasks.id AND content.state='pending'
+              AND zone.purpose='pick' AND zone.effective_to IS NULL
           )
           AND ($2 OR facility_id = ANY($3))
           AND ($4 OR inventory_owner_id = ANY($5))
@@ -148,7 +162,21 @@ pub async fn claim_by_id(
                  WHERE member.tenant_id=pick_tasks.tenant_id
                    AND member.task_id=pick_tasks.id
                    AND cluster.status IN('planned','in_progress')
-               ) AS cluster_reserved
+               ) AS cluster_reserved,
+               EXISTS (
+                 SELECT 1 FROM pick_task_contents content
+                 JOIN storage_zone_locations member
+                   ON member.tenant_id=content.tenant_id
+                  AND member.facility_id=content.facility_id
+                  AND member.location_id=content.source_location_id
+                 JOIN storage_zones zone
+                   ON zone.tenant_id=member.tenant_id
+                  AND zone.facility_id=member.facility_id
+                  AND zone.id=member.storage_zone_id
+                 WHERE content.tenant_id=pick_tasks.tenant_id
+                   AND content.task_id=pick_tasks.id AND content.state='pending'
+                   AND zone.purpose='pick' AND zone.effective_to IS NULL
+               ) AS zone_reserved
         FROM pick_tasks
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE
@@ -181,6 +209,11 @@ pub async fn claim_by_id(
     if row.try_get::<bool, _>("cluster_reserved")? {
         return Err(AppError::conflict(
             "pick task is reserved for a cluster-cart route",
+        ));
+    }
+    if row.try_get::<bool, _>("zone_reserved")? {
+        return Err(AppError::conflict(
+            "pick task is assigned to a zone queue; claim it through the zone",
         ));
     }
     if active_task_for_user_tx(&mut tx, access.tenant_id, context.actor_id.get())
@@ -274,6 +307,10 @@ pub(super) async fn load_claim_tx(
                cluster.batch_total_quantity AS cluster_batch_total_quantity,
                cart.barcode AS cluster_cart_barcode,
                slot.code AS cluster_slot_code,member.sequence AS cluster_sequence,
+               zone_claim.id AS zone_claim_id,
+               zone_claim.storage_zone_id,zone_claim.storage_zone_code,
+               zone_claim.storage_zone_revision,
+               zone_claim.storage_zone_travel_sequence,
                ARRAY(
                    SELECT plate.barcode
                    FROM outbound_order_containers container
@@ -388,16 +425,29 @@ pub(super) async fn load_claim_tx(
          AND source_plate.inventory_owner_id = content.inventory_owner_id
          AND source_plate.facility_id = content.facility_id
          AND source_plate.id = content.source_license_plate_id
-        LEFT JOIN pick_cluster_members member
-          ON member.tenant_id=task.tenant_id AND member.task_id=task.id
+        LEFT JOIN LATERAL (
+          SELECT candidate.* FROM pick_cluster_members candidate
+          JOIN pick_clusters active_cluster
+            ON active_cluster.tenant_id=candidate.tenant_id
+           AND active_cluster.id=candidate.cluster_id
+           AND active_cluster.status='in_progress'
+          WHERE candidate.tenant_id=task.tenant_id AND candidate.task_id=task.id
+          ORDER BY candidate.id DESC LIMIT 1
+        ) member ON TRUE
         LEFT JOIN pick_clusters cluster
           ON cluster.tenant_id=member.tenant_id AND cluster.id=member.cluster_id
+         AND cluster.status='in_progress'
         LEFT JOIN pick_carts cart
           ON cart.tenant_id=cluster.tenant_id AND cart.facility_id=cluster.facility_id
          AND cart.id=cluster.cart_id
         LEFT JOIN pick_cart_slots slot
           ON slot.tenant_id=member.tenant_id AND slot.facility_id=member.facility_id
          AND slot.cart_id=member.cart_id AND slot.id=member.slot_id
+        LEFT JOIN pick_zone_claims zone_claim
+          ON zone_claim.tenant_id=task.tenant_id
+         AND zone_claim.task_id=task.id
+         AND zone_claim.claimed_by_user_id=task.assigned_user_id
+         AND zone_claim.claimed_at=task.claimed_at
         WHERE task.tenant_id = $1 AND task.id = $2
           AND task.status = 'in_progress' AND task.assigned_user_id = $3
           AND task.lease_expires_at > statement_timestamp()
@@ -439,6 +489,36 @@ pub(super) async fn load_claim_tx(
                 sequence: Some(row.try_get("cluster_sequence")?),
                 task_count: Some(row.try_get("cluster_task_count")?),
                 batch_total_quantity,
+                zone_claim_id: None,
+                storage_zone_id: None,
+                storage_zone_code: None,
+                storage_zone_revision: None,
+                storage_zone_travel_sequence: None,
+            }
+        }
+        None if row.try_get::<Option<i64>, _>("zone_claim_id")?.is_some() => {
+            PickExecutionEvidence {
+                method: PickExecutionMethod::Zone,
+                cluster_id: None,
+                cart_barcode: None,
+                slot_code: None,
+                sequence: None,
+                task_count: None,
+                batch_total_quantity: None,
+                zone_claim_id: Some(
+                    PickZoneClaimId::new(row.try_get("zone_claim_id")?)
+                        .map_err(|error| AppError::internal(error.to_string()))?,
+                ),
+                storage_zone_id: Some(
+                    StorageZoneId::new(row.try_get("storage_zone_id")?)
+                        .map_err(|error| AppError::internal(error.to_string()))?,
+                ),
+                storage_zone_code: Some(row.try_get("storage_zone_code")?),
+                storage_zone_revision: Some(row.try_get("storage_zone_revision")?),
+                storage_zone_travel_sequence: Some(StorageZoneTravelSequence::new(
+                    u32::try_from(row.try_get::<i64, _>("storage_zone_travel_sequence")?)
+                        .map_err(|_| AppError::internal("invalid zone travel sequence"))?,
+                )),
             }
         }
         None if row.try_get::<bool, _>("full_pallet_pick")? => PickExecutionEvidence::pallet(),
@@ -447,7 +527,8 @@ pub(super) async fn load_claim_tx(
             PickExecutionMethod::Discrete => PickExecutionEvidence::discrete(),
             PickExecutionMethod::Pallet
             | PickExecutionMethod::ClusterCart
-            | PickExecutionMethod::BatchCart => {
+            | PickExecutionMethod::BatchCart
+            | PickExecutionMethod::Zone => {
                 return Err(AppError::internal(
                     "unclustered pick resolved as grouped execution",
                 ));

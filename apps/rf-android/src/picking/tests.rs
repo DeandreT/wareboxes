@@ -87,6 +87,35 @@ fn cluster_claim_requires_a_positive_scanned_route_id() {
 }
 
 #[test]
+fn zone_claim_requires_a_positive_scanned_zone_id() {
+    let mut workflow = PickingWorkflow::default();
+    *workflow.zone_id_draft_mut() = "bad-zone".into();
+    assert!(
+        workflow
+            .begin_zone_claim("zone-command".into(), "zone-key".into())
+            .is_none()
+    );
+    assert_eq!(
+        workflow.error(),
+        Some("Scan or enter a positive pick zone ID")
+    );
+
+    *workflow.zone_id_draft_mut() = "17".into();
+    let WorkflowEffect::PersistCommand(draft) = workflow
+        .begin_zone_claim("zone-command".into(), "zone-key".into())
+        .unwrap()
+    else {
+        panic!("zone claim should persist before dispatch");
+    };
+    assert_eq!(
+        draft.command,
+        RfCommand::Picking(PickingCommand::ClaimZone {
+            storage_zone_id: 17
+        })
+    );
+}
+
+#[test]
 fn loose_pick_enforces_source_item_and_destination_plate_sequence() {
     let mut workflow = PickingWorkflow::default();
     activate(&mut workflow, claim(false));
@@ -220,6 +249,11 @@ fn batch_cart_reuses_only_verified_scans_for_the_same_frozen_balance() {
         sequence: Some(1),
         task_count: Some(2),
         batch_total_quantity: Some(7),
+        zone_claim_id: None,
+        storage_zone_id: None,
+        storage_zone_code: None,
+        storage_zone_revision: None,
+        storage_zone_travel_sequence: None,
     };
     let mut workflow = PickingWorkflow::default();
     activate(&mut workflow, first.clone());

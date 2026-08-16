@@ -1,0 +1,25 @@
+.pick-zone-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 14px;
+}
+
+.pick-zone-heading,
+.pick-zone-heading > div,
+.pick-zone-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pick-zone-heading > div:first-child { display: block; }
+.pick-zone-heading h2 { display: flex; align-items: center; gap: 7px; margin: 2px 0; }
+.pick-zone-heading p { margin: 0; color: var(--text-muted); }
+.pick-zone-toolbar { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.pick-zone-toolbar label { display: grid; gap: 4px; min-width: 190px; }
+.pick-zone-summary { justify-content: flex-start; flex-wrap: wrap; }
+.pick-zone-summary span { padding: 7px 10px; border-radius: 6px; background: var(--surface-subtle); }
+.pick-zone-summary strong { margin-right: 4px; }
+.pick-zone-table code { font-weight: 700; color: var(--text); }

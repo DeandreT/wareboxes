@@ -10,8 +10,8 @@ use wareboxes_domain::{
     PickReversalNote, PickReversalReason, PickScanValue, PickShortShipDetails, PickShortShipNote,
     PickShortShipReason, PickShortageDetails, PickShortageDispositionId, PickShortageId,
     PickShortageQuantities, PickShortageReallocationRunId, PickShortageResolution,
-    PickShortageRevision, PickShortageStatus, PickTaskId, ShortShipDemandQuantities, Timestamp,
-    UserId,
+    PickShortageRevision, PickShortageStatus, PickTaskId, PickZoneClaimId,
+    ShortShipDemandQuantities, StorageZoneId, StorageZoneTravelSequence, Timestamp, UserId,
 };
 
 use crate::order_allocation::AllocationPolicyReadModel;
@@ -92,6 +92,11 @@ pub struct PickExecutionEvidence {
     pub sequence: Option<i64>,
     pub task_count: Option<i64>,
     pub batch_total_quantity: Option<i64>,
+    pub zone_claim_id: Option<PickZoneClaimId>,
+    pub storage_zone_id: Option<StorageZoneId>,
+    pub storage_zone_code: Option<String>,
+    pub storage_zone_revision: Option<i64>,
+    pub storage_zone_travel_sequence: Option<StorageZoneTravelSequence>,
 }
 
 impl PickExecutionEvidence {
@@ -104,6 +109,11 @@ impl PickExecutionEvidence {
             sequence: None,
             task_count: None,
             batch_total_quantity: None,
+            zone_claim_id: None,
+            storage_zone_id: None,
+            storage_zone_code: None,
+            storage_zone_revision: None,
+            storage_zone_travel_sequence: None,
         }
     }
 
@@ -116,6 +126,11 @@ impl PickExecutionEvidence {
             sequence: None,
             task_count: None,
             batch_total_quantity: None,
+            zone_claim_id: None,
+            storage_zone_id: None,
+            storage_zone_code: None,
+            storage_zone_revision: None,
+            storage_zone_travel_sequence: None,
         }
     }
 
@@ -128,6 +143,11 @@ impl PickExecutionEvidence {
             sequence: None,
             task_count: None,
             batch_total_quantity: None,
+            zone_claim_id: None,
+            storage_zone_id: None,
+            storage_zone_code: None,
+            storage_zone_revision: None,
+            storage_zone_travel_sequence: None,
         }
     }
 }

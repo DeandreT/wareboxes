@@ -31,6 +31,7 @@ mod outbound_loads;
 mod packing;
 mod pick_clusters;
 mod pick_waves;
+mod pick_zones;
 mod preferences;
 mod purchase_orders;
 mod putaway;

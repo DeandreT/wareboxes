@@ -132,7 +132,7 @@ pub async fn confirm_content(
             "pick task does not match its order scope",
         ));
     }
-    let cluster_mode = active_cluster_mode_tx(&mut tx, access.tenant_id, command.task_id).await?;
+    let route_method = active_route_method_tx(&mut tx, access.tenant_id, command.task_id).await?;
     let destination_barcode =
         resolve_destination_barcode_tx(&mut tx, access.tenant_id, &target, &command).await?;
     lock_pick_license_plates_tx(
@@ -145,7 +145,7 @@ pub async fn confirm_content(
     )
     .await?;
     validate_scans_tx(&mut tx, access.tenant_id, &target, &command).await?;
-    let pallet_pick = if cluster_mode.is_some() {
+    let pallet_pick = if route_method.is_some() {
         None
     } else {
         lock_full_pallet_source_tx(
@@ -169,7 +169,7 @@ pub async fn confirm_content(
         }
     };
     let execution_method =
-        execution_method(cluster_mode.as_deref(), pallet_pick.is_some(), &target.uom)?;
+        execution_method(route_method.as_deref(), pallet_pick.is_some(), &target.uom)?;
     if pallet_pick.is_some() {
         move_full_pallet_header_tx(&mut tx, access.tenant_id, &target, destination_plate.id)
             .await?;
@@ -1093,32 +1093,52 @@ async fn enqueue_confirmation_event_tx(
     Ok(())
 }
 
-async fn active_cluster_mode_tx(
+async fn active_route_method_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     task_id: PickTaskId,
 ) -> AppResult<Option<String>> {
-    Ok(sqlx::query_scalar(
-        r#"SELECT cluster.mode FROM pick_cluster_members member
-        JOIN pick_clusters cluster ON cluster.tenant_id=member.tenant_id
-          AND cluster.id=member.cluster_id
-        WHERE member.tenant_id=$1 AND member.task_id=$2 AND cluster.status='in_progress'"#,
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        r#"
+        SELECT COALESCE(cluster.mode,
+          CASE WHEN zone_claim.id IS NOT NULL THEN 'zone' END)
+        FROM pick_tasks task
+        LEFT JOIN LATERAL (
+          SELECT candidate.* FROM pick_cluster_members candidate
+          JOIN pick_clusters active_cluster
+            ON active_cluster.tenant_id=candidate.tenant_id
+           AND active_cluster.id=candidate.cluster_id
+           AND active_cluster.status='in_progress'
+          WHERE candidate.tenant_id=task.tenant_id AND candidate.task_id=task.id
+          ORDER BY candidate.id DESC LIMIT 1
+        ) member ON TRUE
+        LEFT JOIN pick_clusters cluster
+          ON cluster.tenant_id=member.tenant_id AND cluster.id=member.cluster_id
+         AND cluster.status='in_progress'
+        LEFT JOIN pick_zone_claims zone_claim
+          ON zone_claim.tenant_id=task.tenant_id AND zone_claim.task_id=task.id
+         AND zone_claim.claimed_by_user_id=task.assigned_user_id
+         AND zone_claim.claimed_at=task.claimed_at
+        WHERE task.tenant_id=$1 AND task.id=$2 AND task.status='in_progress'
+        "#,
     )
     .bind(tenant_id.get())
     .bind(task_id.get())
     .fetch_optional(&mut **tx)
-    .await?)
+    .await?
+    .flatten())
 }
 
 fn execution_method(
-    cluster_mode: Option<&str>,
+    route_method: Option<&str>,
     pallet_pick: bool,
     uom: &str,
 ) -> AppResult<&'static str> {
-    if let Some(mode) = cluster_mode {
+    if let Some(mode) = route_method {
         return match mode {
             "cluster_cart" => Ok("cluster_cart"),
             "batch_cart" => Ok("batch_cart"),
+            "zone" => Ok("zone"),
             _ => Err(AppError::internal("invalid stored pick route mode")),
         };
     }
@@ -1130,7 +1150,8 @@ fn execution_method(
         PickExecutionMethod::Case => Ok("case"),
         PickExecutionMethod::Pallet
         | PickExecutionMethod::ClusterCart
-        | PickExecutionMethod::BatchCart => Err(AppError::internal(
+        | PickExecutionMethod::BatchCart
+        | PickExecutionMethod::Zone => Err(AppError::internal(
             "unclustered pick resolved as grouped execution",
         )),
     }

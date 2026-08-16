@@ -25,6 +25,7 @@ pub enum PickExecutionMethod {
     Pallet,
     ClusterCart,
     BatchCart,
+    Zone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +45,11 @@ pub struct PickExecutionResponse {
     pub sequence: Option<i64>,
     pub task_count: Option<i64>,
     pub batch_total_quantity: Option<i64>,
+    pub zone_claim_id: Option<i64>,
+    pub storage_zone_id: Option<i64>,
+    pub storage_zone_code: Option<String>,
+    pub storage_zone_revision: Option<i64>,
+    pub storage_zone_travel_sequence: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

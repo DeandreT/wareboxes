@@ -50762,6 +50762,45 @@ ON public.pick_cluster_members(tenant_id,cluster_id,sequence);
 CREATE INDEX pick_cluster_members_task_idx
 ON public.pick_cluster_members(tenant_id,task_id);
 
+-- Each zone-directed claim freezes the exact active pick-zone version and source
+-- evidence that admitted the task. A released task may be claimed again, but the
+-- prior attempt remains immutable for handoff and audit reconstruction.
+CREATE TABLE public.pick_zone_claims (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  task_id bigint NOT NULL,
+  claimed_by_user_id bigint NOT NULL,
+  claimed_at timestamptz NOT NULL,
+  storage_zone_id bigint NOT NULL,
+  storage_zone_code text NOT NULL,
+  storage_zone_revision bigint NOT NULL CHECK(storage_zone_revision>0),
+  storage_zone_travel_sequence bigint NOT NULL CHECK(storage_zone_travel_sequence>=0),
+  source_location_id bigint NOT NULL,
+  source_inventory_balance_id bigint NOT NULL,
+  CHECK(storage_zone_code=upper(btrim(storage_zone_code))
+    AND storage_zone_code<>'' AND char_length(storage_zone_code)<=32
+    AND storage_zone_code~'^[A-Z0-9_-]+$'),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+  UNIQUE(tenant_id,task_id,claimed_at),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,task_id)
+    REFERENCES public.pick_tasks(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY(tenant_id,claimed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,facility_id,storage_zone_id)
+    REFERENCES public.storage_zones(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,facility_id,source_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,source_inventory_balance_id)
+    REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id)
+);
+
+CREATE INDEX pick_zone_claims_task_history_idx
+ON public.pick_zone_claims(tenant_id,task_id,claimed_at DESC,id DESC);
+CREATE INDEX pick_zone_claims_zone_history_idx
+ON public.pick_zone_claims(tenant_id,storage_zone_id,claimed_at DESC,id DESC);
+
 CREATE FUNCTION public.guard_pick_cart_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -50839,6 +50878,149 @@ CREATE FUNCTION public.guard_pick_cluster_child_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   RAISE EXCEPTION 'pick cluster plan evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.guard_pick_zone_claim_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'pick zone claim evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.protect_active_pick_zone_claims() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF OLD.effective_to IS NULL AND NEW.effective_to IS NOT NULL AND EXISTS(
+    SELECT 1 FROM public.pick_zone_claims evidence
+    JOIN public.pick_tasks task ON task.tenant_id=evidence.tenant_id
+      AND task.id=evidence.task_id
+      AND task.assigned_user_id=evidence.claimed_by_user_id
+      AND task.claimed_at=evidence.claimed_at
+    WHERE evidence.tenant_id=OLD.tenant_id
+      AND evidence.storage_zone_id=OLD.id AND task.status='in_progress'
+      AND task.lease_expires_at>statement_timestamp()
+  ) THEN
+    RAISE EXCEPTION 'active zone picks must be completed or released before reconfiguration'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_pick_zone_claim() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE task_row public.pick_tasks%ROWTYPE;
+DECLARE zone_row public.storage_zones%ROWTYPE;
+DECLARE actor_id bigint;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  SELECT * INTO task_row FROM public.pick_tasks task
+  WHERE task.tenant_id=NEW.tenant_id
+    AND task.inventory_owner_id=NEW.inventory_owner_id
+    AND task.facility_id=NEW.facility_id AND task.id=NEW.task_id
+  FOR SHARE;
+  IF task_row.id IS NULL OR task_row.status<>'in_progress'
+    OR task_row.assigned_user_id IS DISTINCT FROM NEW.claimed_by_user_id
+    OR task_row.claimed_at IS DISTINCT FROM NEW.claimed_at
+    OR actor_id IS DISTINCT FROM NEW.claimed_by_user_id
+    OR NOT public.work_orchestration_user_has_permission(
+      NEW.tenant_id,NEW.claimed_by_user_id,'wms') THEN
+    RAISE EXCEPTION 'pick zone claim does not match active authorized work'
+      USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS(
+    SELECT 1 FROM public.tenant_memberships membership
+    WHERE membership.tenant_id=NEW.tenant_id
+      AND membership.user_id=NEW.claimed_by_user_id
+      AND membership.deleted IS NULL
+      AND (membership.all_facilities OR EXISTS(
+        SELECT 1 FROM public.user_facilities assignment
+        WHERE assignment.tenant_id=membership.tenant_id
+          AND assignment.user_id=membership.user_id
+          AND assignment.facility_id=NEW.facility_id
+          AND assignment.deleted IS NULL))
+      AND (membership.all_inventory_owners OR EXISTS(
+        SELECT 1 FROM public.user_inventory_owners assignment
+        WHERE assignment.tenant_id=membership.tenant_id
+          AND assignment.user_id=membership.user_id
+          AND assignment.inventory_owner_id=NEW.inventory_owner_id
+          AND assignment.deleted IS NULL))
+  ) THEN
+    RAISE EXCEPTION 'pick zone claim is outside operator scope' USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS(
+    SELECT 1 FROM public.inventory_owner_facilities assignment
+    JOIN public.inventory_owners owner ON owner.tenant_id=assignment.tenant_id
+      AND owner.id=assignment.inventory_owner_id AND owner.deleted IS NULL
+    JOIN public.facilities facility ON facility.tenant_id=assignment.tenant_id
+      AND facility.id=assignment.facility_id AND facility.deleted IS NULL
+    WHERE assignment.tenant_id=NEW.tenant_id
+      AND assignment.inventory_owner_id=NEW.inventory_owner_id
+      AND assignment.facility_id=NEW.facility_id AND assignment.deleted IS NULL
+  ) THEN
+    RAISE EXCEPTION 'pick zone claim requires an active owner-facility scope'
+      USING ERRCODE='23514';
+  END IF;
+  SELECT * INTO zone_row FROM public.storage_zones zone
+  WHERE zone.tenant_id=NEW.tenant_id AND zone.facility_id=NEW.facility_id
+    AND zone.id=NEW.storage_zone_id FOR SHARE;
+  IF zone_row.id IS NULL OR zone_row.purpose<>'pick'
+    OR zone_row.effective_to IS NOT NULL
+    OR zone_row.code IS DISTINCT FROM NEW.storage_zone_code
+    OR zone_row.revision IS DISTINCT FROM NEW.storage_zone_revision
+    OR zone_row.travel_sequence IS DISTINCT FROM NEW.storage_zone_travel_sequence
+    OR NOT EXISTS(
+      SELECT 1 FROM public.pick_task_contents content
+      WHERE content.tenant_id=NEW.tenant_id AND content.task_id=NEW.task_id
+        AND content.state='pending'
+        AND content.source_location_id=NEW.source_location_id
+        AND content.source_inventory_balance_id=NEW.source_inventory_balance_id)
+    OR NOT EXISTS(
+      SELECT 1 FROM public.storage_zone_locations member
+      WHERE member.tenant_id=NEW.tenant_id AND member.facility_id=NEW.facility_id
+        AND member.storage_zone_id=NEW.storage_zone_id
+        AND member.location_id=NEW.source_location_id)
+    OR EXISTS(
+      SELECT 1 FROM public.pick_cluster_members member
+      JOIN public.pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+        AND cluster.id=member.cluster_id
+      WHERE member.tenant_id=NEW.tenant_id AND member.task_id=NEW.task_id
+        AND cluster.status IN('planned','in_progress')) THEN
+    RAISE EXCEPTION 'pick zone claim evidence is stale or inapplicable'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_zone_route_on_pick_claim() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF OLD.status='open' AND NEW.status='in_progress'
+    AND NOT EXISTS(
+      SELECT 1 FROM public.pick_cluster_members member
+      JOIN public.pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+        AND cluster.id=member.cluster_id
+      WHERE member.tenant_id=NEW.tenant_id AND member.task_id=NEW.id
+        AND cluster.status IN('planned','in_progress'))
+    AND EXISTS(
+      SELECT 1 FROM public.pick_task_contents content
+      JOIN public.storage_zone_locations member
+        ON member.tenant_id=content.tenant_id
+        AND member.facility_id=content.facility_id
+        AND member.location_id=content.source_location_id
+      JOIN public.storage_zones zone ON zone.tenant_id=member.tenant_id
+        AND zone.facility_id=member.facility_id
+        AND zone.id=member.storage_zone_id
+      WHERE content.tenant_id=NEW.tenant_id AND content.task_id=NEW.id
+        AND content.state='pending' AND zone.purpose='pick'
+        AND zone.effective_to IS NULL)
+    AND NOT EXISTS(
+      SELECT 1 FROM public.pick_zone_claims evidence
+      WHERE evidence.tenant_id=NEW.tenant_id AND evidence.task_id=NEW.id
+        AND evidence.claimed_by_user_id=NEW.assigned_user_id
+        AND evidence.claimed_at=NEW.claimed_at) THEN
+    RAISE EXCEPTION 'zoned pick task must be claimed through its zone queue'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
 END $$;
 
 CREATE FUNCTION public.validate_pick_cluster_member() RETURNS trigger
@@ -51030,6 +51212,13 @@ CREATE TRIGGER pick_cluster_orders_guard BEFORE UPDATE OR DELETE ON public.pick_
 FOR EACH ROW EXECUTE FUNCTION public.guard_pick_cluster_child_mutation();
 CREATE TRIGGER pick_cluster_members_guard BEFORE UPDATE OR DELETE ON public.pick_cluster_members
 FOR EACH ROW EXECUTE FUNCTION public.guard_pick_cluster_child_mutation();
+CREATE TRIGGER pick_zone_claims_guard BEFORE UPDATE OR DELETE ON public.pick_zone_claims
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_zone_claim_mutation();
+CREATE TRIGGER pick_zone_claims_validate BEFORE INSERT ON public.pick_zone_claims
+FOR EACH ROW EXECUTE FUNCTION public.validate_pick_zone_claim();
+CREATE TRIGGER storage_zones_protect_active_pick_claims
+BEFORE UPDATE OF effective_to ON public.storage_zones
+FOR EACH ROW EXECUTE FUNCTION public.protect_active_pick_zone_claims();
 CREATE TRIGGER pick_cluster_members_validate BEFORE INSERT ON public.pick_cluster_members
 FOR EACH ROW EXECUTE FUNCTION public.validate_pick_cluster_member();
 CREATE CONSTRAINT TRIGGER pick_cluster_members_complete
@@ -51047,6 +51236,10 @@ FOR EACH ROW EXECUTE FUNCTION public.require_pick_cart_slot_set();
 CREATE TRIGGER pick_tasks_require_cluster_reservation
 BEFORE UPDATE OF status,assigned_user_id ON public.pick_tasks
 FOR EACH ROW EXECUTE FUNCTION public.require_cluster_reservation_on_pick_claim();
+CREATE CONSTRAINT TRIGGER pick_tasks_require_zone_route
+AFTER UPDATE OF status,assigned_user_id ON public.pick_tasks
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_zone_route_on_pick_claim();
 CREATE TRIGGER pick_tasks_reconcile_cluster AFTER UPDATE OF status ON public.pick_tasks
 FOR EACH ROW EXECUTE FUNCTION public.reconcile_pick_cluster_task();
 
@@ -51075,20 +51268,31 @@ ALTER TABLE public.pick_cluster_members FORCE ROW LEVEL SECURITY;
 CREATE POLICY pick_cluster_members_tenant_isolation ON public.pick_cluster_members
 USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
 WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.pick_zone_claims ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_zone_claims FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_zone_claims_tenant_isolation ON public.pick_zone_claims
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
 
 GRANT SELECT,INSERT,UPDATE ON public.pick_carts TO wareboxes_app;
 GRANT SELECT,INSERT ON public.pick_cart_slots TO wareboxes_app;
 GRANT SELECT,INSERT,UPDATE ON public.pick_clusters TO wareboxes_app;
 GRANT SELECT,INSERT ON public.pick_cluster_orders TO wareboxes_app;
 GRANT SELECT,INSERT ON public.pick_cluster_members TO wareboxes_app;
+GRANT SELECT,INSERT ON public.pick_zone_claims TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.pick_carts_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.pick_cart_slots_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.pick_clusters_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.pick_cluster_members_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_zone_claims_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.guard_pick_cart_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_pick_cart_slot_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_pick_cluster_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_pick_cluster_child_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_pick_zone_claim_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.protect_active_pick_zone_claims() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_pick_zone_claim() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_zone_route_on_pick_claim() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_pick_cluster_member() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_pick_cluster_complete_plan() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_pick_cart_slot_set() FROM PUBLIC;

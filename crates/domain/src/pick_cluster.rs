@@ -74,6 +74,7 @@ pub enum PickExecutionMethod {
     Pallet,
     ClusterCart,
     BatchCart,
+    Zone,
 }
 
 impl PickExecutionMethod {
