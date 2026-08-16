@@ -62,7 +62,8 @@ pub(super) async fn read_tx(
         tenant.status_changed_at,tenant.status_changed_by_user_id AS status_changed_by,
         tenant.status_reason,
         (SELECT COUNT(*) FROM tenant_memberships membership
-          WHERE membership.tenant_id=tenant.id AND membership.deleted IS NULL)
+          WHERE membership.tenant_id=tenant.id AND membership.deleted IS NULL
+            AND NOT membership.support_managed)
           AS active_member_count,
         (SELECT COUNT(*) FROM facilities facility
           WHERE facility.tenant_id=tenant.id AND facility.deleted IS NULL)

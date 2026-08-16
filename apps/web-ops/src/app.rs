@@ -8,7 +8,7 @@ use wareboxes_api_contract::v1::{
     CycleCountVariancePage, CycleCountWorkPage, InventoryBalanceResponse, InventoryHoldResponse,
     InventoryHoldStatus, OpaqueCursor, OutboundLoadQueuePage, PackingQueuePage, PickWavePage,
     PutawayCandidatePage, PutawayWorkPage, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-    ShippingQueuePage, TenantLifecyclePage,
+    ShippingQueuePage, SupportAccessPage, TenantLifecyclePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -42,6 +42,7 @@ use crate::service_accounts::ServiceAccountsWorkspace;
 use crate::shipping::ShippingWorkspace;
 use crate::slotting::SlottingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
+use crate::support_access::SupportAccessWorkspace;
 use crate::tenant_lifecycle::TenantLifecycleWorkspace;
 use crate::toast::ToastProvider;
 use crate::transfer_orders::TransferOrdersWorkspace;
@@ -79,6 +80,7 @@ pub enum WorkspaceBootstrapSection {
     WorkOrchestration,
     ServiceAccounts,
     TenantLifecycle,
+    SupportAccess,
     Access,
 }
 
@@ -100,6 +102,7 @@ pub struct WorkspaceBootstrapData {
     pub replenishment_policies: Option<ReplenishmentPolicyPage>,
     pub replenishment_queue: Option<ReplenishmentQueuePage>,
     pub tenant_lifecycle_page: Option<TenantLifecyclePage>,
+    pub support_access_page: Option<SupportAccessPage>,
     pub balances: Vec<InventoryBalanceResponse>,
     pub balance_next_cursor: Option<OpaqueCursor>,
     pub access: AccessScopeWorkspace,
@@ -143,6 +146,7 @@ struct WorkspaceData {
     replenishment_policies: Option<ReplenishmentPolicyPage>,
     replenishment_queue: Option<ReplenishmentQueuePage>,
     tenant_lifecycle_page: Option<TenantLifecyclePage>,
+    support_access_page: Option<SupportAccessPage>,
     balances: Vec<InventoryBalanceResponse>,
     balance_next_cursor: Option<OpaqueCursor>,
     holds: Vec<InventoryHoldResponse>,
@@ -172,6 +176,7 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             replenishment_policies: bootstrap.replenishment_policies,
             replenishment_queue: bootstrap.replenishment_queue,
             tenant_lifecycle_page: bootstrap.tenant_lifecycle_page,
+            support_access_page: bootstrap.support_access_page,
             balances: bootstrap.balances,
             balance_next_cursor: bootstrap.balance_next_cursor,
             access: bootstrap.access,
@@ -220,6 +225,7 @@ pub(crate) enum Section {
     WorkOrchestration,
     ServiceAccounts,
     TenantLifecycle,
+    SupportAccess,
     Access,
     Administration(AdministrationArea),
 }
@@ -243,6 +249,7 @@ impl Section {
             Self::WorkOrchestration => Some(WorkspaceBootstrapSection::WorkOrchestration),
             Self::ServiceAccounts => Some(WorkspaceBootstrapSection::ServiceAccounts),
             Self::TenantLifecycle => Some(WorkspaceBootstrapSection::TenantLifecycle),
+            Self::SupportAccess => Some(WorkspaceBootstrapSection::SupportAccess),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
         }
@@ -304,6 +311,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/work-orchestration/workspace.css"/>
                 <link rel="stylesheet" href="/service-accounts/workspace.css"/>
                 <link rel="stylesheet" href="/tenant-lifecycle/workspace.css"/>
+                <link rel="stylesheet" href="/support-access/workspace.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
                 <link rel="stylesheet" href="/cycle-count.css"/>
                 <link rel="stylesheet" href="/cross-dock.css"/>
@@ -375,6 +383,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("work-orchestration") view=WorkOrchestrationPage/>
                     <Route path=(StaticSegment("administration"), StaticSegment("service-accounts")) view=ServiceAccountsPage/>
                     <Route path=(StaticSegment("platform"), StaticSegment("tenants")) view=TenantLifecyclePage/>
+                    <Route path=(StaticSegment("platform"), StaticSegment("support-access")) view=SupportAccessPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
                     <Route
                         path=(StaticSegment("inventory"), StaticSegment("disposition"))
@@ -858,6 +867,28 @@ async fn load_workspace(
                 .await?,
             );
         }
+        Section::SupportAccess if session.is_platform_administrator => {
+            data.support_access_page = Some(
+                api::support_access_page(&wareboxes_api_contract::v1::SupportAccessPageRequest {
+                    tenant_id: None,
+                    status: None,
+                    cursor: None,
+                    limit: wareboxes_api_contract::v1::PageLimit::default(),
+                })
+                .await?,
+            );
+            data.tenant_lifecycle_page = Some(
+                api::tenant_lifecycle_page(
+                    &wareboxes_api_contract::v1::TenantLifecyclePageRequest {
+                        status: Some(wareboxes_api_contract::v1::TenantStatus::Active),
+                        search: None,
+                        cursor: None,
+                        limit: wareboxes_api_contract::v1::PageLimit::default(),
+                    },
+                )
+                .await?,
+            );
+        }
         Section::CrossDock if has_permission(session, "wms_supervisor") => {
             data.cross_dock_planning_options = Some(
                 api::cross_dock_planning_options(api::CrossDockFilters::default(), None).await?,
@@ -899,6 +930,7 @@ async fn load_workspace(
         | Section::WorkOrchestration
         | Section::ServiceAccounts
         | Section::TenantLifecycle
+        | Section::SupportAccess
         | Section::Administration(_) => {}
     }
     Ok(data)
@@ -1042,6 +1074,11 @@ fn ServiceAccountsPage() -> impl IntoView {
 #[component]
 fn TenantLifecyclePage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::TenantLifecycle/> }
+}
+
+#[component]
+fn SupportAccessPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::SupportAccess/> }
 }
 
 #[component]
@@ -1346,6 +1383,16 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 <TenantLifecycleWorkspace
                     initial_page=data.tenant_lifecycle_page
                     current_tenant_id=session.active_tenant.tenant_id.get()
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::SupportAccess if session.is_platform_administrator => view! {
+                <SupportAccessWorkspace
+                    initial_page=data.support_access_page
+                    initial_tenants=data.tenant_lifecycle_page
+                    current_user_id=session.user.id
+                    can_manage=session.active_support_access_id.is_none()
                     on_unauthorized=session_expired_callback()
                 />
             }

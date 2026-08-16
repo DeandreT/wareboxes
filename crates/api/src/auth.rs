@@ -205,6 +205,7 @@ pub async fn web_session_context(
     let active_tenant = repo::tenants::access_for_user(db, user_id, tenant_id)
         .await?
         .ok_or_else(AppError::forbidden)?;
+    let support_access_id = repo::tenants::active_support_access_id(db, tenant_id, user_id).await?;
     let user = wareboxes_persistence_postgres::users::find_user_by_id(
         db,
         persisted_user_id(user_id)?,
@@ -212,7 +213,9 @@ pub async fn web_session_context(
     )
     .await?
     .ok_or_else(AppError::unauthorized)?;
-    permissions::ensure_self_role(db, tenant_id, user_id, &user.email).await?;
+    if support_access_id.is_none() {
+        permissions::ensure_self_role(db, tenant_id, user_id, &user.email).await?;
+    }
     let user = enrich_user_for_tenant(db, tenant_id, user_id).await?;
     let available_tenants = repo::tenants::list_for_session(db, token_hash).await?;
     let settings = settings_response(
@@ -230,6 +233,7 @@ pub async fn web_session_context(
         available_tenants,
         settings,
         is_platform_administrator,
+        active_support_access_id: support_access_id,
     })
 }
 
@@ -403,6 +407,7 @@ pub struct CurrentTenant {
     pub user: User,
     pub tenant: TenantAccess,
     pub service_account_id: Option<ServiceAccountId>,
+    pub support_access_id: Option<i64>,
 }
 
 impl CurrentTenant {
@@ -417,6 +422,10 @@ impl CurrentTenant {
 
     pub const fn is_service_account(&self) -> bool {
         self.service_account_id.is_some()
+    }
+
+    pub const fn is_support_access(&self) -> bool {
+        self.support_access_id.is_some()
     }
 
     pub async fn require_platform_administrator(&self, db: &Db) -> AppResult<()> {
@@ -533,7 +542,22 @@ impl FromRequestParts<AppState> for CurrentTenant {
                 .await?
                 .ok_or_else(AppError::forbidden)?
         };
-        if service_account_id.is_none() {
+        let support_access_id = if service_account_id.is_none() {
+            repo::tenants::active_support_access_id(
+                &state.db,
+                tenant.tenant_id,
+                current_user.user.id,
+            )
+            .await?
+        } else {
+            None
+        };
+        if support_access_id.is_some()
+            && !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS)
+        {
+            return Err(AppError::forbidden());
+        }
+        if service_account_id.is_none() && support_access_id.is_none() {
             permissions::ensure_self_role(
                 &state.db,
                 tenant.tenant_id,
@@ -549,6 +573,7 @@ impl FromRequestParts<AppState> for CurrentTenant {
             user,
             tenant,
             service_account_id,
+            support_access_id,
         })
     }
 }

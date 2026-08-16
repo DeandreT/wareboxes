@@ -51692,3 +51692,567 @@ GRANT EXECUTE ON FUNCTION public.billing_decision_policy_hash(
 REVOKE ALL ON FUNCTION public.billing_decision_policy_hash(
   text,bigint,bigint,bigint,bigint,text,bigint,bigint,text,text,text,bigint,bigint
 ) FROM PUBLIC;
+
+-- Governed platform support access. Support principals are never ordinary tenant
+-- members: the membership row exists only so immutable operational evidence can
+-- retain actor foreign keys after a grant expires or is revoked.
+ALTER TABLE public.tenant_memberships
+  ADD COLUMN support_managed boolean NOT NULL DEFAULT false,
+  ADD CONSTRAINT tenant_memberships_support_default_check
+    CHECK(NOT support_managed OR NOT is_default);
+
+CREATE TABLE public.support_access_grants (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  revision bigint NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'pending',
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL,
+  requested_by_user_id bigint NOT NULL REFERENCES public.users(id),
+  expires_at timestamptz NOT NULL,
+  all_facilities boolean NOT NULL DEFAULT false,
+  all_inventory_owners boolean NOT NULL DEFAULT false,
+  approved_at timestamptz,
+  approved_by_user_id bigint REFERENCES public.users(id),
+  rejected_at timestamptz,
+  rejected_by_user_id bigint REFERENCES public.users(id),
+  rejection_reason text,
+  revoked_at timestamptz,
+  revoked_by_user_id bigint REFERENCES public.users(id),
+  revocation_reason text,
+  CONSTRAINT support_access_grants_tenant_id_id_unique UNIQUE(tenant_id,id),
+  CONSTRAINT support_access_grants_revision_check CHECK(revision>0),
+  CONSTRAINT support_access_grants_status_check
+    CHECK(status IN ('pending','active','rejected','revoked')),
+  CONSTRAINT support_access_grants_reason_check CHECK(
+    reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+      AND reason!~'[[:cntrl:]]'),
+  CONSTRAINT support_access_grants_window_check CHECK(
+    expires_at>requested_at AND expires_at<=requested_at+interval '8 hours'),
+  CONSTRAINT support_access_grants_rejection_reason_check CHECK(
+    rejection_reason IS NULL OR (rejection_reason=btrim(rejection_reason)
+      AND rejection_reason<>'' AND char_length(rejection_reason)<=500
+      AND rejection_reason!~'[[:cntrl:]]')),
+  CONSTRAINT support_access_grants_revocation_reason_check CHECK(
+    revocation_reason IS NULL OR (revocation_reason=btrim(revocation_reason)
+      AND revocation_reason<>'' AND char_length(revocation_reason)<=500
+      AND revocation_reason!~'[[:cntrl:]]')),
+  CONSTRAINT support_access_grants_lifecycle_check CHECK(
+    (status='pending' AND revision=1 AND approved_at IS NULL
+      AND approved_by_user_id IS NULL AND rejected_at IS NULL
+      AND rejected_by_user_id IS NULL AND rejection_reason IS NULL
+      AND revoked_at IS NULL AND revoked_by_user_id IS NULL
+      AND revocation_reason IS NULL)
+    OR (status='active' AND revision=2 AND approved_at IS NOT NULL
+      AND approved_by_user_id IS NOT NULL
+      AND approved_by_user_id<>requested_by_user_id
+      AND approved_at>=requested_at AND approved_at<expires_at
+      AND rejected_at IS NULL AND rejected_by_user_id IS NULL
+      AND rejection_reason IS NULL AND revoked_at IS NULL
+      AND revoked_by_user_id IS NULL AND revocation_reason IS NULL)
+    OR (status='rejected' AND revision=2 AND approved_at IS NULL
+      AND approved_by_user_id IS NULL AND rejected_at IS NOT NULL
+      AND rejected_by_user_id IS NOT NULL AND rejection_reason IS NOT NULL
+      AND revoked_at IS NULL AND revoked_by_user_id IS NULL
+      AND revocation_reason IS NULL)
+    OR (status='revoked' AND revision=3 AND approved_at IS NOT NULL
+      AND approved_by_user_id IS NOT NULL
+      AND approved_by_user_id<>requested_by_user_id
+      AND rejected_at IS NULL AND rejected_by_user_id IS NULL
+      AND rejection_reason IS NULL AND revoked_at IS NOT NULL
+      AND revoked_by_user_id IS NOT NULL AND revocation_reason IS NOT NULL
+      AND revoked_at>=approved_at))
+);
+CREATE INDEX support_access_grants_platform_history_idx
+ON public.support_access_grants(requested_at DESC,id DESC);
+CREATE INDEX support_access_grants_principal_lookup_idx
+ON public.support_access_grants(tenant_id,requested_by_user_id,status,expires_at DESC,id DESC);
+
+CREATE TABLE public.support_access_facilities (
+  support_access_grant_id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  PRIMARY KEY(support_access_grant_id,facility_id),
+  FOREIGN KEY(tenant_id,support_access_grant_id)
+    REFERENCES public.support_access_grants(tenant_id,id),
+  FOREIGN KEY(tenant_id,facility_id) REFERENCES public.facilities(tenant_id,id)
+);
+
+CREATE TABLE public.support_access_inventory_owners (
+  support_access_grant_id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  PRIMARY KEY(support_access_grant_id,inventory_owner_id),
+  FOREIGN KEY(tenant_id,support_access_grant_id)
+    REFERENCES public.support_access_grants(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id)
+    REFERENCES public.inventory_owners(tenant_id,id)
+);
+
+CREATE TABLE public.support_access_permissions (
+  support_access_grant_id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  permission_name text NOT NULL,
+  PRIMARY KEY(support_access_grant_id,permission_name),
+  FOREIGN KEY(tenant_id,support_access_grant_id)
+    REFERENCES public.support_access_grants(tenant_id,id),
+  CONSTRAINT support_access_permissions_name_check CHECK(
+    permission_name<>'admin' AND permission_name=lower(permission_name)
+      AND permission_name~'^[a-z0-9_]+$' AND char_length(permission_name)<=64)
+);
+
+CREATE TABLE public.support_access_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  support_access_grant_id bigint NOT NULL,
+  tenant_id bigint NOT NULL,
+  action text NOT NULL,
+  grant_revision bigint NOT NULL,
+  actor_user_id bigint NOT NULL REFERENCES public.users(id),
+  occurred_at timestamptz NOT NULL,
+  reason text,
+  request_id text,
+  evidence jsonb NOT NULL,
+  FOREIGN KEY(tenant_id,support_access_grant_id)
+    REFERENCES public.support_access_grants(tenant_id,id),
+  CONSTRAINT support_access_events_grant_revision_unique
+    UNIQUE(support_access_grant_id,grant_revision),
+  CONSTRAINT support_access_events_action_check
+    CHECK(action IN ('requested','approved','rejected','revoked')),
+  CONSTRAINT support_access_events_revision_check CHECK(grant_revision>0),
+  CONSTRAINT support_access_events_reason_check CHECK(reason IS NULL OR (
+    reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+      AND reason!~'[[:cntrl:]]')),
+  CONSTRAINT support_access_events_request_id_check CHECK(request_id IS NULL OR (
+    request_id=btrim(request_id) AND request_id<>'' AND char_length(request_id)<=128)),
+  CONSTRAINT support_access_events_evidence_check CHECK(jsonb_typeof(evidence)='object')
+);
+CREATE INDEX support_access_events_history_idx
+ON public.support_access_events(support_access_grant_id,occurred_at DESC,id DESC);
+
+ALTER TABLE public.support_access_grants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_grants FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_facilities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_facilities FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_inventory_owners ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_inventory_owners FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_permissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_permissions FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.support_access_events FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY support_access_grants_platform_isolation
+ON public.support_access_grants
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+CREATE POLICY support_access_facilities_platform_isolation
+ON public.support_access_facilities
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+CREATE POLICY support_access_inventory_owners_platform_isolation
+ON public.support_access_inventory_owners
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+CREATE POLICY support_access_permissions_platform_isolation
+ON public.support_access_permissions
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+CREATE POLICY support_access_events_platform_isolation
+ON public.support_access_events
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+
+CREATE FUNCTION public.active_support_access_scope(
+  checked_tenant_id bigint, checked_user_id bigint
+) RETURNS TABLE(
+  support_access_grant_id bigint,
+  all_facilities boolean,
+  facility_ids bigint[],
+  all_inventory_owners boolean,
+  inventory_owner_ids bigint[]
+) LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+  SELECT grant_record.id,grant_record.all_facilities,
+    ARRAY(SELECT scope.facility_id FROM public.support_access_facilities scope
+      JOIN public.facilities facility ON facility.tenant_id=scope.tenant_id
+        AND facility.id=scope.facility_id AND facility.deleted IS NULL
+      WHERE scope.support_access_grant_id=grant_record.id
+      ORDER BY scope.facility_id),
+    grant_record.all_inventory_owners,
+    ARRAY(SELECT scope.inventory_owner_id
+      FROM public.support_access_inventory_owners scope
+      JOIN public.inventory_owners owner ON owner.tenant_id=scope.tenant_id
+        AND owner.id=scope.inventory_owner_id AND owner.deleted IS NULL
+      WHERE scope.support_access_grant_id=grant_record.id
+      ORDER BY scope.inventory_owner_id)
+  FROM public.support_access_grants grant_record
+  JOIN public.tenant_memberships membership
+    ON membership.tenant_id=grant_record.tenant_id
+   AND membership.user_id=grant_record.requested_by_user_id
+   AND membership.deleted IS NULL AND membership.support_managed
+  JOIN public.tenants tenant ON tenant.id=grant_record.tenant_id
+    AND tenant.deleted IS NULL AND tenant.status='active'
+  WHERE grant_record.tenant_id=checked_tenant_id
+    AND grant_record.requested_by_user_id=checked_user_id
+    AND grant_record.status='active' AND grant_record.expires_at>CURRENT_TIMESTAMP
+    AND public.platform_actor_is_administrator(checked_user_id)
+  ORDER BY grant_record.approved_at DESC,grant_record.id DESC LIMIT 1
+$$;
+
+CREATE FUNCTION public.active_support_access_permissions(
+  checked_tenant_id bigint, checked_user_id bigint
+) RETURNS TABLE(
+  id bigint, name text, description text, created timestamptz, deleted timestamptz
+) LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+  SELECT permission.id,upper(permission.name),permission.description,
+    permission.created,permission.deleted
+  FROM public.active_support_access_scope(checked_tenant_id,checked_user_id) active_scope
+  JOIN public.support_access_permissions support_permission
+    ON support_permission.support_access_grant_id=active_scope.support_access_grant_id
+   AND support_permission.tenant_id=checked_tenant_id
+  JOIN public.permissions permission ON permission.tenant_id=support_permission.tenant_id
+   AND permission.name=support_permission.permission_name AND permission.deleted IS NULL
+  ORDER BY permission.id
+$$;
+
+CREATE FUNCTION public.support_access_permission_granted(
+  checked_tenant_id bigint, checked_user_id bigint, checked_permission text
+) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+  SELECT checked_permission IS NOT NULL AND EXISTS(
+    SELECT 1 FROM public.active_support_access_permissions(
+      checked_tenant_id,checked_user_id) permission
+    WHERE permission.name=upper(checked_permission))
+$$;
+
+CREATE FUNCTION public.lock_support_access_permission(
+  checked_tenant_id bigint,checked_user_id bigint,checked_permissions text[]
+) RETURNS boolean LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+DECLARE grant_id bigint;
+BEGIN
+  SELECT grant_record.id INTO grant_id
+  FROM public.support_access_grants grant_record
+  JOIN public.tenant_memberships membership
+    ON membership.tenant_id=grant_record.tenant_id
+   AND membership.user_id=grant_record.requested_by_user_id
+   AND membership.deleted IS NULL AND membership.support_managed
+  JOIN public.tenants tenant ON tenant.id=grant_record.tenant_id
+    AND tenant.deleted IS NULL AND tenant.status='active'
+  WHERE grant_record.tenant_id=checked_tenant_id
+    AND grant_record.requested_by_user_id=checked_user_id
+    AND grant_record.status='active' AND grant_record.expires_at>CURRENT_TIMESTAMP
+    AND public.platform_actor_is_administrator(checked_user_id)
+  ORDER BY grant_record.approved_at DESC,grant_record.id DESC LIMIT 1
+  FOR SHARE OF grant_record,membership,tenant;
+  IF grant_id IS NULL THEN RETURN false; END IF;
+  RETURN EXISTS(
+    SELECT 1 FROM public.support_access_permissions support_permission
+    JOIN public.permissions permission
+      ON permission.tenant_id=support_permission.tenant_id
+     AND permission.name=support_permission.permission_name
+     AND permission.deleted IS NULL
+    WHERE support_permission.support_access_grant_id=grant_id
+      AND upper(permission.name)=ANY(checked_permissions)
+    FOR SHARE OF support_permission,permission);
+END $$;
+
+CREATE FUNCTION public.validate_support_access_grant() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'support access grants cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'support access mutation is not authorized' USING ERRCODE='42501';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'support-access:'||NEW.tenant_id::text||':'||NEW.requested_by_user_id::text,0));
+  IF TG_OP='INSERT' THEN
+    IF NEW.status<>'pending' OR NEW.revision<>1
+      OR NEW.requested_by_user_id<>actor_id
+      OR NOT EXISTS(SELECT 1 FROM public.tenants tenant
+        WHERE tenant.id=NEW.tenant_id AND tenant.deleted IS NULL AND tenant.status='active')
+      OR EXISTS(SELECT 1 FROM public.tenant_memberships membership
+        WHERE membership.tenant_id=NEW.tenant_id AND membership.user_id=actor_id
+          AND membership.deleted IS NULL AND NOT membership.support_managed)
+      OR EXISTS(SELECT 1 FROM public.support_access_grants existing
+        WHERE existing.tenant_id=NEW.tenant_id
+          AND existing.requested_by_user_id=actor_id
+          AND (existing.status='pending' OR (existing.status='active'
+            AND existing.expires_at>CURRENT_TIMESTAMP))) THEN
+      RAISE EXCEPTION 'invalid support access request' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.reason,NEW.requested_at,
+      NEW.requested_by_user_id,NEW.expires_at,NEW.all_facilities,
+      NEW.all_inventory_owners)
+    IS DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.reason,OLD.requested_at,
+      OLD.requested_by_user_id,OLD.expires_at,OLD.all_facilities,
+      OLD.all_inventory_owners)
+    OR NEW.revision<>OLD.revision+1 THEN
+    RAISE EXCEPTION 'support access request evidence is immutable' USING ERRCODE='55000';
+  END IF;
+  IF OLD.status='pending' AND NEW.status='active' THEN
+    IF actor_id=OLD.requested_by_user_id OR NEW.approved_by_user_id<>actor_id
+      OR NEW.approved_at IS NULL OR NEW.approved_at>=NEW.expires_at
+      OR NEW.rejected_at IS NOT NULL OR NEW.rejected_by_user_id IS NOT NULL
+      OR NEW.rejection_reason IS NOT NULL OR NEW.revoked_at IS NOT NULL
+      OR NEW.revoked_by_user_id IS NOT NULL OR NEW.revocation_reason IS NOT NULL
+      OR EXISTS(SELECT 1 FROM public.support_access_grants existing
+        WHERE existing.id<>NEW.id AND existing.tenant_id=NEW.tenant_id
+          AND existing.requested_by_user_id=NEW.requested_by_user_id
+          AND existing.status='active' AND existing.expires_at>CURRENT_TIMESTAMP) THEN
+      RAISE EXCEPTION 'invalid support access approval' USING ERRCODE='23514';
+    END IF;
+  ELSIF OLD.status='pending' AND NEW.status='rejected' THEN
+    IF NEW.rejected_by_user_id<>actor_id OR NEW.rejected_at IS NULL
+      OR NEW.rejection_reason IS NULL OR NEW.approved_at IS NOT NULL
+      OR NEW.approved_by_user_id IS NOT NULL OR NEW.revoked_at IS NOT NULL
+      OR NEW.revoked_by_user_id IS NOT NULL OR NEW.revocation_reason IS NOT NULL THEN
+      RAISE EXCEPTION 'invalid support access rejection' USING ERRCODE='23514';
+    END IF;
+  ELSIF OLD.status='active' AND NEW.status='revoked' THEN
+    IF ROW(NEW.approved_at,NEW.approved_by_user_id)
+        IS DISTINCT FROM ROW(OLD.approved_at,OLD.approved_by_user_id)
+      OR NEW.revoked_by_user_id<>actor_id OR NEW.revoked_at IS NULL
+      OR NEW.revocation_reason IS NULL THEN
+      RAISE EXCEPTION 'invalid support access revocation' USING ERRCODE='23514';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'invalid support access transition' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_support_access_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; grant_id bigint; grant_row public.support_access_grants%ROWTYPE;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'support access scope evidence is immutable' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  grant_id:=NEW.support_access_grant_id;
+  SELECT * INTO grant_row FROM public.support_access_grants grant_record
+    WHERE grant_record.id=grant_id FOR SHARE;
+  IF grant_row.id IS NULL OR grant_row.status<>'pending'
+    OR grant_row.requested_by_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'support access scope mutation is not authorized' USING ERRCODE='42501';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_support_access_integrity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE grant_id bigint; grant_row public.support_access_grants%ROWTYPE;
+BEGIN
+  IF TG_TABLE_NAME='support_access_grants' THEN
+    grant_id:=NEW.id;
+  ELSE
+    grant_id:=NEW.support_access_grant_id;
+  END IF;
+  SELECT * INTO grant_row FROM public.support_access_grants grant_record
+    WHERE grant_record.id=grant_id;
+  IF grant_row.id IS NULL THEN RETURN NULL; END IF;
+  IF (grant_row.all_facilities AND EXISTS(SELECT 1
+      FROM public.support_access_facilities scope
+      WHERE scope.support_access_grant_id=grant_id))
+    OR (NOT grant_row.all_facilities AND NOT EXISTS(SELECT 1
+      FROM public.support_access_facilities scope
+      JOIN public.facilities facility ON facility.tenant_id=scope.tenant_id
+        AND facility.id=scope.facility_id AND facility.deleted IS NULL
+      WHERE scope.support_access_grant_id=grant_id))
+    OR (grant_row.all_inventory_owners AND EXISTS(SELECT 1
+      FROM public.support_access_inventory_owners scope
+      WHERE scope.support_access_grant_id=grant_id))
+    OR (NOT grant_row.all_inventory_owners AND NOT EXISTS(SELECT 1
+      FROM public.support_access_inventory_owners scope
+      JOIN public.inventory_owners owner ON owner.tenant_id=scope.tenant_id
+        AND owner.id=scope.inventory_owner_id AND owner.deleted IS NULL
+      WHERE scope.support_access_grant_id=grant_id))
+    OR NOT EXISTS(SELECT 1 FROM public.support_access_permissions scope
+      JOIN public.permissions permission ON permission.tenant_id=scope.tenant_id
+        AND permission.name=scope.permission_name AND permission.deleted IS NULL
+      WHERE scope.support_access_grant_id=grant_id
+        AND permission.name<>'admin')
+    OR EXISTS(SELECT 1 FROM public.support_access_permissions scope
+      LEFT JOIN public.permissions permission ON permission.tenant_id=scope.tenant_id
+        AND permission.name=scope.permission_name AND permission.deleted IS NULL
+      WHERE scope.support_access_grant_id=grant_id AND permission.id IS NULL)
+    OR (grant_row.status='active' AND NOT EXISTS(
+      SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=grant_row.tenant_id
+        AND membership.user_id=grant_row.requested_by_user_id
+        AND membership.deleted IS NULL AND membership.support_managed)) THEN
+    RAISE EXCEPTION 'support access scope is incomplete or unavailable' USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.guard_support_managed_membership() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF NOT COALESCE(NEW.support_managed,false)
+    AND NOT COALESCE(OLD.support_managed,false) THEN RETURN NEW; END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'support-managed memberships require platform authority'
+      USING ERRCODE='42501';
+  END IF;
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'support-managed memberships cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_support_access_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; grant_row public.support_access_grants%ROWTYPE;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  SELECT * INTO grant_row FROM public.support_access_grants grant_record
+    WHERE grant_record.id=NEW.support_access_grant_id;
+  IF actor_id IS NULL OR NEW.actor_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id)
+    OR grant_row.id IS NULL OR NEW.tenant_id<>grant_row.tenant_id
+    OR NEW.grant_revision<>grant_row.revision
+    OR NOT ((NEW.action='requested' AND grant_row.status='pending'
+          AND grant_row.requested_by_user_id=actor_id)
+      OR (NEW.action='approved' AND grant_row.status='active'
+          AND grant_row.approved_by_user_id=actor_id)
+      OR (NEW.action='rejected' AND grant_row.status='rejected'
+          AND grant_row.rejected_by_user_id=actor_id)
+      OR (NEW.action='revoked' AND grant_row.status='revoked'
+          AND grant_row.revoked_by_user_id=actor_id)) THEN
+    RAISE EXCEPTION 'invalid support access event evidence' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reject_support_access_event_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'support access events are immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE TRIGGER support_access_grants_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.support_access_grants FOR EACH ROW
+EXECUTE FUNCTION public.validate_support_access_grant();
+CREATE TRIGGER support_access_facilities_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.support_access_facilities FOR EACH ROW
+EXECUTE FUNCTION public.guard_support_access_scope();
+CREATE TRIGGER support_access_inventory_owners_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.support_access_inventory_owners FOR EACH ROW
+EXECUTE FUNCTION public.guard_support_access_scope();
+CREATE TRIGGER support_access_permissions_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.support_access_permissions FOR EACH ROW
+EXECUTE FUNCTION public.guard_support_access_scope();
+CREATE CONSTRAINT TRIGGER support_access_grants_require_integrity
+AFTER INSERT OR UPDATE ON public.support_access_grants DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_support_access_integrity();
+CREATE CONSTRAINT TRIGGER support_access_facilities_require_integrity
+AFTER INSERT ON public.support_access_facilities DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_support_access_integrity();
+CREATE CONSTRAINT TRIGGER support_access_inventory_owners_require_integrity
+AFTER INSERT ON public.support_access_inventory_owners DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_support_access_integrity();
+CREATE CONSTRAINT TRIGGER support_access_permissions_require_integrity
+AFTER INSERT ON public.support_access_permissions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_support_access_integrity();
+CREATE TRIGGER tenant_memberships_guard_support BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_memberships FOR EACH ROW
+EXECUTE FUNCTION public.guard_support_managed_membership();
+CREATE TRIGGER support_access_events_validate BEFORE INSERT
+ON public.support_access_events FOR EACH ROW
+EXECUTE FUNCTION public.validate_support_access_event();
+CREATE TRIGGER support_access_events_immutable BEFORE UPDATE OR DELETE
+ON public.support_access_events FOR EACH ROW
+EXECUTE FUNCTION public.reject_support_access_event_mutation();
+
+CREATE OR REPLACE FUNCTION public.select_web_session_tenant(
+  p_token_hash text,p_selected_tenant_id bigint
+) RETURNS boolean LANGUAGE sql SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+  WITH selected AS (
+    UPDATE public.sessions session
+    SET active_tenant_id=p_selected_tenant_id,last_seen_at=CURRENT_TIMESTAMP
+    WHERE session.token=p_token_hash AND session.purpose='web'
+      AND session.expires>CURRENT_TIMESTAMP
+      AND EXISTS(SELECT 1 FROM public.tenant_memberships membership
+        JOIN public.tenants tenant ON tenant.id=membership.tenant_id
+        WHERE membership.tenant_id=p_selected_tenant_id
+          AND membership.user_id=session.user_id AND membership.deleted IS NULL
+          AND tenant.deleted IS NULL AND tenant.status='active'
+          AND (NOT membership.support_managed OR EXISTS(
+            SELECT 1 FROM public.active_support_access_scope(
+              membership.tenant_id,membership.user_id))))
+    RETURNING 1
+  ) SELECT EXISTS(SELECT 1 FROM selected)
+$$;
+
+CREATE OR REPLACE FUNCTION public.web_session_identity(
+  p_token_hash text,p_idle_ttl_seconds integer
+) RETURNS TABLE(user_id bigint,tenant_id bigint)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF p_idle_ttl_seconds<60 OR p_idle_ttl_seconds>86400 THEN
+    RAISE EXCEPTION 'web session idle TTL must be between 60 and 86400 seconds'
+      USING ERRCODE='22023';
+  END IF;
+  RETURN QUERY UPDATE public.sessions session
+  SET last_seen_at=CURRENT_TIMESTAMP
+  FROM public.tenant_memberships membership,public.tenants tenant
+  WHERE session.token=p_token_hash AND session.purpose='web'
+    AND session.expires>CURRENT_TIMESTAMP
+    AND session.last_seen_at>CURRENT_TIMESTAMP-p_idle_ttl_seconds*interval '1 second'
+    AND session.active_tenant_id IS NOT NULL
+    AND membership.tenant_id=session.active_tenant_id
+    AND membership.user_id=session.user_id AND membership.deleted IS NULL
+    AND tenant.id=membership.tenant_id AND tenant.deleted IS NULL AND tenant.status='active'
+    AND (NOT membership.support_managed OR EXISTS(
+      SELECT 1 FROM public.active_support_access_scope(
+        membership.tenant_id,membership.user_id)))
+  RETURNING session.user_id,session.active_tenant_id;
+END $$;
+
+GRANT SELECT,INSERT,UPDATE ON public.support_access_grants TO wareboxes_app;
+GRANT SELECT,INSERT ON public.support_access_facilities TO wareboxes_app;
+GRANT SELECT,INSERT ON public.support_access_inventory_owners TO wareboxes_app;
+GRANT SELECT,INSERT ON public.support_access_permissions TO wareboxes_app;
+GRANT SELECT,INSERT ON public.support_access_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.support_access_grants_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.support_access_events_id_seq TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.active_support_access_scope(bigint,bigint)
+TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.active_support_access_permissions(bigint,bigint)
+TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.support_access_permission_granted(bigint,bigint,text)
+TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.lock_support_access_permission(bigint,bigint,text[])
+TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.active_support_access_scope(bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.active_support_access_permissions(bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.support_access_permission_granted(bigint,bigint,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.lock_support_access_permission(bigint,bigint,text[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_support_access_grant() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_support_access_scope() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_support_access_integrity() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_support_managed_membership() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_support_access_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_support_access_event_mutation() FROM PUBLIC;

@@ -40,6 +40,7 @@ mod service_accounts;
 mod shipping;
 mod slotting;
 mod sorting;
+mod support_access;
 mod tenant_lifecycle;
 mod toast;
 mod transfer_orders;

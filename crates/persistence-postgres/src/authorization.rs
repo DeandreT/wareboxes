@@ -59,6 +59,10 @@ pub async fn get_user_permissions(
            AND p.id=grant_record.permission_id
         WHERE account.tenant_id=$1 AND account.principal_user_id=$2
           AND account.status='active' AND p.deleted IS NULL
+        UNION
+        SELECT permission.id,permission.name,permission.description,
+               permission.created,permission.deleted
+        FROM public.active_support_access_permissions($1,$2) permission
         "#,
     )
     .bind(tenant_id.get())

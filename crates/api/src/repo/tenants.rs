@@ -51,33 +51,40 @@ pub async fn list_for_session(db: &Db, token_hash: &str) -> AppResult<Vec<Tenant
             membership.tenant_id,
             membership.user_id,
             membership.is_default,
-            membership.all_facilities,
-            membership.all_inventory_owners,
-            ARRAY(
+            CASE WHEN membership.support_managed THEN support.all_facilities
+              ELSE membership.all_facilities END AS all_facilities,
+            CASE WHEN membership.support_managed THEN support.all_inventory_owners
+              ELSE membership.all_inventory_owners END AS all_inventory_owners,
+            CASE WHEN membership.support_managed THEN support.facility_ids ELSE ARRAY(
                 SELECT user_facility.facility_id
                 FROM user_facilities user_facility
                 WHERE user_facility.tenant_id = membership.tenant_id
                   AND user_facility.user_id = membership.user_id
                   AND user_facility.deleted IS NULL
                 ORDER BY user_facility.facility_id
-            ) AS facility_ids,
-            ARRAY(
+            ) END AS facility_ids,
+            CASE WHEN membership.support_managed THEN support.inventory_owner_ids ELSE ARRAY(
                 SELECT user_owner.inventory_owner_id
                 FROM user_inventory_owners user_owner
                 WHERE user_owner.tenant_id = membership.tenant_id
                   AND user_owner.user_id = membership.user_id
                   AND user_owner.deleted IS NULL
                 ORDER BY user_owner.inventory_owner_id
-            ) AS inventory_owner_ids,
+            ) END AS inventory_owner_ids,
             tenant.slug,
             tenant.name,
             tenant.status
         FROM tenant_memberships membership
         JOIN tenants tenant ON tenant.id = membership.tenant_id
+        LEFT JOIN LATERAL public.active_support_access_scope(
+          membership.tenant_id,membership.user_id) support
+          ON membership.support_managed
         WHERE membership.user_id = session_user_id($1)
           AND membership.deleted IS NULL
           AND tenant.deleted IS NULL
           AND tenant.status = 'active'
+          AND (NOT membership.support_managed
+            OR support.support_access_grant_id IS NOT NULL)
         ORDER BY membership.is_default DESC, tenant.name, tenant.id
         "#,
     )
@@ -123,6 +130,7 @@ pub async fn default_for_session(db: &Db, token_hash: &str) -> AppResult<Option<
         JOIN tenants tenant ON tenant.id = membership.tenant_id
         WHERE membership.user_id = session_user_id($1)
           AND membership.deleted IS NULL
+          AND NOT membership.support_managed
           AND tenant.deleted IS NULL
           AND tenant.status = 'active'
         ORDER BY membership.is_default DESC, tenant.name, tenant.id
@@ -150,34 +158,41 @@ pub async fn access_for_user(
             membership.tenant_id,
             membership.user_id,
             membership.is_default,
-            membership.all_facilities,
-            membership.all_inventory_owners,
-            ARRAY(
+            CASE WHEN membership.support_managed THEN support.all_facilities
+              ELSE membership.all_facilities END AS all_facilities,
+            CASE WHEN membership.support_managed THEN support.all_inventory_owners
+              ELSE membership.all_inventory_owners END AS all_inventory_owners,
+            CASE WHEN membership.support_managed THEN support.facility_ids ELSE ARRAY(
                 SELECT user_facility.facility_id
                 FROM user_facilities user_facility
                 WHERE user_facility.tenant_id = membership.tenant_id
                   AND user_facility.user_id = membership.user_id
                   AND user_facility.deleted IS NULL
                 ORDER BY user_facility.facility_id
-            ) AS facility_ids,
-            ARRAY(
+            ) END AS facility_ids,
+            CASE WHEN membership.support_managed THEN support.inventory_owner_ids ELSE ARRAY(
                 SELECT user_owner.inventory_owner_id
                 FROM user_inventory_owners user_owner
                 WHERE user_owner.tenant_id = membership.tenant_id
                   AND user_owner.user_id = membership.user_id
                   AND user_owner.deleted IS NULL
                 ORDER BY user_owner.inventory_owner_id
-            ) AS inventory_owner_ids,
+            ) END AS inventory_owner_ids,
             tenant.slug,
             tenant.name,
             tenant.status
         FROM tenant_memberships membership
         JOIN tenants tenant ON tenant.id = membership.tenant_id
+        LEFT JOIN LATERAL public.active_support_access_scope(
+          membership.tenant_id,membership.user_id) support
+          ON membership.support_managed
         WHERE membership.user_id = $1
           AND membership.tenant_id = $2
           AND membership.deleted IS NULL
           AND tenant.deleted IS NULL
           AND tenant.status = 'active'
+          AND (NOT membership.support_managed
+            OR support.support_access_grant_id IS NOT NULL)
         "#,
     )
     .bind(user_id)
@@ -231,6 +246,7 @@ pub async fn access_for_service_account(
           AND membership.user_id=account.principal_user_id
         WHERE account.tenant_id=$1 AND account.id=$2 AND account.status='active'
           AND tenant.status='active' AND tenant.deleted IS NULL AND membership.deleted IS NULL
+          AND NOT membership.support_managed
         "#,
     )
     .bind(tenant_id.get())
@@ -295,6 +311,7 @@ pub async fn update_user_access_scope(
         SELECT id
         FROM tenant_memberships
         WHERE tenant_id = $1 AND user_id = $2 AND deleted IS NULL
+          AND NOT support_managed
         FOR UPDATE
         "#,
     )
@@ -463,10 +480,11 @@ pub async fn provision_default_tenant(
 
     sqlx::query(
         r#"
-        INSERT INTO tenant_memberships (tenant_id, user_id, is_default)
-        VALUES ($1, $2, TRUE)
+        INSERT INTO tenant_memberships
+          (tenant_id, user_id, is_default, support_managed)
+        VALUES ($1, $2, TRUE, FALSE)
         ON CONFLICT (tenant_id, user_id) DO UPDATE
-        SET deleted = NULL, is_default = TRUE
+        SET deleted = NULL, is_default = TRUE, support_managed = FALSE
         "#,
     )
     .bind(tenant_id.get())
@@ -476,4 +494,22 @@ pub async fn provision_default_tenant(
 
     transaction.commit().await?;
     Ok(tenant_id)
+}
+
+pub async fn active_support_access_id(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+) -> AppResult<Option<i64>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let grant_id = sqlx::query_scalar(
+        r#"SELECT support_access_grant_id
+        FROM public.active_support_access_scope($1,$2)"#,
+    )
+    .bind(tenant_id.get())
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(grant_id)
 }

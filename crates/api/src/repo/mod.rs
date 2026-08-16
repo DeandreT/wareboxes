@@ -58,6 +58,7 @@ pub mod service_accounts;
 pub mod shipping;
 pub mod slotting;
 pub mod storage_zone;
+pub mod support_access;
 pub mod tasks;
 pub mod tenant_lifecycle;
 pub mod tenants;

@@ -84,6 +84,8 @@ pub struct WebSessionContext {
     pub settings: UserSettings,
     #[serde(default)]
     pub is_platform_administrator: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_support_access_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]

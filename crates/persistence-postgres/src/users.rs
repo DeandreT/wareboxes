@@ -59,6 +59,9 @@ async fn tenant_users(
         WHERE membership.tenant_id = $1
           AND ($2 OR (membership.deleted IS NULL AND user_account.deleted IS NULL))
           AND ($3::BIGINT IS NULL OR user_account.id = $3)
+          AND (NOT membership.support_managed OR ($3::BIGINT IS NOT NULL
+            AND EXISTS(SELECT 1 FROM public.active_support_access_scope(
+              membership.tenant_id,membership.user_id))))
           AND ($3::BIGINT IS NOT NULL OR NOT EXISTS (
               SELECT 1 FROM service_accounts account
               WHERE account.tenant_id=membership.tenant_id
@@ -147,7 +150,13 @@ async fn tenant_users(
            AND permission.id = role_permission.permission_id
         WHERE role_permission.deleted IS NULL
           AND permission.deleted IS NULL
-        ORDER BY hierarchy.user_id, permission.id
+        UNION
+        SELECT support_user.user_id,permission.id,permission.created,
+               permission.deleted,permission.name,permission.description
+        FROM unnest($2::BIGINT[]) support_user(user_id)
+        CROSS JOIN LATERAL public.active_support_access_permissions(
+          $1,support_user.user_id) permission
+        ORDER BY user_id,id
         "#,
     )
     .bind(tenant_id.get())

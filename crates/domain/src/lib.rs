@@ -36,6 +36,7 @@ mod service_account;
 mod shipping;
 mod slotting;
 mod storage_zone;
+mod support_access;
 mod tenant;
 mod transfer_order;
 mod value_added_work;
@@ -291,6 +292,11 @@ pub use storage_zone::{
     StorageZoneName, StorageZonePurpose, StorageZoneRevision, StorageZoneStatus,
     StorageZoneTravelSequence, MAX_STORAGE_ZONE_CODE_LENGTH, MAX_STORAGE_ZONE_NAME_LENGTH,
 };
+pub use support_access::{
+    validate_support_access_window, SupportAccessError, SupportAccessPolicy, SupportAccessReason,
+    SupportAccessRevision, SupportAccessStatus, MAX_SUPPORT_ACCESS_DURATION_HOURS,
+    MAX_SUPPORT_ACCESS_PERMISSION_LENGTH, MAX_SUPPORT_ACCESS_REASON_LENGTH,
+};
 pub use tenant::{
     TenantLifecycleError, TenantLifecycleReason, TenantName, TenantRevision, TenantSlug,
     TenantStatus, MAX_TENANT_LIFECYCLE_REASON_LENGTH, MAX_TENANT_NAME_LENGTH,
@@ -406,6 +412,7 @@ positive_id!(
 positive_id!(UserId, "user ID");
 positive_id!(ServiceAccountId, "service account ID");
 positive_id!(ServiceAccountCredentialId, "service account credential ID");
+positive_id!(SupportAccessGrantId, "support access grant ID");
 positive_id!(EmployeeId, "employee ID");
 positive_id!(EmployeeIdentityChangeId, "employee identity change ID");
 positive_id!(LaborSkillId, "labor skill ID");

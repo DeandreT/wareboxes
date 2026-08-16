@@ -54,6 +54,7 @@ mod shipping;
 pub(crate) mod shipping_queue;
 mod slotting;
 mod storage_zones;
+pub(crate) mod support_access;
 pub(crate) mod tenant_lifecycle;
 mod transfer_orders;
 mod value_added_work;
@@ -83,6 +84,34 @@ pub fn router() -> Router<AppState> {
         .route(
             "/platform/tenants/{tenant_id}/status-changes",
             post(tenant_lifecycle::change_status),
+        )
+        .route(
+            "/platform/support-access",
+            get(support_access::list).post(support_access::request),
+        )
+        .route(
+            "/platform/support-access/options",
+            get(support_access::options),
+        )
+        .route(
+            "/platform/support-access/{support_access_grant_id}",
+            get(support_access::get),
+        )
+        .route(
+            "/platform/support-access/{support_access_grant_id}/events",
+            get(support_access::events),
+        )
+        .route(
+            "/platform/support-access/{support_access_grant_id}/approvals",
+            post(support_access::approve),
+        )
+        .route(
+            "/platform/support-access/{support_access_grant_id}/rejections",
+            post(support_access::reject),
+        )
+        .route(
+            "/platform/support-access/{support_access_grant_id}/revocations",
+            post(support_access::revoke),
         )
         .route(
             "/service-accounts",

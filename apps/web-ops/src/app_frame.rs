@@ -298,6 +298,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                             icon=UiIcon::Building
                             active=section == Section::TenantLifecycle
                         />
+                        <NavItem
+                            href="/platform/support-access"
+                            label="Support access"
+                            icon=UiIcon::Access
+                            active=section == Section::SupportAccess
+                        />
                     })}
                     <p class="nav-group">"Context"</p>
                     <NavItem
@@ -385,6 +391,9 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                     <span>"Active organization"</span>
                     <strong>{tenant_name.clone()}</strong>
                     <small>{scope_summary(&session)}</small>
+                    {session.active_support_access_id.map(|grant_id| view! {
+                        <small>{format!("Read-only support grant #{grant_id}")}</small>
+                    })}
                 </div>
             </aside>
 

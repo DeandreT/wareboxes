@@ -167,6 +167,11 @@ pub use tenant_lifecycle::{
     change_tenant_status, create_tenant, tenant_lifecycle_detail, tenant_lifecycle_events,
     tenant_lifecycle_page,
 };
+mod support_access;
+pub use support_access::{
+    approve_support_access, reject_support_access, request_support_access, revoke_support_access,
+    support_access_events, support_access_options, support_access_page,
+};
 mod transfer_order;
 pub use transfer_order::{
     cancel_transfer_order, create_transfer_order, dispatch_transfer_order, receive_transfer_order,

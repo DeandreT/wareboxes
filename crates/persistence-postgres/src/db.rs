@@ -1144,6 +1144,26 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'tenant_lifecycle_events',
                     'tenant_lifecycle_events_platform_isolation'
+                ),
+                (
+                    'support_access_grants',
+                    'support_access_grants_platform_isolation'
+                ),
+                (
+                    'support_access_facilities',
+                    'support_access_facilities_platform_isolation'
+                ),
+                (
+                    'support_access_inventory_owners',
+                    'support_access_inventory_owners_platform_isolation'
+                ),
+                (
+                    'support_access_permissions',
+                    'support_access_permissions_platform_isolation'
+                ),
+                (
+                    'support_access_events',
+                    'support_access_events_platform_isolation'
                 )
         ),
         tenant_table_classification AS (

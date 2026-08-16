@@ -134,6 +134,9 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/platform/tenants" | "/platform/tenants/" => {
             Some(WorkspaceBootstrapSection::TenantLifecycle)
         }
+        "/platform/support-access" | "/platform/support-access/" => {
+            Some(WorkspaceBootstrapSection::SupportAccess)
+        }
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/inventory/control" | "/inventory/control/" => {
             Some(WorkspaceBootstrapSection::InventoryIntegrity)
@@ -203,6 +206,7 @@ async fn workspace_bootstrap(
                 replenishment_policies: None,
                 replenishment_queue: None,
                 tenant_lifecycle_page: None,
+                support_access_page: None,
                 balances,
                 balance_next_cursor,
                 access: access_workspace,
@@ -474,6 +478,53 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::SupportAccess => {
+            if !session.is_platform_administrator {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let support_query = wareboxes_application::support_access::SupportAccessPageQuery {
+                tenant_id: None,
+                status: None,
+                cursor: None,
+                limit: wareboxes_api_contract::v1::PageLimit::default().get(),
+            };
+            let tenant_query = wareboxes_application::tenant_lifecycle::TenantLifecyclePageQuery {
+                status: Some(wareboxes_domain::TenantStatus::Active),
+                search: None,
+                cursor: None,
+                limit: wareboxes_api_contract::v1::PageLimit::default().get(),
+            };
+            let support_page = repo::support_access::page(&state.db, access, &support_query);
+            let tenant_page = repo::tenant_lifecycle::page(&state.db, access, &tenant_query);
+            let (support_page, tenant_page) = tokio::try_join!(support_page, tenant_page)?;
+            let support_items = support_page
+                .items
+                .into_iter()
+                .map(routes::v1::support_access::map_response_for_web)
+                .collect::<AppResult<Vec<_>>>()?;
+            let tenant_items = tenant_page
+                .items
+                .into_iter()
+                .map(routes::v1::tenant_lifecycle::map_response_for_web)
+                .collect::<AppResult<Vec<_>>>()?;
+            Ok(WorkspaceBootstrapData {
+                support_access_page: Some(wareboxes_api_contract::v1::SupportAccessPage::new(
+                    support_items,
+                    support_page
+                        .next_cursor
+                        .map(routes::v1::support_access::encode_cursor_for_web)
+                        .transpose()?,
+                )),
+                tenant_lifecycle_page: Some(wareboxes_api_contract::v1::TenantLifecyclePage::new(
+                    tenant_items,
+                    tenant_page
+                        .next_cursor
+                        .map(routes::v1::tenant_lifecycle::encode_active_cursor_for_web)
+                        .transpose()?,
+                )),
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Access => Ok(WorkspaceBootstrapData {
             access: routes::access::workspace_for_access(state, access).await?,
             ..WorkspaceBootstrapData::default()
@@ -545,6 +596,10 @@ mod tests {
         assert_eq!(
             section_for_path("/platform/tenants"),
             Some(WorkspaceBootstrapSection::TenantLifecycle)
+        );
+        assert_eq!(
+            section_for_path("/platform/support-access"),
+            Some(WorkspaceBootstrapSection::SupportAccess)
         );
         assert_eq!(
             section_for_path("/cross-dock"),

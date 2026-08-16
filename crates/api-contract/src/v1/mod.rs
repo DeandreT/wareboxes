@@ -57,6 +57,7 @@ mod shipping;
 mod shipping_queue;
 mod slotting;
 mod storage_zone;
+mod support_access;
 mod tenant_lifecycle;
 mod transfer_order;
 mod value_added_work;
@@ -472,6 +473,13 @@ pub use storage_zone::{
     ConfigureStorageZoneRequest, RetireStorageZoneRequest, StorageZoneLocationResponse,
     StorageZonePage, StorageZonePageRequest, StorageZonePurpose, StorageZoneResponse,
     StorageZoneStatus,
+};
+pub use support_access::{
+    ApproveSupportAccessRequest, RejectSupportAccessRequest, RequestSupportAccessRequest,
+    RevokeSupportAccessRequest, SupportAccessEventPage, SupportAccessEventPageRequest,
+    SupportAccessEventResponse, SupportAccessOptionsRequest, SupportAccessOptionsResponse,
+    SupportAccessPage, SupportAccessPageRequest, SupportAccessPolicyRequest,
+    SupportAccessResourceOptionResponse, SupportAccessResponse, SupportAccessStatus,
 };
 pub use tenant_lifecycle::{
     ChangeTenantStatusRequest, CreateTenantRequest, TenantLifecycleEventPage,

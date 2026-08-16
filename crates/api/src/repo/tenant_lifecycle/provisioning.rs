@@ -11,8 +11,9 @@ pub(super) async fn provision_initial_administrator_tx(
 ) -> AppResult<()> {
     sqlx::query(
         r#"INSERT INTO tenant_memberships
-        (tenant_id,user_id,created,is_default,all_facilities,all_inventory_owners)
-        VALUES($1,$2,$3,FALSE,TRUE,TRUE)"#,
+        (tenant_id,user_id,created,is_default,all_facilities,all_inventory_owners,
+         support_managed)
+        VALUES($1,$2,$3,FALSE,TRUE,TRUE,FALSE)"#,
     )
     .bind(tenant_id.get())
     .bind(administrator_id)

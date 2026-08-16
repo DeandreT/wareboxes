@@ -276,6 +276,14 @@ pub(crate) fn encode_cursor_for_web(
         .map_err(|_| AppError::internal("could not encode tenant lifecycle cursor"))
 }
 
+#[cfg(feature = "ssr")]
+pub(crate) fn encode_active_cursor_for_web(
+    cursor: TenantLifecycleCursor,
+) -> crate::error::AppResult<OpaqueCursor> {
+    encode_cursor(cursor, Some(ApiStatus::Active), None)
+        .map_err(|_| AppError::internal("could not encode tenant lifecycle cursor"))
+}
+
 fn decode_cursor(
     cursor: &OpaqueCursor,
     status: Option<ApiStatus>,

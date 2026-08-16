@@ -30,7 +30,7 @@ pub async fn is_platform_administrator(db: &Db, user_id: i64) -> AppResult<bool>
     )
 }
 
-async fn authorize_tx(
+pub(crate) async fn authorize_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     actor_access: &TenantAccess,
     actor_id: UserId,
@@ -54,7 +54,7 @@ async fn authorize_tx(
     Ok(())
 }
 
-async fn bind_platform_tenant_tx(
+pub(crate) async fn bind_platform_tenant_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: wareboxes_domain::TenantId,
 ) -> AppResult<()> {

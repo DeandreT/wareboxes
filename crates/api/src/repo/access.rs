@@ -72,9 +72,11 @@ pub(crate) async fn current_scope_tx(
     let row = sqlx::query(
         r#"
         SELECT
-            COALESCE(service_account.all_facilities, membership.all_facilities)
+            COALESCE(service_account.all_facilities,support.all_facilities,
+              membership.all_facilities)
                 AS all_facilities,
-            ARRAY(
+            CASE WHEN support.support_access_grant_id IS NOT NULL
+              THEN support.facility_ids ELSE ARRAY(
                 SELECT scoped.facility_id FROM (
                     SELECT user_facility.facility_id
                     FROM user_facilities user_facility
@@ -90,10 +92,12 @@ pub(crate) async fn current_scope_tx(
                       AND account_facility.service_account_id = service_account.id
                       AND account_facility.revoked_at IS NULL
                 ) scoped ORDER BY scoped.facility_id
-            ) AS facility_ids,
-            COALESCE(service_account.all_inventory_owners, membership.all_inventory_owners)
+            ) END AS facility_ids,
+            COALESCE(service_account.all_inventory_owners,
+              support.all_inventory_owners,membership.all_inventory_owners)
                 AS all_inventory_owners,
-            ARRAY(
+            CASE WHEN support.support_access_grant_id IS NOT NULL
+              THEN support.inventory_owner_ids ELSE ARRAY(
                 SELECT scoped.inventory_owner_id FROM (
                     SELECT user_owner.inventory_owner_id
                     FROM user_inventory_owners user_owner
@@ -109,12 +113,15 @@ pub(crate) async fn current_scope_tx(
                       AND account_owner.service_account_id = service_account.id
                       AND account_owner.revoked_at IS NULL
                 ) scoped ORDER BY scoped.inventory_owner_id
-            ) AS inventory_owner_ids
+            ) END AS inventory_owner_ids
         FROM tenant_memberships membership
         LEFT JOIN service_accounts service_account
           ON service_account.tenant_id=membership.tenant_id
          AND service_account.principal_user_id=membership.user_id
          AND service_account.status='active'
+        LEFT JOIN LATERAL public.active_support_access_scope(
+          membership.tenant_id,membership.user_id) support
+          ON membership.support_managed
         WHERE membership.tenant_id = $1
           AND membership.user_id = $2
           AND membership.deleted IS NULL
@@ -176,6 +183,16 @@ pub(crate) async fn require_any_permission_tx(
         .iter()
         .map(|permission| permission.to_uppercase())
         .collect::<Vec<_>>();
+    let support_grant: bool =
+        sqlx::query_scalar("SELECT public.lock_support_access_permission($1,$2,$3)")
+            .bind(tenant_id.get())
+            .bind(user_id)
+            .bind(&requested_permissions)
+            .fetch_one(&mut **tx)
+            .await?;
+    if support_grant {
+        return Ok(());
+    }
     let service_account_grant = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT grant_record.id
