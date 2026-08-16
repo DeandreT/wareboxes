@@ -3,6 +3,7 @@
 pub mod authorization;
 pub mod backorder;
 pub mod billing;
+pub mod billing_decision_policy;
 pub mod configuration;
 mod context;
 pub mod count_decision_policy;

@@ -971,6 +971,13 @@ pub async fn generate_run(
         return Ok(result);
     }
     lock_contract_key_tx(&mut tx, access.tenant_id.get(), command.contract_id.get()).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!(
+            "configuration-kind:{}:billing",
+            access.tenant_id.get()
+        ))
+        .execute(&mut *tx)
+        .await?;
     let contract = read_contract_tx(&mut tx, access.tenant_id, command.contract_id).await?;
     require_record_scope(&scope, contract.inventory_owner_id, command.facility_id)?;
     if command.facility_id.is_none() && !scope.all_facilities {
@@ -1046,131 +1053,22 @@ pub async fn generate_run(
     )
     .await?;
 
-    let stats = sqlx::query(
-        r#"WITH eligible AS (
-             SELECT event.*,rate.id AS rate_id,rate.rate_minor,rate.minimum_charge_minor
-             FROM billable_events event
-             LEFT JOIN LATERAL (
-               SELECT candidate.id,candidate.rate_minor,candidate.minimum_charge_minor
-               FROM billing_rate_versions candidate
-               WHERE candidate.tenant_id=event.tenant_id
-                 AND candidate.contract_id=event.contract_id
-                 AND candidate.event_type=event.event_type AND candidate.unit=event.unit
-                 AND candidate.currency=$7
-                 AND candidate.effective_from<=event.occurred_at
-                 AND (candidate.effective_until IS NULL OR candidate.effective_until>event.occurred_at)
-               ORDER BY candidate.revision DESC,candidate.id DESC LIMIT 1
-             ) rate ON true
-             WHERE event.tenant_id=$1 AND event.contract_id=$2
-               AND event.occurred_at>=$3 AND event.occurred_at<$4
-               AND event.captured_at<=$6
-               AND ($5::BIGINT IS NULL OR event.facility_id=$5)
-               AND NOT EXISTS(
-                 SELECT 1 FROM billing_charges prior_charge
-                 JOIN billing_reconciliation_runs prior_run
-                   ON prior_run.tenant_id=prior_charge.tenant_id
-                  AND prior_run.id=prior_charge.reconciliation_run_id
-                 WHERE prior_charge.tenant_id=event.tenant_id
-                   AND prior_charge.billable_event_id=event.id
-                   AND prior_run.status<>'rejected'))
-           SELECT count(*)::BIGINT AS event_count,
-                  count(rate_id)::BIGINT AS charge_count,
-                  (count(*)-count(rate_id))::BIGINT AS unmatched_event_count,
-                  COALESCE(sum(GREATEST(rate_minor::NUMERIC*quantity,
-                                        minimum_charge_minor::NUMERIC)) FILTER
-                           (WHERE rate_id IS NOT NULL),0)::TEXT AS total_minor
-           FROM eligible"#,
+    let run_id = super::reconciliation_policy::create_run_tx(
+        &mut tx,
+        super::reconciliation_policy::ReconciliationRunInput {
+            tenant_id: access.tenant_id,
+            inventory_owner_id: contract.inventory_owner_id,
+            contract_id: command.contract_id,
+            facility_id: command.facility_id,
+            period_from: command.period_from,
+            period_until: command.period_until,
+            attempt,
+            supersedes_run_id,
+            currency: &contract.currency,
+            generated_by: context.actor_id,
+            generated_at: now,
+        },
     )
-    .bind(access.tenant_id.get())
-    .bind(command.contract_id.get())
-    .bind(command.period_from)
-    .bind(command.period_until)
-    .bind(command.facility_id.map(FacilityId::get))
-    .bind(now)
-    .bind(&contract.currency)
-    .fetch_one(&mut *tx)
-    .await?;
-    let event_count: i64 = stats.try_get("event_count")?;
-    let charge_count: i64 = stats.try_get("charge_count")?;
-    let unmatched_event_count: i64 = stats.try_get("unmatched_event_count")?;
-    let total_text: String = stats.try_get("total_minor")?;
-    let total_u128 = total_text
-        .parse::<u128>()
-        .map_err(|error| AppError::internal(format!("invalid billing total: {error}")))?;
-    let total_minor = i64::try_from(total_u128)
-        .map_err(|_| AppError::conflict("billing total exceeds supported financial range"))?;
-    let run_id: i64 = sqlx::query_scalar(
-        r#"INSERT INTO billing_reconciliation_runs
-             (tenant_id,inventory_owner_id,contract_id,facility_id,attempt,supersedes_run_id,
-              period_from,period_until,event_count,charge_count,unmatched_event_count,total_minor,
-              currency,generated_by_user_id,generated_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id"#,
-    )
-    .bind(access.tenant_id.get())
-    .bind(contract.inventory_owner_id.get())
-    .bind(command.contract_id.get())
-    .bind(command.facility_id.map(FacilityId::get))
-    .bind(attempt)
-    .bind(supersedes_run_id)
-    .bind(command.period_from)
-    .bind(command.period_until)
-    .bind(event_count)
-    .bind(charge_count)
-    .bind(unmatched_event_count)
-    .bind(total_minor)
-    .bind(&contract.currency)
-    .bind(context.actor_id.get())
-    .bind(now)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        r#"WITH eligible AS (
-             SELECT event.*,rate.id AS rate_id,rate.rate_minor,rate.minimum_charge_minor
-             FROM billable_events event
-             JOIN LATERAL (
-               SELECT candidate.id,candidate.rate_minor,candidate.minimum_charge_minor
-               FROM billing_rate_versions candidate
-               WHERE candidate.tenant_id=event.tenant_id
-                 AND candidate.contract_id=event.contract_id
-                 AND candidate.event_type=event.event_type AND candidate.unit=event.unit
-                 AND candidate.currency=$8
-                 AND candidate.effective_from<=event.occurred_at
-                 AND (candidate.effective_until IS NULL OR candidate.effective_until>event.occurred_at)
-               ORDER BY candidate.revision DESC,candidate.id DESC LIMIT 1
-             ) rate ON true
-             WHERE event.tenant_id=$1 AND event.contract_id=$2
-               AND event.occurred_at>=$3 AND event.occurred_at<$4
-               AND event.captured_at<=$6
-               AND ($5::BIGINT IS NULL OR event.facility_id=$5)
-               AND NOT EXISTS(
-                 SELECT 1 FROM billing_charges prior_charge
-                 JOIN billing_reconciliation_runs prior_run
-                   ON prior_run.tenant_id=prior_charge.tenant_id
-                  AND prior_run.id=prior_charge.reconciliation_run_id
-                 WHERE prior_charge.tenant_id=event.tenant_id
-                   AND prior_charge.billable_event_id=event.id
-                   AND prior_run.status<>'rejected'))
-           INSERT INTO billing_charges
-             (tenant_id,inventory_owner_id,facility_id,contract_id,reconciliation_run_id,
-              billable_event_id,rate_version_id,event_type,unit,quantity,rate_minor,
-              minimum_charge_minor,gross_minor,amount_minor,currency,source_type,
-              source_reference,occurred_at,created_at)
-           SELECT tenant_id,inventory_owner_id,facility_id,contract_id,$7,id,rate_id,event_type,
-                  unit,quantity,rate_minor,minimum_charge_minor,
-                  (rate_minor::NUMERIC*quantity)::BIGINT,
-                  GREATEST(rate_minor::NUMERIC*quantity,minimum_charge_minor::NUMERIC)::BIGINT,
-                  $8,source_type,source_reference,occurred_at,$6 FROM eligible ORDER BY id"#,
-    )
-    .bind(access.tenant_id.get())
-    .bind(command.contract_id.get())
-    .bind(command.period_from)
-    .bind(command.period_until)
-    .bind(command.facility_id.map(FacilityId::get))
-    .bind(now)
-    .bind(run_id)
-    .bind(&contract.currency)
-    .execute(&mut *tx)
     .await?;
     let result = read_run_tx(
         &mut tx,

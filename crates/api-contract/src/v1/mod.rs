@@ -71,10 +71,10 @@ pub use backorder::{
 };
 pub use billing::{
     BillableEventResponse, BillingChargeResponse, BillingContractResponse, BillingContractStatus,
-    BillingFinancialExportResponse, BillingLifecycleRequest, BillingPageRequest,
-    BillingRateResponse, BillingReviewDecision, BillingRunResponse, BillingRunStatus,
-    BillingStorageSnapshotResponse, BillingWorkspaceResponse, CaptureBillableEventRequest,
-    CaptureBillingStorageSnapshotRequest, ConfigureBillingRateRequest,
+    BillingDecisionPolicyResponse, BillingDecisionPolicySource, BillingFinancialExportResponse,
+    BillingLifecycleRequest, BillingPageRequest, BillingRateResponse, BillingReviewDecision,
+    BillingRunResponse, BillingRunStatus, BillingStorageSnapshotResponse, BillingWorkspaceResponse,
+    CaptureBillableEventRequest, CaptureBillingStorageSnapshotRequest, ConfigureBillingRateRequest,
     CreateBillingContractRequest, ExportBillingRunRequest, GenerateBillingRunRequest,
     ReviewBillingRunRequest, MAX_BILLING_BATCH_KEY_LENGTH, MAX_BILLING_NOTE_LENGTH,
     MAX_BILLING_REFERENCE_LENGTH,

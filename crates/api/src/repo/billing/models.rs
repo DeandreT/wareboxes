@@ -134,7 +134,12 @@ pub(super) fn charge(row: &sqlx::postgres::PgRow) -> AppResult<BillingChargeRead
     Ok(BillingChargeReadModel {
         charge_id: BillingChargeId::new(row.try_get("id")?).map_err(internal)?,
         event_id: BillableEventId::new(row.try_get("billable_event_id")?).map_err(internal)?,
-        rate_id: BillingRateId::new(row.try_get("rate_version_id")?).map_err(internal)?,
+        rate_id: row
+            .try_get::<Option<i64>, _>("rate_version_id")?
+            .map(BillingRateId::new)
+            .transpose()
+            .map_err(internal)?,
+        decision_policy: super::decision_policy::from_charge_row(row)?,
         event_type: parse_event(&row.try_get::<String, _>("event_type")?)?,
         unit: parse_unit(&row.try_get::<String, _>("unit")?)?,
         quantity: positive_u64(row.try_get("quantity")?, "billing charge quantity")?,

@@ -1,7 +1,9 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{BillableEventType, BillingUnit, OpaqueCursor, PageLimit, Revision};
+use super::{
+    BillableEventType, BillingUnit, ConfigurationScope, OpaqueCursor, PageLimit, Revision,
+};
 
 pub const MAX_BILLING_NOTE_LENGTH: usize = 500;
 pub const MAX_BILLING_REFERENCE_LENGTH: usize = 160;
@@ -214,7 +216,9 @@ pub struct BillingStorageSnapshotResponse {
 pub struct BillingChargeResponse {
     pub charge_id: i64,
     pub event_id: i64,
-    pub rate_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_id: Option<i64>,
+    pub decision_policy: BillingDecisionPolicyResponse,
     pub event_type: BillableEventType,
     pub unit: BillingUnit,
     pub quantity: u64,
@@ -226,6 +230,35 @@ pub struct BillingChargeResponse {
     pub source_type: String,
     pub source_reference: String,
     pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingDecisionPolicySource {
+    ContractRate,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BillingDecisionPolicyResponse {
+    pub source: BillingDecisionPolicySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_rate_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_rate_revision: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_revision: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub event_type: BillableEventType,
+    pub unit: BillingUnit,
+    pub currency: String,
+    pub rate_minor: u64,
+    pub minimum_charge_minor: u64,
+    pub policy_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,4 +328,22 @@ pub struct BillingPageRequest {
     pub cursor: Option<OpaqueCursor>,
     #[serde(default)]
     pub limit: PageLimit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn billing_decision_evidence_is_typed_and_strict() {
+        let evidence = serde_json::from_str::<BillingDecisionPolicyResponse>(
+            r#"{"source":"configuration","configuration_id":41,"configuration_revision":3,"configuration_scope":{"level":"owner_facility","inventory_owner_id":5,"facility_id":7},"event_type":"accessorial","unit":"event","currency":"USD","rate_minor":250,"minimum_charge_minor":500,"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        )
+        .unwrap();
+        assert_eq!(evidence.source, BillingDecisionPolicySource::Configuration);
+        assert!(serde_json::from_str::<BillingDecisionPolicyResponse>(
+            r#"{"source":"contract_rate","contract_rate_id":1,"contract_rate_revision":1,"event_type":"accessorial","unit":"event","currency":"USD","rate_minor":250,"minimum_charge_minor":500,"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","unknown":true}"#,
+        )
+        .is_err());
+    }
 }

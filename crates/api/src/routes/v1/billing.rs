@@ -3,13 +3,14 @@ use axum::Json;
 use wareboxes_api_contract::v1::{
     BillableEventResponse, BillableEventType as ApiEventType, BillingChargeResponse,
     BillingContractResponse, BillingContractStatus as ApiContractStatus,
+    BillingDecisionPolicyResponse, BillingDecisionPolicySource as ApiBillingPolicySource,
     BillingFinancialExportResponse, BillingLifecycleRequest, BillingPageRequest,
     BillingRateResponse, BillingReviewDecision as ApiReviewDecision, BillingRunResponse,
     BillingRunStatus as ApiRunStatus, BillingStorageSnapshotResponse,
     BillingUnit as ApiBillingUnit, BillingWorkspaceResponse, CaptureBillableEventRequest,
-    CaptureBillingStorageSnapshotRequest, ConfigureBillingRateRequest,
-    CreateBillingContractRequest, ExportBillingRunRequest, GenerateBillingRunRequest, OpaqueCursor,
-    ReviewBillingRunRequest, Revision,
+    CaptureBillingStorageSnapshotRequest, ConfigurationScope as ApiConfigurationScope,
+    ConfigureBillingRateRequest, CreateBillingContractRequest, ExportBillingRunRequest,
+    GenerateBillingRunRequest, OpaqueCursor, ReviewBillingRunRequest, Revision,
 };
 use wareboxes_application::billing::{
     BillableEventReadModel, BillingChargeReadModel, BillingContractLifecycleCommand,
@@ -18,6 +19,9 @@ use wareboxes_application::billing::{
     CaptureBillableEventCommand, CaptureStorageSnapshotCommand, ConfigureBillingRateCommand,
     CreateBillingContractCommand, ExportBillingRunCommand, GenerateBillingRunCommand,
     ReviewBillingRunCommand,
+};
+use wareboxes_application::billing_decision_policy::{
+    BillingDecisionPolicyReadModel, BillingDecisionPolicySource,
 };
 use wareboxes_domain::{
     BillableEventType, BillingContractId, BillingContractNumber, BillingContractStatus,
@@ -399,11 +403,12 @@ fn map_snapshot(value: BillingStorageSnapshotReadModel) -> BillingStorageSnapsho
     }
 }
 
-fn map_charge(value: BillingChargeReadModel) -> BillingChargeResponse {
-    BillingChargeResponse {
+fn map_charge(value: BillingChargeReadModel) -> V1Result<BillingChargeResponse> {
+    Ok(BillingChargeResponse {
         charge_id: value.charge_id.get(),
         event_id: value.event_id.get(),
-        rate_id: value.rate_id.get(),
+        rate_id: value.rate_id.map(|rate| rate.get()),
+        decision_policy: map_billing_decision_policy(value.decision_policy)?,
         event_type: map_event_to_api(value.event_type),
         unit: map_unit_to_api(value.unit),
         quantity: value.quantity,
@@ -415,6 +420,63 @@ fn map_charge(value: BillingChargeReadModel) -> BillingChargeResponse {
         source_type: value.source_type,
         source_reference: value.source_reference,
         occurred_at: value.occurred_at.to_rfc3339(),
+    })
+}
+
+fn map_billing_decision_policy(
+    policy: BillingDecisionPolicyReadModel,
+) -> V1Result<BillingDecisionPolicyResponse> {
+    Ok(BillingDecisionPolicyResponse {
+        source: match policy.source {
+            BillingDecisionPolicySource::ContractRate => ApiBillingPolicySource::ContractRate,
+            BillingDecisionPolicySource::Configuration => ApiBillingPolicySource::Configuration,
+        },
+        contract_rate_id: policy.contract_rate_id.map(|rate| rate.get()),
+        contract_rate_revision: policy
+            .contract_rate_revision
+            .map(Revision::new)
+            .transpose()
+            .map_err(invalid_result)?,
+        configuration_id: policy
+            .configuration_id
+            .map(|configuration| configuration.get()),
+        configuration_revision: policy
+            .configuration_revision
+            .map(Revision::new)
+            .transpose()
+            .map_err(invalid_result)?,
+        configuration_scope: policy.configuration_scope.map(map_configuration_scope),
+        event_type: map_event_to_api(policy.event_type),
+        unit: map_unit_to_api(policy.unit),
+        currency: policy.currency,
+        rate_minor: policy.rate_minor,
+        minimum_charge_minor: policy.minimum_charge_minor,
+        policy_hash: policy.policy_hash,
+    })
+}
+
+const fn map_configuration_scope(
+    scope: wareboxes_domain::ConfigurationScope,
+) -> ApiConfigurationScope {
+    match scope {
+        wareboxes_domain::ConfigurationScope::Tenant => ApiConfigurationScope::Tenant,
+        wareboxes_domain::ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+            ApiConfigurationScope::InventoryOwner {
+                inventory_owner_id: inventory_owner_id.get(),
+            }
+        }
+        wareboxes_domain::ConfigurationScope::Facility { facility_id } => {
+            ApiConfigurationScope::Facility {
+                facility_id: facility_id.get(),
+            }
+        }
+        wareboxes_domain::ConfigurationScope::OwnerFacility {
+            inventory_owner_id,
+            facility_id,
+        } => ApiConfigurationScope::OwnerFacility {
+            inventory_owner_id: inventory_owner_id.get(),
+            facility_id: facility_id.get(),
+        },
     }
 }
 
@@ -448,7 +510,11 @@ fn map_run(value: BillingRunReadModel) -> V1Result<BillingRunResponse> {
         reviewed_at: value.reviewed_at.map(|timestamp| timestamp.to_rfc3339()),
         review_note: value.review_note,
         exported_at: value.exported_at.map(|timestamp| timestamp.to_rfc3339()),
-        charges: value.charges.into_iter().map(map_charge).collect(),
+        charges: value
+            .charges
+            .into_iter()
+            .map(map_charge)
+            .collect::<V1Result<Vec<_>>>()?,
     })
 }
 

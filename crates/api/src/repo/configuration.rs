@@ -274,6 +274,26 @@ async fn lock_natural_key_tx(
     Ok(())
 }
 
+async fn lock_kind_for_configuration_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    configuration_id: ConfigurationVersionId,
+) -> AppResult<()> {
+    let kind = sqlx::query_scalar::<_, String>(
+        "SELECT kind FROM configuration_versions WHERE tenant_id=$1 AND id=$2",
+    )
+    .bind(tenant_id.get())
+    .bind(configuration_id.get())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("configuration"))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("configuration-kind:{}:{kind}", tenant_id.get()))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn read_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
@@ -519,6 +539,7 @@ async fn transition_configuration(
         tx.commit().await?;
         return Ok(result);
     }
+    lock_kind_for_configuration_tx(&mut tx, access.tenant_id, command.configuration_id).await?;
     let row =
         sqlx::query("SELECT * FROM configuration_versions WHERE tenant_id=$1 AND id=$2 FOR UPDATE")
             .bind(access.tenant_id.get())
@@ -655,6 +676,7 @@ pub async fn activate_configuration(
         tx.commit().await?;
         return Ok(result);
     }
+    lock_kind_for_configuration_tx(&mut tx, access.tenant_id, command.configuration_id).await?;
     let row =
         sqlx::query("SELECT * FROM configuration_versions WHERE tenant_id=$1 AND id=$2 FOR UPDATE")
             .bind(access.tenant_id.get())
@@ -755,6 +777,8 @@ pub async fn rollback_configuration(
         tx.commit().await?;
         return Ok(result);
     }
+    lock_kind_for_configuration_tx(&mut tx, access.tenant_id, command.source_configuration_id)
+        .await?;
     let source_row =
         sqlx::query("SELECT * FROM configuration_versions WHERE tenant_id=$1 AND id=$2 FOR SHARE")
             .bind(access.tenant_id.get())

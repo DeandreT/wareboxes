@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_billing/decision_policy.rs"]
+mod decision_policy;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -11,9 +13,9 @@ use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{repo, routes, state::AppState};
 use wareboxes_api_contract::v1::{
     BillableEventResponse, BillableEventType, BillingContractResponse, BillingContractStatus,
-    BillingFinancialExportResponse, BillingLifecycleRequest, BillingPageRequest,
-    BillingRateResponse, BillingReviewDecision, BillingRunResponse, BillingRunStatus,
-    BillingStorageSnapshotResponse, BillingUnit, BillingWorkspaceResponse,
+    BillingDecisionPolicySource, BillingFinancialExportResponse, BillingLifecycleRequest,
+    BillingPageRequest, BillingRateResponse, BillingReviewDecision, BillingRunResponse,
+    BillingRunStatus, BillingStorageSnapshotResponse, BillingUnit, BillingWorkspaceResponse,
     CaptureBillableEventRequest, CaptureBillingStorageSnapshotRequest, ConfigureBillingRateRequest,
     CreateBillingContractRequest, ExportBillingRunRequest, GenerateBillingRunRequest, PageLimit,
     ReviewBillingRunRequest, Revision,
@@ -366,6 +368,11 @@ async fn billing_lifecycle_storage_reconciliation_review_export_and_replay_are_c
     assert_eq!(run.unmatched_event_count, 0);
     assert_eq!(run.total_minor, 2_000);
     assert_eq!(run.charges[0].gross_minor, 2_000);
+    assert_eq!(
+        run.charges[0].decision_policy.source,
+        BillingDecisionPolicySource::ContractRate
+    );
+    assert_eq!(run.charges[0].rate_id, Some(rate.rate_id));
 
     let approve = ReviewBillingRunRequest {
         expected_revision: run.revision,
@@ -421,6 +428,10 @@ async fn billing_lifecycle_storage_reconciliation_review_export_and_replay_are_c
         hex::encode(Sha256::digest(export.csv_content.as_bytes()))
     );
     assert!(export.csv_content.contains("SPECIAL-HANDLING-1"));
+    assert!(export.csv_content.contains("decision_policy_source"));
+    assert!(export
+        .csv_content
+        .contains(&run.charges[0].decision_policy.policy_hash));
 
     let workspace: BillingWorkspaceResponse = response_json(
         rig.send::<BillingPageRequest>(

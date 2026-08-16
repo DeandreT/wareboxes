@@ -9,6 +9,8 @@ use wareboxes_domain::{
     UserId,
 };
 
+use crate::billing_decision_policy::BillingDecisionPolicyReadModel;
+
 pub const CREATE_BILLING_CONTRACT_OPERATION: &str = "billing.contract.create.v1";
 pub const ACTIVATE_BILLING_CONTRACT_OPERATION: &str = "billing.contract.activate.v1";
 pub const CLOSE_BILLING_CONTRACT_OPERATION: &str = "billing.contract.close.v1";
@@ -153,7 +155,8 @@ pub struct BillingStorageSnapshotReadModel {
 pub struct BillingChargeReadModel {
     pub charge_id: BillingChargeId,
     pub event_id: BillableEventId,
-    pub rate_id: BillingRateId,
+    pub rate_id: Option<BillingRateId>,
+    pub decision_policy: BillingDecisionPolicyReadModel,
     pub event_type: BillableEventType,
     pub unit: BillingUnit,
     pub quantity: u64,

@@ -7,7 +7,9 @@ use wareboxes_application::billing::{
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
-use wareboxes_domain::{validate_review_separation, BillingFinancialExportId, FacilityId};
+use wareboxes_domain::{
+    validate_review_separation, BillingFinancialExportId, ConfigurationScope, FacilityId,
+};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::models::{financial_export, read_run_tx};
@@ -157,11 +159,12 @@ fn csv_field(value: &str) -> String {
 
 fn build_export_csv(run: &BillingRunReadModel) -> String {
     let mut csv = String::from(
-        "run_id,attempt,contract_number,inventory_owner_id,facility_id,charge_id,event_type,unit,quantity,rate_minor,minimum_charge_minor,amount_minor,currency,source_type,source_reference,occurred_at\n",
+        "run_id,attempt,contract_number,inventory_owner_id,facility_id,charge_id,event_type,unit,quantity,rate_minor,minimum_charge_minor,amount_minor,currency,source_type,source_reference,occurred_at,decision_policy_source,contract_rate_id,contract_rate_revision,configuration_id,configuration_revision,configuration_scope,decision_policy_hash\n",
     );
     for charge in &run.charges {
+        let policy = &charge.decision_policy;
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             run.run_id.get(),
             run.attempt,
             csv_field(&run.contract_number),
@@ -178,9 +181,46 @@ fn build_export_csv(run: &BillingRunReadModel) -> String {
             csv_field(&charge.source_type),
             csv_field(&charge.source_reference),
             charge.occurred_at.to_rfc3339(),
+            policy.source.as_str(),
+            optional_number(policy.contract_rate_id.map(|rate| rate.get())),
+            optional_number(policy.contract_rate_revision),
+            optional_number(
+                policy
+                    .configuration_id
+                    .map(|configuration| configuration.get())
+            ),
+            optional_number(policy.configuration_revision),
+            policy
+                .configuration_scope
+                .map_or_else(String::new, configuration_scope_component),
+            policy.policy_hash,
         ));
     }
     csv
+}
+
+fn optional_number(value: Option<i64>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
+fn configuration_scope_component(scope: ConfigurationScope) -> String {
+    match scope {
+        ConfigurationScope::Tenant => "tenant".to_owned(),
+        ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+            format!("inventory_owner:{}", inventory_owner_id.get())
+        }
+        ConfigurationScope::Facility { facility_id } => {
+            format!("facility:{}", facility_id.get())
+        }
+        ConfigurationScope::OwnerFacility {
+            inventory_owner_id,
+            facility_id,
+        } => format!(
+            "owner_facility:{}:{}",
+            inventory_owner_id.get(),
+            facility_id.get()
+        ),
+    }
 }
 
 pub async fn export_run(

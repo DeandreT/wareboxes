@@ -51498,3 +51498,197 @@ FOR EACH ROW EXECUTE FUNCTION public.guard_count_decision_snapshot();
 
 REVOKE ALL ON FUNCTION public.validate_count_decision_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_count_decision_snapshot() FROM PUBLIC;
+
+-- Execute inherited Billing decisions per billable event. Contract rate cards
+-- remain the governed fallback and every immutable charge freezes its exact
+-- decision source and terms.
+ALTER TABLE public.billing_charges
+  ALTER COLUMN rate_version_id DROP NOT NULL,
+  ADD COLUMN contract_rate_revision bigint,
+  ADD COLUMN decision_policy_source text NOT NULL,
+  ADD COLUMN decision_configuration_id bigint,
+  ADD COLUMN decision_configuration_revision bigint,
+  ADD COLUMN decision_scope_level text,
+  ADD COLUMN decision_inventory_owner_id bigint,
+  ADD COLUMN decision_facility_id bigint,
+  ADD COLUMN decision_policy_hash text NOT NULL,
+  ADD CONSTRAINT billing_charges_decision_policy_shape CHECK (
+    decision_policy_source IN ('contract_rate','configuration')
+    AND decision_policy_hash~'^[0-9a-f]{64}$'
+    AND ((decision_policy_source='contract_rate'
+      AND rate_version_id IS NOT NULL AND contract_rate_revision>0
+      AND decision_configuration_id IS NULL
+      AND decision_configuration_revision IS NULL
+      AND decision_scope_level IS NULL AND decision_inventory_owner_id IS NULL
+      AND decision_facility_id IS NULL)
+    OR (decision_policy_source='configuration'
+      AND rate_version_id IS NULL AND contract_rate_revision IS NULL
+      AND decision_configuration_id IS NOT NULL
+      AND decision_configuration_revision>0
+      AND ((decision_scope_level='tenant' AND decision_inventory_owner_id IS NULL
+            AND decision_facility_id IS NULL)
+        OR (decision_scope_level='inventory_owner'
+            AND decision_inventory_owner_id IS NOT NULL AND decision_facility_id IS NULL)
+        OR (decision_scope_level='facility' AND decision_inventory_owner_id IS NULL
+            AND decision_facility_id IS NOT NULL)
+        OR (decision_scope_level='owner_facility'
+            AND decision_inventory_owner_id IS NOT NULL
+            AND decision_facility_id IS NOT NULL))))),
+  ADD CONSTRAINT billing_charges_decision_configuration_fkey
+    FOREIGN KEY(tenant_id,decision_configuration_id)
+    REFERENCES public.configuration_versions(tenant_id,id);
+
+CREATE INDEX billing_charges_decision_configuration_idx
+ON public.billing_charges(tenant_id,decision_configuration_id)
+WHERE decision_configuration_id IS NOT NULL;
+
+CREATE FUNCTION public.billing_decision_policy_hash(
+  policy_source text,contract_rate_id bigint,contract_rate_revision bigint,
+  configuration_id bigint,configuration_revision bigint,scope_level text,
+  scope_owner_id bigint,scope_facility_id bigint,event_name text,unit_name text,
+  currency_code text,rate_value bigint,minimum_value bigint
+) RETURNS text LANGUAGE sql IMMUTABLE SET search_path TO 'pg_catalog','public' AS $$
+  SELECT encode(sha256(convert_to(
+    'billing-decision-policy-v1|'||policy_source||'|'
+    ||COALESCE(contract_rate_id::text,'-')||'|'
+    ||COALESCE(contract_rate_revision::text,'-')||'|'
+    ||COALESCE(configuration_id::text,'-')||'|'
+    ||COALESCE(configuration_revision::text,'-')||'|'
+    ||CASE scope_level
+        WHEN 'tenant' THEN 'tenant'
+        WHEN 'inventory_owner' THEN 'inventory_owner:'||scope_owner_id::text
+        WHEN 'facility' THEN 'facility:'||scope_facility_id::text
+        WHEN 'owner_facility' THEN 'owner_facility:'||scope_owner_id::text
+          ||':'||scope_facility_id::text
+        ELSE '-' END||'|'||event_name||'|'||unit_name||'|'||currency_code||'|'
+    ||rate_value::text||'|'||minimum_value::text,'UTF8')),'hex')
+$$;
+
+CREATE OR REPLACE FUNCTION public.validate_billing_charge_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE run_row public.billing_reconciliation_runs%ROWTYPE;
+DECLARE event_row public.billable_events%ROWTYPE;
+DECLARE rate_row public.billing_rate_versions%ROWTYPE;
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE gross numeric; DECLARE amount numeric; DECLARE calculated_hash text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:billing',NEW.tenant_id),0));
+  SELECT * INTO run_row FROM public.billing_reconciliation_runs run
+  WHERE run.tenant_id=NEW.tenant_id AND run.id=NEW.reconciliation_run_id FOR SHARE;
+  SELECT * INTO event_row FROM public.billable_events event
+  WHERE event.tenant_id=NEW.tenant_id AND event.id=NEW.billable_event_id;
+  IF event_row.id IS NOT NULL THEN
+    SELECT configuration.* INTO configuration_row
+    FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=event_row.tenant_id AND configuration.kind='billing'
+      AND configuration.status IN ('active','retired')
+      AND configuration.activated_at<=event_row.occurred_at
+      AND (configuration.retired_at IS NULL
+        OR configuration.retired_at>event_row.occurred_at)
+      AND configuration.effective_from<=event_row.occurred_at
+      AND (configuration.effective_until IS NULL
+        OR configuration.effective_until>event_row.occurred_at)
+      AND (configuration.inventory_owner_id IS NULL
+        OR configuration.inventory_owner_id=event_row.inventory_owner_id)
+      AND (configuration.facility_id IS NULL
+        OR configuration.facility_id=event_row.facility_id)
+      AND configuration.definition->>'event_type'=event_row.event_type
+      AND configuration.definition->>'unit'=event_row.unit
+      AND configuration.definition->>'currency'=NEW.currency
+    ORDER BY CASE configuration.scope_level WHEN 'owner_facility' THEN 2
+      WHEN 'inventory_owner' THEN 1 WHEN 'facility' THEN 1 ELSE 0 END DESC,
+      configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+    LIMIT 1 FOR SHARE;
+  END IF;
+
+  IF NEW.decision_policy_source='configuration' THEN
+    IF configuration_row.id IS NULL
+      OR NEW.rate_version_id IS NOT NULL OR NEW.contract_rate_revision IS NOT NULL
+      OR NEW.decision_configuration_id IS DISTINCT FROM configuration_row.id
+      OR NEW.decision_configuration_revision IS DISTINCT FROM
+        (CASE configuration_row.status WHEN 'retired' THEN configuration_row.revision-1
+              ELSE configuration_row.revision END)
+      OR NEW.decision_scope_level IS DISTINCT FROM configuration_row.scope_level
+      OR NEW.decision_inventory_owner_id IS DISTINCT FROM configuration_row.inventory_owner_id
+      OR NEW.decision_facility_id IS DISTINCT FROM configuration_row.facility_id
+      OR NEW.event_type IS DISTINCT FROM configuration_row.definition->>'event_type'
+      OR NEW.unit IS DISTINCT FROM configuration_row.definition->>'unit'
+      OR NEW.currency IS DISTINCT FROM configuration_row.definition->>'currency'
+      OR NEW.rate_minor IS DISTINCT FROM
+        (configuration_row.definition->>'rate_minor')::bigint
+      OR NEW.minimum_charge_minor IS DISTINCT FROM
+        (configuration_row.definition->>'minimum_charge_minor')::bigint THEN
+      RAISE EXCEPTION 'Billing charge does not match its effective configuration'
+        USING ERRCODE='55000';
+    END IF;
+  ELSE
+    IF configuration_row.id IS NOT NULL OR NEW.decision_configuration_id IS NOT NULL
+      OR NEW.decision_configuration_revision IS NOT NULL
+      OR NEW.decision_scope_level IS NOT NULL
+      OR NEW.decision_inventory_owner_id IS NOT NULL OR NEW.decision_facility_id IS NOT NULL THEN
+      RAISE EXCEPTION 'contract Billing rate cannot bypass an effective configuration'
+        USING ERRCODE='55000';
+    END IF;
+    SELECT rate.* INTO rate_row FROM public.billing_rate_versions rate
+    WHERE rate.tenant_id=event_row.tenant_id AND rate.contract_id=event_row.contract_id
+      AND rate.event_type=event_row.event_type AND rate.unit=event_row.unit
+      AND rate.currency=NEW.currency AND rate.effective_from<=event_row.occurred_at
+      AND (rate.effective_until IS NULL OR rate.effective_until>event_row.occurred_at)
+    ORDER BY rate.revision DESC,rate.id DESC LIMIT 1 FOR SHARE;
+    IF rate_row.id IS NULL OR NEW.rate_version_id IS DISTINCT FROM rate_row.id
+      OR NEW.contract_rate_revision IS DISTINCT FROM rate_row.revision
+      OR NEW.rate_minor IS DISTINCT FROM rate_row.rate_minor
+      OR NEW.minimum_charge_minor IS DISTINCT FROM rate_row.minimum_charge_minor THEN
+      RAISE EXCEPTION 'Billing charge does not match its effective contract rate'
+        USING ERRCODE='55000';
+    END IF;
+  END IF;
+
+  calculated_hash:=public.billing_decision_policy_hash(
+    NEW.decision_policy_source,NEW.rate_version_id,NEW.contract_rate_revision,
+    NEW.decision_configuration_id,NEW.decision_configuration_revision,
+    NEW.decision_scope_level,NEW.decision_inventory_owner_id,NEW.decision_facility_id,
+    NEW.event_type,NEW.unit,NEW.currency,NEW.rate_minor,NEW.minimum_charge_minor);
+  gross:=NEW.rate_minor::numeric*NEW.quantity;
+  amount:=GREATEST(gross,NEW.minimum_charge_minor::numeric);
+  IF run_row.id IS NULL OR run_row.status<>'pending_review'
+     OR event_row.id IS NULL
+     OR NEW.inventory_owner_id IS DISTINCT FROM run_row.inventory_owner_id
+     OR NEW.contract_id IS DISTINCT FROM run_row.contract_id
+     OR NEW.inventory_owner_id IS DISTINCT FROM event_row.inventory_owner_id
+     OR NEW.facility_id IS DISTINCT FROM event_row.facility_id
+     OR (run_row.facility_id IS NOT NULL
+       AND NEW.facility_id IS DISTINCT FROM run_row.facility_id)
+     OR event_row.occurred_at<run_row.period_from OR event_row.occurred_at>=run_row.period_until
+     OR NEW.contract_id IS DISTINCT FROM event_row.contract_id
+     OR NEW.event_type IS DISTINCT FROM event_row.event_type
+     OR NEW.unit IS DISTINCT FROM event_row.unit
+     OR NEW.quantity IS DISTINCT FROM event_row.quantity
+     OR NEW.currency IS DISTINCT FROM run_row.currency
+     OR gross>9223372036854775807 OR NEW.gross_minor IS DISTINCT FROM gross
+     OR amount>9223372036854775807 OR NEW.amount_minor IS DISTINCT FROM amount
+     OR NEW.source_type IS DISTINCT FROM event_row.source_type
+     OR NEW.source_reference IS DISTINCT FROM event_row.source_reference
+     OR NEW.occurred_at IS DISTINCT FROM event_row.occurred_at
+     OR NEW.decision_policy_hash IS DISTINCT FROM calculated_hash
+     OR EXISTS(
+       SELECT 1 FROM public.billing_charges prior_charge
+       JOIN public.billing_reconciliation_runs prior_run
+         ON prior_run.tenant_id=prior_charge.tenant_id
+        AND prior_run.id=prior_charge.reconciliation_run_id
+       WHERE prior_charge.tenant_id=NEW.tenant_id
+         AND prior_charge.billable_event_id=NEW.billable_event_id
+         AND prior_run.status<>'rejected') THEN
+    RAISE EXCEPTION 'billing charge does not reconcile its run, event, and policy'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+GRANT EXECUTE ON FUNCTION public.billing_decision_policy_hash(
+  text,bigint,bigint,bigint,bigint,text,bigint,bigint,text,text,text,bigint,bigint
+) TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.billing_decision_policy_hash(
+  text,bigint,bigint,bigint,bigint,text,bigint,bigint,text,text,text,bigint,bigint
+) FROM PUBLIC;

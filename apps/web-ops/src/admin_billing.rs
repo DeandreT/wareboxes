@@ -1,8 +1,9 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    BillableEventType, BillingContractStatus, BillingFinancialExportResponse,
-    BillingLifecycleRequest, BillingReviewDecision, BillingRunStatus, BillingUnit,
-    BillingWorkspaceResponse, CaptureBillableEventRequest, CaptureBillingStorageSnapshotRequest,
+    BillableEventType, BillingContractStatus, BillingDecisionPolicyResponse,
+    BillingDecisionPolicySource, BillingFinancialExportResponse, BillingLifecycleRequest,
+    BillingReviewDecision, BillingRunStatus, BillingUnit, BillingWorkspaceResponse,
+    CaptureBillableEventRequest, CaptureBillingStorageSnapshotRequest, ConfigurationScope,
     ConfigureBillingRateRequest, CreateBillingContractRequest, ExportBillingRunRequest,
     GenerateBillingRunRequest, ReviewBillingRunRequest,
 };
@@ -371,12 +372,50 @@ fn selected_run(signals: Signals, draft: Draft, current_user: i64) -> AnyView {
     view!{<div><div class="admin-editor-heading"><div><p class="eyebrow">{format!("{} · attempt {}",run.contract_number,run.attempt)}</p><h2>{format!("Reconciliation #{}",run.run_id)}</h2></div><span class=status_class_run(run.status)>{run_status(run.status)}</span></div><div class="billing-run-summary"><strong>{money(run.total_minor,&run.currency)}</strong><span>{format!("{} charges / {} events",run.charge_count,run.event_count)}</span><span class:warning-text=(run.unmatched_event_count>0)>{format!("{} unmatched",run.unmatched_event_count)}</span></div>
         {(run.status==BillingRunStatus::PendingReview).then(||view!{<section class="billing-review"><label><span>"Review note"</span><textarea prop:value=move ||draft.review_note.get() on:input=move |event|draft.review_note.set(event_target_value(&event))></textarea></label><div class="admin-actions"><button type="button" class="button primary-action" disabled={self_review||run.unmatched_event_count>0} on:click=move |_|dispatch(signals,PendingCommand::Review(approve.run_id,ReviewBillingRunRequest{expected_revision:approve.revision,decision:BillingReviewDecision::Approve,note:nonblank(draft.review_note.get_untracked())},api::new_idempotency_key()))>"Approve reconciled charges"</button><button type="button" class="button danger-action" disabled=move ||draft.review_note.get().trim().is_empty() on:click=move |_|dispatch(signals,PendingCommand::Review(reject.run_id,ReviewBillingRunRequest{expected_revision:reject.revision,decision:BillingReviewDecision::Reject,note:nonblank(draft.review_note.get_untracked())},api::new_idempotency_key()))>"Reject for correction"</button></div>{self_review.then(||view!{<p class="admin-help">"A different administrator must review this run."</p>})}</section>})}
         {(run.status==BillingRunStatus::Approved).then(||view!{<section class="billing-review"><label><span>"External batch key"</span><input prop:value=move ||draft.export_batch.get() on:input=move |event|draft.export_batch.set(event_target_value(&event))/></label><button type="button" class="button primary-action" disabled=move ||draft.export_batch.get().trim().is_empty() on:click=move |_|dispatch(signals,PendingCommand::Export(export.run_id,ExportBillingRunRequest{expected_revision:export.revision,external_batch_key:draft.export_batch.get_untracked()},api::new_idempotency_key()))>"Create financial export"</button></section>})}
-        <h3>"Immutable charge lines"</h3><div class="admin-table-wrap"><table class="admin-table compact-table"><thead><tr><th>"Event"</th><th>"Reference"</th><th>"Qty"</th><th>"Rate"</th><th>"Amount"</th></tr></thead><tbody>{run.charges.into_iter().map(|charge|view!{<tr><td>{event_label(charge.event_type)}</td><td>{charge.source_reference}</td><td>{charge.quantity}</td><td>{money(charge.rate_minor,&charge.currency)}</td><td>{money(charge.amount_minor,&charge.currency)}</td></tr>}).collect_view()}</tbody></table></div>
+        <h3>"Immutable charge lines"</h3><div class="admin-table-wrap"><table class="admin-table compact-table"><thead><tr><th>"Event"</th><th>"Reference"</th><th>"Qty"</th><th>"Rate"</th><th>"Decision source"</th><th>"Amount"</th></tr></thead><tbody>{run.charges.into_iter().map(|charge|{let source=billing_policy_label(&charge.decision_policy);view!{<tr><td>{event_label(charge.event_type)}</td><td>{charge.source_reference}</td><td>{charge.quantity}</td><td>{money(charge.rate_minor,&charge.currency)}</td><td><span class="mono-value">{source}</span></td><td>{money(charge.amount_minor,&charge.currency)}</td></tr>}}).collect_view()}</tbody></table></div>
     </div>}.into_any()
 }
 
 fn export_receipt(export: BillingFinancialExportResponse) -> impl IntoView {
     view! {<section class="admin-editor billing-export-receipt"><div class="admin-editor-heading"><div><p class="eyebrow">"Financial export ready"</p><h2>{export.external_batch_key}</h2></div><span class="status-chip success">"Hashed + immutable"</span></div><dl class="admin-facts"><div><dt>"SHA-256"</dt><dd class="mono-value">{export.content_sha256}</dd></div><div><dt>"Lines"</dt><dd>{export.line_count}</dd></div><div><dt>"Total"</dt><dd>{money(export.total_minor,&export.currency)}</dd></div></dl><label><span>"CSV content"</span><textarea class="billing-csv" readonly prop:value=export.csv_content></textarea></label></section>}
+}
+
+fn billing_policy_label(policy: &BillingDecisionPolicyResponse) -> String {
+    match policy.source {
+        BillingDecisionPolicySource::ContractRate => format!(
+            "contract rate #{} r{} · {}",
+            policy.contract_rate_id.unwrap_or_default(),
+            policy
+                .contract_rate_revision
+                .map_or(0, |revision| revision.get()),
+            short_hash(&policy.policy_hash),
+        ),
+        BillingDecisionPolicySource::Configuration => format!(
+            "configuration #{} r{} ({}) · {}",
+            policy.configuration_id.unwrap_or_default(),
+            policy
+                .configuration_revision
+                .map_or(0, |revision| revision.get()),
+            policy
+                .configuration_scope
+                .map(configuration_scope_label)
+                .unwrap_or("invalid scope"),
+            short_hash(&policy.policy_hash),
+        ),
+    }
+}
+
+const fn configuration_scope_label(scope: ConfigurationScope) -> &'static str {
+    match scope {
+        ConfigurationScope::Tenant => "tenant",
+        ConfigurationScope::InventoryOwner { .. } => "client",
+        ConfigurationScope::Facility { .. } => "facility",
+        ConfigurationScope::OwnerFacility { .. } => "client + facility",
+    }
+}
+
+fn short_hash(hash: &str) -> &str {
+    hash.get(..8).unwrap_or(hash)
 }
 
 fn dispatch(signals: Signals, command: PendingCommand) {
@@ -714,4 +753,46 @@ fn parse_unit(value: &str) -> Option<BillingUnit> {
     ]
     .into_iter()
     .find(|unit| unit_wire(*unit) == value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wareboxes_api_contract::v1::Revision;
+
+    fn policy(source: BillingDecisionPolicySource) -> BillingDecisionPolicyResponse {
+        BillingDecisionPolicyResponse {
+            source,
+            contract_rate_id: (source == BillingDecisionPolicySource::ContractRate).then_some(7),
+            contract_rate_revision: (source == BillingDecisionPolicySource::ContractRate)
+                .then(|| Revision::new(2).unwrap()),
+            configuration_id: (source == BillingDecisionPolicySource::Configuration).then_some(11),
+            configuration_revision: (source == BillingDecisionPolicySource::Configuration)
+                .then(|| Revision::new(4).unwrap()),
+            configuration_scope: (source == BillingDecisionPolicySource::Configuration).then_some(
+                ConfigurationScope::OwnerFacility {
+                    inventory_owner_id: 13,
+                    facility_id: 17,
+                },
+            ),
+            event_type: BillableEventType::Accessorial,
+            unit: BillingUnit::Event,
+            currency: "USD".into(),
+            rate_minor: 250,
+            minimum_charge_minor: 500,
+            policy_hash: "abcdef0123456789".into(),
+        }
+    }
+
+    #[test]
+    fn charge_policy_labels_expose_source_revision_scope_and_hash() {
+        assert_eq!(
+            billing_policy_label(&policy(BillingDecisionPolicySource::ContractRate)),
+            "contract rate #7 r2 · abcdef01"
+        );
+        assert_eq!(
+            billing_policy_label(&policy(BillingDecisionPolicySource::Configuration)),
+            "configuration #11 r4 (client + facility) · abcdef01"
+        );
+    }
 }
