@@ -210,6 +210,79 @@ fn full_pallet_scan_confirms_the_same_physical_license_plate() {
 }
 
 #[test]
+fn batch_cart_reuses_only_verified_scans_for_the_same_frozen_balance() {
+    let mut first = claim(false);
+    first.execution = PickExecutionEvidence {
+        method: PickExecutionMethod::BatchCart,
+        cluster_id: Some(70),
+        cart_barcode: Some("BATCH-CART".into()),
+        slot_code: Some("A".into()),
+        sequence: Some(1),
+        task_count: Some(2),
+        batch_total_quantity: Some(7),
+    };
+    let mut workflow = PickingWorkflow::default();
+    activate(&mut workflow, first.clone());
+    scan(&mut workflow, "A-01-02");
+    scan(&mut workflow, "CASE-111");
+    scan(&mut workflow, "TOTE-A");
+    workflow.command_persisted("confirm-command", 17);
+    workflow.dispatch_started(17);
+    workflow.durable_outcome_recorded(
+        17,
+        CommandOutcome::PickConfirmed {
+            task_id: first.task_id,
+            content_id: first.content.content_id,
+            task_completed: true,
+            order_ready_to_pack: false,
+        },
+    );
+
+    *workflow.cluster_id_draft_mut() = "70".into();
+    workflow.begin_cluster_claim("batch-next".into(), "batch-next-key".into());
+    workflow.command_persisted("batch-next", 18);
+    workflow.dispatch_started(18);
+    let mut second = first;
+    second.task_id = 42;
+    second.order_id = 52;
+    second.content.content_id = 62;
+    second.execution.slot_code = Some("B".into());
+    second.execution.sequence = Some(2);
+    workflow.durable_outcome_recorded(
+        18,
+        CommandOutcome::PickClaimed(Some(Box::new(second.clone()))),
+    );
+    assert_eq!(
+        workflow.expected_scan(),
+        Some(PickScanStage::DestinationLicensePlate)
+    );
+    let WorkflowEffect::PersistCommand(draft) = scan(&mut workflow, "TOTE-B").unwrap() else {
+        panic!("the next batch slot must persist a confirmation");
+    };
+    assert!(matches!(
+        draft.command,
+        RfCommand::Picking(PickingCommand::Confirm {
+            task_id: 42,
+            source_location_barcode: Some(ref source),
+            item_barcode: Some(ref item),
+            ..
+        }) if source == "A-01-02" && item == "CASE-111"
+    ));
+
+    workflow.durable_rejection_recorded(0, String::new());
+    let mut mismatched = second;
+    mismatched.task_id = 43;
+    mismatched.content.source_inventory_balance_id = 999;
+    workflow.claim = Some(mismatched);
+    workflow.lane = Lane::Empty;
+    workflow.reset_scans();
+    assert_eq!(
+        workflow.expected_scan(),
+        Some(PickScanStage::SourceLocation)
+    );
+}
+
+#[test]
 fn ambiguous_confirmation_retries_the_same_durable_record() {
     let mut workflow = PickingWorkflow::default();
     activate(&mut workflow, claim(false));

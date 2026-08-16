@@ -354,7 +354,7 @@ pub use pick_cluster::{
     CreatePickCartRequest, PickCartResponse, PickCartSlotResponse, PickCartStatus,
     PickClusterCandidateResponse, PickClusterMemberResponse, PickClusterResponse,
     PickClusterStatus, PickClusterTaskAssignmentRequest, PickClusterWorkspaceRequest,
-    PickClusterWorkspaceResponse, PickExecutionMethod, PickExecutionResponse,
+    PickClusterWorkspaceResponse, PickExecutionMethod, PickExecutionResponse, PickRouteMode,
     PlanPickClusterRequest,
 };
 pub use pick_wave::{

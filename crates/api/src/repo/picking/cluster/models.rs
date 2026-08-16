@@ -5,7 +5,7 @@ use wareboxes_application::pick_cluster::{
 use wareboxes_domain::{
     FacilityId, InventoryOwnerId, OrderId, PickCartBarcode, PickCartId, PickCartName,
     PickCartSlotCode, PickCartSlotId, PickCartStatus, PickClusterId, PickClusterMemberId,
-    PickClusterStatus, PickTaskId, TenantId, UserId,
+    PickClusterStatus, PickRouteMode, PickTaskId, TenantId, UserId,
 };
 
 use crate::error::{AppError, AppResult};
@@ -38,6 +38,14 @@ fn cluster_status(value: &str) -> AppResult<PickClusterStatus> {
         "completed" => Ok(PickClusterStatus::Completed),
         "cancelled" => Ok(PickClusterStatus::Cancelled),
         _ => Err(AppError::internal("invalid stored pick cluster status")),
+    }
+}
+
+fn route_mode(value: &str) -> AppResult<PickRouteMode> {
+    match value {
+        "cluster_cart" => Ok(PickRouteMode::ClusterCart),
+        "batch_cart" => Ok(PickRouteMode::BatchCart),
+        _ => Err(AppError::internal("invalid stored pick route mode")),
     }
 }
 
@@ -93,10 +101,14 @@ pub(super) async fn read_cluster_tx(
     cluster_id: PickClusterId,
 ) -> AppResult<PickClusterReadModel> {
     let row = sqlx::query(
-        r#"SELECT cluster.*,cart.barcode AS cart_barcode,cart.name AS cart_name
+        r#"SELECT cluster.*,cart.barcode AS cart_barcode,cart.name AS cart_name,
+          batch_source.barcode AS batch_source_location_barcode
         FROM pick_clusters cluster
         JOIN pick_carts cart ON cart.tenant_id=cluster.tenant_id
           AND cart.facility_id=cluster.facility_id AND cart.id=cluster.cart_id
+        LEFT JOIN locations batch_source ON batch_source.tenant_id=cluster.tenant_id
+          AND batch_source.facility_id=cluster.facility_id
+          AND batch_source.id=cluster.batch_source_location_id
         WHERE cluster.tenant_id=$1 AND cluster.id=$2"#,
     )
     .bind(tenant_id.get())
@@ -106,7 +118,9 @@ pub(super) async fn read_cluster_tx(
     .ok_or_else(|| AppError::not_found("pick cluster"))?;
     let member_rows = sqlx::query(
         r#"SELECT member.*,task.status AS task_status,orders.order_key,slot.code AS slot_code,
-          content.source_location_id,content.item_id,content.uom,content.planned_qty,
+          content.source_inventory_balance_id,content.source_location_id,
+          content.item_id,content.item_batch_id,content.uom,
+          content.inventory_status,content.planned_qty,
           location.barcode AS source_location_barcode,location.name AS source_location_name,
           COALESCE(item.description,'Item #'||content.item_id::text) AS item_description
         FROM pick_cluster_members member
@@ -144,6 +158,14 @@ pub(super) async fn read_cluster_tx(
         cart_id: PickCartId::new(row.try_get("cart_id")?).map_err(internal)?,
         cart_barcode: PickCartBarcode::new(row.try_get("cart_barcode")?).map_err(internal)?,
         cart_name: PickCartName::new(row.try_get("cart_name")?).map_err(internal)?,
+        mode: route_mode(&row.try_get::<String, _>("mode")?)?,
+        batch_source_inventory_balance_id: row.try_get("batch_source_inventory_balance_id")?,
+        batch_source_location_id: row.try_get("batch_source_location_id")?,
+        batch_source_location_barcode: row.try_get("batch_source_location_barcode")?,
+        batch_item_batch_id: row.try_get("batch_item_batch_id")?,
+        batch_uom: row.try_get("batch_uom")?,
+        batch_inventory_status: row.try_get("batch_inventory_status")?,
+        batch_total_quantity: row.try_get("batch_total_quantity")?,
         status: cluster_status(&row.try_get::<String, _>("status")?)?,
         revision: row.try_get("revision")?,
         task_count: row.try_get("task_count")?,
@@ -179,11 +201,14 @@ pub(super) async fn read_cluster_tx(
                     slot_code: PickCartSlotCode::new(member.try_get("slot_code")?)
                         .map_err(internal)?,
                     source_location_id: member.try_get("source_location_id")?,
+                    source_inventory_balance_id: member.try_get("source_inventory_balance_id")?,
                     source_location_barcode: member.try_get("source_location_barcode")?,
                     source_location_name: member.try_get("source_location_name")?,
                     item_id: member.try_get("item_id")?,
+                    item_batch_id: member.try_get("item_batch_id")?,
                     item_description: member.try_get("item_description")?,
                     uom: member.try_get("uom")?,
+                    inventory_status: member.try_get("inventory_status")?,
                     planned_quantity: member.try_get("planned_qty")?,
                 })
             })

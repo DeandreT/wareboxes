@@ -112,9 +112,17 @@ impl RfApp {
             &format!("{}  ·  Pick {}", claim.order_key, claim.task_id),
             claim.priority,
         );
-        if claim.execution.method == PickExecutionMethod::ClusterCart {
+        if matches!(
+            claim.execution.method,
+            PickExecutionMethod::ClusterCart | PickExecutionMethod::BatchCart
+        ) {
             ui.group(|ui| {
-                ui.label(egui::RichText::new("CLUSTER CART").small().strong());
+                let label = if claim.execution.method == PickExecutionMethod::BatchCart {
+                    "BATCH CART"
+                } else {
+                    "CLUSTER CART"
+                };
+                ui.label(egui::RichText::new(label).small().strong());
                 ui.horizontal_wrapped(|ui| {
                     ui.monospace(
                         claim
@@ -133,6 +141,19 @@ impl RfApp {
                         ui.label(format!("Stop {sequence} of {task_count}"));
                     }
                 });
+                if let Some(total) = claim.execution.batch_total_quantity {
+                    if claim.execution.sequence == Some(1) {
+                        ui.label(format!(
+                            "Collect {total} {} total at this source; place {} in this order slot.",
+                            claim.content.uom, claim.content.planned_quantity
+                        ));
+                    } else {
+                        ui.label(format!(
+                            "From the collected batch, place {} {} in this order slot.",
+                            claim.content.planned_quantity, claim.content.uom
+                        ));
+                    }
+                }
             });
         } else if claim.execution.method == PickExecutionMethod::Case {
             ui.group(|ui| {

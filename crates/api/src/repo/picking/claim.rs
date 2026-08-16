@@ -270,6 +270,8 @@ pub(super) async fn load_claim_tx(
                task.require_source_location_scan,task.require_item_scan,
                task.require_destination_container_scan,task.pick_policy_hash,
                cluster.id AS cluster_id,cluster.task_count AS cluster_task_count,
+               cluster.mode AS cluster_mode,
+               cluster.batch_total_quantity AS cluster_batch_total_quantity,
                cart.barcode AS cluster_cart_barcode,
                slot.code AS cluster_slot_code,member.sequence AS cluster_sequence,
                ARRAY(
@@ -416,22 +418,36 @@ pub(super) async fn load_claim_tx(
         row.try_get("destination_container_barcodes")?;
     let uom: String = row.try_get("uom")?;
     let execution = match row.try_get::<Option<i64>, _>("cluster_id")? {
-        Some(cluster_id) => PickExecutionEvidence {
-            method: PickExecutionMethod::ClusterCart,
-            cluster_id: Some(
-                PickClusterId::new(cluster_id)
-                    .map_err(|error| AppError::internal(error.to_string()))?,
-            ),
-            cart_barcode: Some(row.try_get("cluster_cart_barcode")?),
-            slot_code: Some(row.try_get("cluster_slot_code")?),
-            sequence: Some(row.try_get("cluster_sequence")?),
-            task_count: Some(row.try_get("cluster_task_count")?),
-        },
+        Some(cluster_id) => {
+            let mode: String = row.try_get("cluster_mode")?;
+            let (method, batch_total_quantity) = match mode.as_str() {
+                "cluster_cart" => (PickExecutionMethod::ClusterCart, None),
+                "batch_cart" => (
+                    PickExecutionMethod::BatchCart,
+                    Some(row.try_get::<i64, _>("cluster_batch_total_quantity")?),
+                ),
+                _ => return Err(AppError::internal("invalid stored pick route mode")),
+            };
+            PickExecutionEvidence {
+                method,
+                cluster_id: Some(
+                    PickClusterId::new(cluster_id)
+                        .map_err(|error| AppError::internal(error.to_string()))?,
+                ),
+                cart_barcode: Some(row.try_get("cluster_cart_barcode")?),
+                slot_code: Some(row.try_get("cluster_slot_code")?),
+                sequence: Some(row.try_get("cluster_sequence")?),
+                task_count: Some(row.try_get("cluster_task_count")?),
+                batch_total_quantity,
+            }
+        }
         None if row.try_get::<bool, _>("full_pallet_pick")? => PickExecutionEvidence::pallet(),
         None => match PickExecutionMethod::for_unclustered_uom(&uom) {
             PickExecutionMethod::Case => PickExecutionEvidence::case(),
             PickExecutionMethod::Discrete => PickExecutionEvidence::discrete(),
-            PickExecutionMethod::Pallet | PickExecutionMethod::ClusterCart => {
+            PickExecutionMethod::Pallet
+            | PickExecutionMethod::ClusterCart
+            | PickExecutionMethod::BatchCart => {
                 return Err(AppError::internal(
                     "unclustered pick resolved as grouped execution",
                 ));

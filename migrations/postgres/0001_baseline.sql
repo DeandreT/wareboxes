@@ -50586,8 +50586,9 @@ REVOKE ALL ON FUNCTION public.validate_pack_policy_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_pack_policy_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_pack_carton_weight() FROM PUBLIC;
 
--- Cluster-cart picking. Existing pick tasks remain the immutable allocation-backed
--- execution unit; these aggregates bind a safe multi-order route to physical slots.
+-- Cart-routed picking. Existing pick tasks remain the immutable allocation-backed
+-- execution unit; these aggregates bind either a general cluster route or a
+-- homogeneous same-source item batch to physical order slots.
 CREATE TABLE public.pick_carts (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   tenant_id bigint NOT NULL REFERENCES public.tenants(id),
@@ -50635,6 +50636,13 @@ CREATE TABLE public.pick_clusters (
   inventory_owner_id bigint NOT NULL,
   facility_id bigint NOT NULL,
   cart_id bigint NOT NULL,
+  mode text NOT NULL CHECK(mode IN('cluster_cart','batch_cart')),
+  batch_source_inventory_balance_id bigint,
+  batch_source_location_id bigint,
+  batch_item_batch_id bigint,
+  batch_uom text,
+  batch_inventory_status text,
+  batch_total_quantity bigint,
   status text NOT NULL DEFAULT 'planned'
     CHECK(status IN('planned','in_progress','completed','cancelled')),
   revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
@@ -50648,6 +50656,17 @@ CREATE TABLE public.pick_clusters (
   cancelled_by_user_id bigint,
   cancelled_at timestamptz,
   cancellation_note text,
+  CHECK(
+    (mode='cluster_cart' AND batch_source_inventory_balance_id IS NULL
+      AND batch_source_location_id IS NULL
+      AND batch_item_batch_id IS NULL AND batch_uom IS NULL
+      AND batch_inventory_status IS NULL AND batch_total_quantity IS NULL)
+    OR (mode='batch_cart' AND batch_source_inventory_balance_id IS NOT NULL
+      AND batch_source_location_id IS NOT NULL
+      AND batch_item_batch_id IS NOT NULL AND batch_uom=btrim(batch_uom)
+      AND batch_uom<>'' AND batch_inventory_status=btrim(batch_inventory_status)
+      AND batch_inventory_status<>'' AND batch_total_quantity>0)
+  ),
   CHECK(cancellation_note IS NULL OR
     (cancellation_note=btrim(cancellation_note) AND cancellation_note<>''
       AND char_length(cancellation_note)<=500)),
@@ -50677,6 +50696,12 @@ CREATE TABLE public.pick_clusters (
     REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
   FOREIGN KEY(tenant_id,facility_id,cart_id)
     REFERENCES public.pick_carts(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,batch_source_inventory_balance_id)
+    REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY(tenant_id,facility_id,batch_source_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,batch_item_batch_id)
+    REFERENCES public.item_batches(tenant_id,inventory_owner_id,id),
   FOREIGN KEY(tenant_id,assigned_user_id)
     REFERENCES public.tenant_memberships(tenant_id,user_id),
   FOREIGN KEY(tenant_id,planned_by_user_id)
@@ -50775,8 +50800,14 @@ BEGIN
     RAISE EXCEPTION 'pick clusters cannot be deleted' USING ERRCODE='55000';
   END IF;
   IF ROW(NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,NEW.cart_id,
+      NEW.mode,NEW.batch_source_inventory_balance_id,NEW.batch_source_location_id,
+      NEW.batch_item_batch_id,NEW.batch_uom,
+      NEW.batch_inventory_status,NEW.batch_total_quantity,
       NEW.task_count,NEW.order_count,NEW.planned_by_user_id,NEW.planned_at)
     IS DISTINCT FROM ROW(OLD.tenant_id,OLD.inventory_owner_id,OLD.facility_id,OLD.cart_id,
+      OLD.mode,OLD.batch_source_inventory_balance_id,OLD.batch_source_location_id,
+      OLD.batch_item_batch_id,OLD.batch_uom,
+      OLD.batch_inventory_status,OLD.batch_total_quantity,
       OLD.task_count,OLD.order_count,OLD.planned_by_user_id,OLD.planned_at)
     OR NOT (
       (OLD.status='planned' AND NEW.status='in_progress' AND NEW.revision=2
@@ -50813,6 +50844,7 @@ END $$;
 CREATE FUNCTION public.validate_pick_cluster_member() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
 DECLARE task_row public.pick_tasks%ROWTYPE;
+DECLARE cluster_row public.pick_clusters%ROWTYPE;
 DECLARE source_barcode text;
 BEGIN
   SELECT * INTO task_row FROM public.pick_tasks task
@@ -50843,6 +50875,25 @@ BEGIN
   IF source_barcode IS NULL OR btrim(source_barcode)='' THEN
     RAISE EXCEPTION 'pick cluster member source is not executable' USING ERRCODE='23514';
   END IF;
+  SELECT * INTO cluster_row FROM public.pick_clusters cluster
+  WHERE cluster.tenant_id=NEW.tenant_id AND cluster.id=NEW.cluster_id;
+  IF cluster_row.id IS NULL THEN
+    RAISE EXCEPTION 'pick cluster member has no route' USING ERRCODE='23514';
+  END IF;
+  IF cluster_row.mode='batch_cart' AND NOT EXISTS(
+    SELECT 1 FROM public.pick_task_contents content
+    WHERE content.tenant_id=NEW.tenant_id AND content.task_id=NEW.task_id
+      AND content.state='pending'
+      AND content.source_inventory_balance_id=cluster_row.batch_source_inventory_balance_id
+      AND content.source_location_id=cluster_row.batch_source_location_id
+      AND content.item_batch_id=cluster_row.batch_item_batch_id
+      AND content.uom=cluster_row.batch_uom
+      AND content.inventory_status=cluster_row.batch_inventory_status
+      AND content.planned_qty>0
+  ) THEN
+    RAISE EXCEPTION 'batch-cart member does not match frozen batch evidence'
+      USING ERRCODE='23514';
+  END IF;
   RETURN NEW;
 END $$;
 
@@ -50853,6 +50904,9 @@ DECLARE cluster_id_value bigint;
 DECLARE actual_task_count bigint;
 DECLARE actual_order_count bigint;
 DECLARE invalid_sequence boolean;
+DECLARE actual_batch_quantity bigint;
+DECLARE invalid_batch_member boolean;
+DECLARE batch_identity_count bigint;
 BEGIN
   IF TG_TABLE_NAME='pick_clusters' THEN
     cluster_id_value:=NEW.id;
@@ -50876,9 +50930,25 @@ BEGIN
       WHERE member.tenant_id=NEW.tenant_id AND member.cluster_id=cluster_id_value
     ) ordered WHERE ordered.sequence<>ordered.expected_sequence
   ) INTO invalid_sequence;
+  SELECT COALESCE(SUM(content.planned_qty),0),COALESCE(bool_or(
+      content.source_inventory_balance_id
+        IS DISTINCT FROM cluster_row.batch_source_inventory_balance_id
+      OR content.source_location_id IS DISTINCT FROM cluster_row.batch_source_location_id
+      OR content.item_batch_id IS DISTINCT FROM cluster_row.batch_item_batch_id
+      OR content.uom IS DISTINCT FROM cluster_row.batch_uom
+      OR content.inventory_status IS DISTINCT FROM cluster_row.batch_inventory_status),false),
+      COUNT(DISTINCT ROW(content.source_inventory_balance_id,content.source_location_id,
+        content.item_batch_id,content.uom,content.inventory_status))
+    INTO actual_batch_quantity,invalid_batch_member,batch_identity_count
+  FROM public.pick_cluster_members member
+  JOIN public.pick_task_contents content ON content.tenant_id=member.tenant_id
+    AND content.task_id=member.task_id
+  WHERE member.tenant_id=NEW.tenant_id AND member.cluster_id=cluster_id_value;
   IF cluster_row.id IS NULL OR actual_task_count<>cluster_row.task_count
     OR actual_order_count<>cluster_row.order_count OR actual_order_count<2
-    OR invalid_sequence THEN
+    OR invalid_sequence OR (cluster_row.mode='batch_cart' AND
+      (invalid_batch_member OR actual_batch_quantity<>cluster_row.batch_total_quantity))
+    OR (cluster_row.mode='cluster_cart' AND batch_identity_count=1) THEN
     RAISE EXCEPTION 'pick cluster plan is incomplete or not in canonical route order'
       USING ERRCODE='23514';
   END IF;

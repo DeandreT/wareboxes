@@ -14,9 +14,11 @@ use wareboxes_application::picking::PickClaim;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    validate_pick_cart_slot_count, validate_pick_cluster_plan, FacilityId, InventoryOwnerId,
-    OrderId, PickCartId, PickCartSlotId, PickCartStatus, PickClusterId, PickClusterPlanLine,
-    PickClusterStatus, PickTaskId, TenantId, UserId, MAX_PICK_CLUSTER_CANCEL_NOTE_LENGTH,
+    derive_pick_batch_evidence, validate_pick_cart_slot_count, validate_pick_cluster_plan,
+    FacilityId, InventoryBalanceId, InventoryOwnerId, ItemBatchId, LocationId, OrderId,
+    PickBatchEvidence, PickBatchPlanLine, PickCartId, PickCartSlotId, PickCartStatus,
+    PickClusterId, PickClusterPlanLine, PickClusterStatus, PickRouteMode, PickTaskId, TenantId,
+    UserId, MAX_PICK_CLUSTER_CANCEL_NOTE_LENGTH,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -36,6 +38,12 @@ use super::models::{cart_status, cart_status_text, internal, read_cart_tx, read_
 struct PlanTask {
     task_id: PickTaskId,
     order_id: OrderId,
+    source_inventory_balance_id: i64,
+    source_location_id: i64,
+    item_batch_id: i64,
+    uom: String,
+    inventory_status: String,
+    planned_quantity: i64,
 }
 
 pub async fn create_cart(
@@ -299,6 +307,12 @@ pub async fn plan(
         .collect::<AppResult<Vec<_>>>()?;
     validate_pick_cluster_plan(&plan_lines)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let batch = batch_plan(&tasks)?;
+    let mode = if batch.is_some() {
+        PickRouteMode::BatchCart
+    } else {
+        PickRouteMode::ClusterCart
+    };
     let planned_at = now_iso();
     let order_count = plan_lines
         .iter()
@@ -308,14 +322,32 @@ pub async fn plan(
     let cluster_id = PickClusterId::new(
         sqlx::query_scalar(
             r#"INSERT INTO pick_clusters(
-              tenant_id,inventory_owner_id,facility_id,cart_id,status,revision,
+              tenant_id,inventory_owner_id,facility_id,cart_id,mode,
+              batch_source_inventory_balance_id,batch_source_location_id,
+              batch_item_batch_id,batch_uom,
+              batch_inventory_status,batch_total_quantity,status,revision,
               task_count,order_count,planned_by_user_id,planned_at)
-            VALUES($1,$2,$3,$4,'planned',1,$5,$6,$7,$8) RETURNING id"#,
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'planned',1,$12,$13,$14,$15)
+            RETURNING id"#,
         )
         .bind(access.tenant_id.get())
         .bind(command.inventory_owner_id.get())
         .bind(command.facility_id.get())
         .bind(command.cart_id.get())
+        .bind(match mode {
+            PickRouteMode::ClusterCart => "cluster_cart",
+            PickRouteMode::BatchCart => "batch_cart",
+        })
+        .bind(
+            batch
+                .as_ref()
+                .map(|value| value.source_inventory_balance_id.get()),
+        )
+        .bind(batch.as_ref().map(|value| value.source_location_id.get()))
+        .bind(batch.as_ref().map(|value| value.item_batch_id.get()))
+        .bind(batch.as_ref().map(|value| value.uom.as_str()))
+        .bind(batch.as_ref().map(|value| value.inventory_status.as_str()))
+        .bind(batch.as_ref().map(|value| value.total_quantity))
         .bind(i64::try_from(plan_lines.len()).map_err(internal)?)
         .bind(i64::try_from(order_count).map_err(internal)?)
         .bind(context.actor_id.get())
@@ -681,7 +713,10 @@ async fn lock_plan_tasks_tx(
         return Err(AppError::not_found("pick cluster task"));
     }
     let rows = sqlx::query(
-        r#"SELECT task.id AS task_id,task.order_id,location.barcode AS source_barcode
+        r#"SELECT task.id AS task_id,task.order_id,location.barcode AS source_barcode,
+          content.source_inventory_balance_id,content.source_location_id,
+          content.item_batch_id,content.uom,
+          content.inventory_status,content.planned_qty
         FROM pick_tasks task
         JOIN pick_task_contents content ON content.tenant_id=task.tenant_id
           AND content.task_id=task.id AND content.state='pending'
@@ -712,9 +747,35 @@ async fn lock_plan_tasks_tx(
             Ok(PlanTask {
                 task_id: PickTaskId::new(row.try_get("task_id")?).map_err(internal)?,
                 order_id: OrderId::new(row.try_get("order_id")?).map_err(internal)?,
+                source_inventory_balance_id: row.try_get("source_inventory_balance_id")?,
+                source_location_id: row.try_get("source_location_id")?,
+                item_batch_id: row.try_get("item_batch_id")?,
+                uom: row.try_get("uom")?,
+                inventory_status: row.try_get("inventory_status")?,
+                planned_quantity: row.try_get("planned_qty")?,
             })
         })
         .collect()
+}
+
+fn batch_plan(tasks: &[PlanTask]) -> AppResult<Option<PickBatchEvidence>> {
+    let lines = tasks
+        .iter()
+        .map(|task| {
+            Ok(PickBatchPlanLine {
+                source_inventory_balance_id: InventoryBalanceId::new(
+                    task.source_inventory_balance_id,
+                )
+                .map_err(internal)?,
+                source_location_id: LocationId::new(task.source_location_id).map_err(internal)?,
+                item_batch_id: ItemBatchId::new(task.item_batch_id).map_err(internal)?,
+                uom: task.uom.clone(),
+                inventory_status: task.inventory_status.clone(),
+                quantity: task.planned_quantity,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    derive_pick_batch_evidence(&lines).map_err(|error| AppError::bad_request(error.to_string()))
 }
 
 async fn lock_active_cart_tx(
@@ -941,6 +1002,14 @@ async fn enqueue_cluster_event_tx(
                 "facility_id": cluster.facility_id,
                 "cart_id": cluster.cart_id,
                 "cart_barcode": cluster.cart_barcode,
+                "mode": cluster.mode,
+                "batch_source_inventory_balance_id": cluster.batch_source_inventory_balance_id,
+                "batch_source_location_id": cluster.batch_source_location_id,
+                "batch_source_location_barcode": cluster.batch_source_location_barcode,
+                "batch_item_batch_id": cluster.batch_item_batch_id,
+                "batch_uom": cluster.batch_uom,
+                "batch_inventory_status": cluster.batch_inventory_status,
+                "batch_total_quantity": cluster.batch_total_quantity,
                 "status": cluster.status,
                 "revision": cluster.revision,
                 "task_count": cluster.task_count,

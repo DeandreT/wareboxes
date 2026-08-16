@@ -91,6 +91,7 @@ pub struct PickExecutionEvidence {
     pub slot_code: Option<String>,
     pub sequence: Option<i64>,
     pub task_count: Option<i64>,
+    pub batch_total_quantity: Option<i64>,
 }
 
 impl PickExecutionEvidence {
@@ -102,6 +103,7 @@ impl PickExecutionEvidence {
             slot_code: None,
             sequence: None,
             task_count: None,
+            batch_total_quantity: None,
         }
     }
 
@@ -113,6 +115,7 @@ impl PickExecutionEvidence {
             slot_code: None,
             sequence: None,
             task_count: None,
+            batch_total_quantity: None,
         }
     }
 
@@ -124,6 +127,7 @@ impl PickExecutionEvidence {
             slot_code: None,
             sequence: None,
             task_count: None,
+            batch_total_quantity: None,
         }
     }
 }

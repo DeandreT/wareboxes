@@ -1,7 +1,7 @@
 use super::*;
 use wareboxes_api_contract::v1::{
     PickCartResponse, PickCartStatus, PickClusterResponse, PickClusterStatus,
-    PickClusterWorkspaceResponse, PickExecutionMethod,
+    PickClusterWorkspaceResponse, PickExecutionMethod, PickRouteMode,
 };
 
 struct ClusterOrderSetup<'a> {
@@ -259,6 +259,8 @@ async fn cluster_cart_plans_two_orders_claims_exclusively_and_completes_with_slo
     let planned: PickClusterResponse =
         response_json(expect_status(planned, StatusCode::OK, "plan pick cluster").await).await;
     assert_eq!(planned.status, PickClusterStatus::Planned);
+    assert_eq!(planned.mode, PickRouteMode::ClusterCart);
+    assert_eq!(planned.batch_total_quantity, None);
     assert_eq!(planned.order_count, 2);
     assert_eq!(planned.task_count, 2);
     assert_eq!(planned.members[0].sequence, 1);
@@ -361,6 +363,7 @@ async fn cluster_cart_plans_two_orders_claims_exclusively_and_completes_with_slo
     );
     assert_eq!(first_claim.execution.cluster_id, Some(planned.cluster_id));
     assert_eq!(first_claim.execution.task_count, Some(2));
+    assert_eq!(first_claim.execution.batch_total_quantity, None);
     let first_plate = match first_claim.execution.slot_code.as_deref() {
         Some("A") => "CLUSTER-CART-01-A",
         Some("B") => "CLUSTER-CART-01-B",
@@ -915,9 +918,9 @@ async fn database_rejects_carts_without_slots_and_clusters_without_members() {
     let mut empty_cluster_tx = tenant_tx(&fixture.db, access.tenant_id).await;
     sqlx::query(
         r#"INSERT INTO pick_clusters(
-          tenant_id,inventory_owner_id,facility_id,cart_id,status,revision,
+          tenant_id,inventory_owner_id,facility_id,cart_id,mode,status,revision,
           task_count,order_count,planned_by_user_id,planned_at)
-        VALUES($1,$2,$3,$4,'planned',1,2,2,$5,statement_timestamp())"#,
+        VALUES($1,$2,$3,$4,'cluster_cart','planned',1,2,2,$5,statement_timestamp())"#,
     )
     .bind(access.tenant_id.get())
     .bind(owner_id)

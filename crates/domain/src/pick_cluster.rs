@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{OrderId, PickCartSlotId, PickTaskId};
+use crate::{InventoryBalanceId, ItemBatchId, LocationId, OrderId, PickCartSlotId, PickTaskId};
 
 pub const MAX_PICK_CART_BARCODE_LENGTH: usize = 80;
 pub const MAX_PICK_CART_NAME_LENGTH: usize = 120;
@@ -73,6 +73,7 @@ pub enum PickExecutionMethod {
     Case,
     Pallet,
     ClusterCart,
+    BatchCart,
 }
 
 impl PickExecutionMethod {
@@ -83,6 +84,66 @@ impl PickExecutionMethod {
             Self::Discrete
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickRouteMode {
+    ClusterCart,
+    BatchCart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickBatchPlanLine {
+    pub source_inventory_balance_id: InventoryBalanceId,
+    pub source_location_id: LocationId,
+    pub item_batch_id: ItemBatchId,
+    pub uom: String,
+    pub inventory_status: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickBatchEvidence {
+    pub source_inventory_balance_id: InventoryBalanceId,
+    pub source_location_id: LocationId,
+    pub item_batch_id: ItemBatchId,
+    pub uom: String,
+    pub inventory_status: String,
+    pub total_quantity: i64,
+}
+
+pub fn derive_pick_batch_evidence(
+    lines: &[PickBatchPlanLine],
+) -> Result<Option<PickBatchEvidence>, PickClusterError> {
+    let Some(first) = lines.first() else {
+        return Ok(None);
+    };
+    if !lines.iter().all(|line| {
+        line.source_inventory_balance_id == first.source_inventory_balance_id
+            && line.source_location_id == first.source_location_id
+            && line.item_batch_id == first.item_batch_id
+            && line.uom == first.uom
+            && line.inventory_status == first.inventory_status
+    }) {
+        return Ok(None);
+    }
+    let total_quantity = lines.iter().try_fold(0_i64, |total, line| {
+        if line.quantity <= 0 {
+            return Err(PickClusterError::InvalidBatchQuantity);
+        }
+        total
+            .checked_add(line.quantity)
+            .ok_or(PickClusterError::BatchQuantityOverflow)
+    })?;
+    Ok(Some(PickBatchEvidence {
+        source_inventory_balance_id: first.source_inventory_balance_id,
+        source_location_id: first.source_location_id,
+        item_batch_id: first.item_batch_id,
+        uom: first.uom.clone(),
+        inventory_status: first.inventory_status.clone(),
+        total_quantity,
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -206,6 +267,10 @@ pub enum PickClusterError {
     InvalidCartTransition,
     #[error("pick cluster status transition is invalid")]
     InvalidClusterTransition,
+    #[error("batch-cart quantities must be positive")]
+    InvalidBatchQuantity,
+    #[error("batch-cart total quantity exceeds the supported range")]
+    BatchQuantityOverflow,
 }
 
 #[cfg(test)]
@@ -230,6 +295,30 @@ mod tests {
         assert_eq!(
             validate_pick_cluster_plan(&[line(1, 10, 100), line(2, 20, 100)]),
             Err(PickClusterError::SlotUsesMultipleOrders)
+        );
+    }
+
+    #[test]
+    fn batch_evidence_requires_one_exact_inventory_identity() {
+        let line = |balance, location, batch, quantity| PickBatchPlanLine {
+            source_inventory_balance_id: InventoryBalanceId::new(balance).unwrap(),
+            source_location_id: LocationId::new(location).unwrap(),
+            item_batch_id: ItemBatchId::new(batch).unwrap(),
+            uom: "each".into(),
+            inventory_status: "available".into(),
+            quantity,
+        };
+        let evidence = derive_pick_batch_evidence(&[line(9, 1, 2, 3), line(9, 1, 2, 4)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(evidence.total_quantity, 7);
+        assert_eq!(
+            derive_pick_batch_evidence(&[line(9, 1, 2, 3), line(9, 1, 3, 4)]).unwrap(),
+            None
+        );
+        assert_eq!(
+            derive_pick_batch_evidence(&[line(9, 1, 2, 0)]),
+            Err(PickClusterError::InvalidBatchQuantity)
         );
     }
 

@@ -5,7 +5,7 @@ use lucide_leptos::{Boxes, Plus, RefreshCw, RotateCcw, X};
 use wareboxes_api_contract::v1::{
     CancelPickClusterRequest, ChangePickCartStatusRequest, CreatePickCartRequest, PickCartStatus,
     PickClusterResponse, PickClusterStatus, PickClusterTaskAssignmentRequest,
-    PickClusterWorkspaceResponse, PlanPickClusterRequest,
+    PickClusterWorkspaceResponse, PickRouteMode, PlanPickClusterRequest,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 
@@ -172,7 +172,7 @@ pub(crate) fn PickClustersWorkspace(
     view! {
         <section class="pick-cluster-panel data-section">
             <header class="pick-cluster-heading">
-                <div><span class="eyebrow">"Multi-order execution"</span><h2><Boxes size=18/>"Cluster carts"</h2><p>"Bind released tasks to physical cart slots, then scan the route ID on RF."</p></div>
+                <div><span class="eyebrow">"Multi-order execution"</span><h2><Boxes size=18/>"Cart picking"</h2><p>"Combine homogeneous work into batch routes and bind every order to a physical cart slot."</p></div>
                 <div class="page-actions"><button type="button" class="icon-button" title="Refresh clusters" disabled=move || signals.loading.get() on:click=refresh><RefreshCw size=15/></button><button type="button" class="button secondary-action" on:click=move |_| signals.show_create_cart.set(true)><Plus size=14/>"New cart"</button></div>
             </header>
             <div class="pick-cluster-toolbar">
@@ -215,6 +215,7 @@ fn render_workspace(
             .find(|cart| cart.cart_id == id)
             .cloned()
     });
+    let batch_summary = selected_batch_summary(&workspace, &signals.assignments.get());
     view! {
         <div class="pick-cluster-grid">
             <section><header><h3>"Carts"</h3><span>{workspace.carts.len()}</span></header><div class="pick-cluster-card-list">{workspace.carts.into_iter().map(|cart| {
@@ -222,7 +223,7 @@ fn render_workspace(
                 let retirement=cart.clone();
                 view! { <article class:selected=move || signals.selected_cart_id.get()==Some(cart.cart_id)><button type="button" class="pick-cluster-card-main" on:click=move |_| { if cart.status==PickCartStatus::Active { signals.selected_cart_id.set(Some(cart.cart_id)); signals.assignments.set(Vec::new()); } }><strong>{cart.name.clone()}</strong><span>{cart.barcode.clone()}</span><small>{format!("{} slots · {}",cart.slots.len(),cart_status_label(cart.status))}</small></button><div class="pick-cluster-cart-actions">{next_cart_status(toggle.status).map(|status| { let request=ChangePickCartStatusRequest{expected_revision:toggle.revision,status}; let label=if status==PickCartStatus::Active {"Return to service"} else {"Take out of service"}; view! { <button type="button" class="link-button" disabled=move || signals.pending.get() on:click=move |_| dispatch(SavedCommand::ChangeCart(toggle.cart_id,request,api::new_idempotency_key()),signals,drafts,toasts,on_unauthorized)>{label}</button> } })}{(retirement.status!=PickCartStatus::Retired).then(|| view! { <button type="button" class="link-button pick-cluster-retire" disabled=move || signals.pending.get() on:click=move |_| signals.retire_cart.set(Some((retirement.cart_id,retirement.revision,retirement.name.clone())))>"Retire"</button> })}</div></article> }
             }).collect_view()}</div></section>
-            <section><header><h3>"Eligible tasks"</h3><span>{workspace.candidates.len()}</span></header>{if let Some(cart)=selected_cart { view! { <div class="pick-cluster-plan-head"><strong>{format!("Route on {}",cart.barcode)}</strong><button type="button" class="button primary-action" disabled=move || signals.pending.get() on:click=move |_| plan.run(())>"Plan cluster"</button></div><div class="table-scroll"><table class="data-table"><thead><tr><th>"Order / task"</th><th>"Source"</th><th>"Item"</th><th>"Slot"</th></tr></thead><tbody>{workspace.candidates.into_iter().map(|candidate| { let task_id=candidate.task_id; let slots=cart.slots.clone(); view! { <tr><td><strong>{candidate.order_key}</strong><small class="cell-detail">{format!("Task #{}",candidate.task_id)}</small></td><td>{candidate.source_location_barcode}</td><td><strong>{candidate.item_description}</strong><small class="cell-detail">{format!("{} {}",candidate.planned_quantity,candidate.uom)}</small></td><td><select aria-label=format!("Cart slot for task {}",task_id) on:change=move |event| set_assignment(signals.assignments,task_id,parse_id(&event_target_value(&event)).unwrap_or(0))><option value="">"Not assigned"</option>{slots.into_iter().map(|slot| view! { <option value=slot.slot_id>{slot.code}</option> }).collect_view()}</select></td></tr> }}).collect_view()}</tbody></table></div> }.into_any() } else if active_carts.is_empty() { view! { <div class="workspace-empty"><p>"Create or reactivate a cart before planning."</p></div> }.into_any() } else { view! { <div class="workspace-empty"><p>"Select an active cart to assign tasks."</p></div> }.into_any() }}</section>
+            <section><header><h3>"Eligible tasks"</h3><span>{workspace.candidates.len()}</span></header>{if let Some(cart)=selected_cart { let plan_label=if batch_summary.is_some() {"Plan batch"} else {"Plan cluster"}; view! { <div class="pick-cluster-plan-head"><div><strong>{format!("Route on {}",cart.barcode)}</strong>{batch_summary.clone().map(|summary| view! { <small class="cell-detail">{summary}</small> })}</div><button type="button" class="button primary-action" disabled=move || signals.pending.get() on:click=move |_| plan.run(())>{plan_label}</button></div><div class="table-scroll"><table class="data-table"><thead><tr><th>"Order / task"</th><th>"Source"</th><th>"Item"</th><th>"Slot"</th></tr></thead><tbody>{workspace.candidates.into_iter().map(|candidate| { let task_id=candidate.task_id; let slots=cart.slots.clone(); view! { <tr><td><strong>{candidate.order_key}</strong><small class="cell-detail">{format!("Task #{}",candidate.task_id)}</small></td><td>{candidate.source_location_barcode}<small class="cell-detail">{format!("Balance #{}",candidate.source_inventory_balance_id)}</small></td><td><strong>{candidate.item_description}</strong><small class="cell-detail">{format!("{} {} · batch #{} · {}",candidate.planned_quantity,candidate.uom,candidate.item_batch_id,candidate.inventory_status)}</small></td><td><select aria-label=format!("Cart slot for task {}",task_id) on:change=move |event| set_assignment(signals.assignments,task_id,parse_id(&event_target_value(&event)).unwrap_or(0))><option value="">"Not assigned"</option>{slots.into_iter().map(|slot| view! { <option value=slot.slot_id>{slot.code}</option> }).collect_view()}</select></td></tr> }}).collect_view()}</tbody></table></div> }.into_any() } else if active_carts.is_empty() { view! { <div class="workspace-empty"><p>"Create or reactivate a cart before planning."</p></div> }.into_any() } else { view! { <div class="workspace-empty"><p>"Select an active cart to assign tasks."</p></div> }.into_any() }}</section>
             <section class="pick-cluster-runs"><header><h3>"Routes"</h3><span>{workspace.clusters.len()}</span></header><div class="pick-cluster-card-list">{workspace.clusters.into_iter().map(|cluster| render_cluster(cluster,signals,drafts,toasts,on_unauthorized)).collect_view()}</div></section>
         </div>
     }.into_any()
@@ -236,7 +237,58 @@ fn render_cluster(
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let cancel = cluster.clone();
-    view! { <article class="pick-cluster-run"><header><div><strong>{format!("Route #{} · {}",cluster.cluster_id,cluster.cart_barcode)}</strong><small>{format!("{} · rev {}",cluster_status_label(cluster.status),cluster.revision)}</small></div><span>{format!("{}/{}",cluster.completed_task_count,cluster.task_count)}</span></header><div class="pick-cluster-route">{cluster.members.iter().map(|member| view! { <span><b>{member.sequence}</b><strong>{member.source_location_barcode.clone()}</strong><small>{format!("{} → slot {}",member.order_key,member.slot_code)}</small></span> }).collect_view()}</div>{matches!(cancel.status,PickClusterStatus::Planned|PickClusterStatus::InProgress).then(|| view! { <footer><input maxlength="500" placeholder="Cancellation note" prop:value=move || drafts.cancellation_note.get() on:input=move |event| drafts.cancellation_note.set(event_target_value(&event))/><button type="button" class="button danger-action" disabled=move || signals.pending.get() on:click=move |_| { let note=drafts.cancellation_note.get_untracked().trim().to_owned(); if note.is_empty() { signals.error.set(Some("A cancellation note is required.".into())); } else { dispatch(SavedCommand::Cancel(cancel.cluster_id,CancelPickClusterRequest{expected_revision:cancel.revision,note},api::new_idempotency_key()),signals,drafts,toasts,on_unauthorized); } }>"Cancel"</button></footer> })}</article> }
+    let mode = match cluster.mode {
+        PickRouteMode::ClusterCart => "Cluster cart".to_owned(),
+        PickRouteMode::BatchCart => format!(
+            "Batch · {} {} from {} · balance #{} · batch #{} · {}",
+            cluster.batch_total_quantity.unwrap_or_default(),
+            cluster.batch_uom.as_deref().unwrap_or("?"),
+            cluster
+                .batch_source_location_barcode
+                .as_deref()
+                .unwrap_or("?"),
+            cluster
+                .batch_source_inventory_balance_id
+                .unwrap_or_default(),
+            cluster.batch_item_batch_id.unwrap_or_default(),
+            cluster.batch_inventory_status.as_deref().unwrap_or("?")
+        ),
+    };
+    view! { <article class="pick-cluster-run"><header><div><strong>{format!("Route #{} · {}",cluster.cluster_id,cluster.cart_barcode)}</strong><small>{format!("{} · {} · rev {}",mode,cluster_status_label(cluster.status),cluster.revision)}</small></div><span>{format!("{}/{}",cluster.completed_task_count,cluster.task_count)}</span></header><div class="pick-cluster-route">{cluster.members.iter().map(|member| view! { <span><b>{member.sequence}</b><strong>{member.source_location_barcode.clone()}</strong><small>{format!("{} → slot {}",member.order_key,member.slot_code)}</small></span> }).collect_view()}</div>{matches!(cancel.status,PickClusterStatus::Planned|PickClusterStatus::InProgress).then(|| view! { <footer><input maxlength="500" placeholder="Cancellation note" prop:value=move || drafts.cancellation_note.get() on:input=move |event| drafts.cancellation_note.set(event_target_value(&event))/><button type="button" class="button danger-action" disabled=move || signals.pending.get() on:click=move |_| { let note=drafts.cancellation_note.get_untracked().trim().to_owned(); if note.is_empty() { signals.error.set(Some("A cancellation note is required.".into())); } else { dispatch(SavedCommand::Cancel(cancel.cluster_id,CancelPickClusterRequest{expected_revision:cancel.revision,note},api::new_idempotency_key()),signals,drafts,toasts,on_unauthorized); } }>"Cancel"</button></footer> })}</article> }
+}
+
+fn selected_batch_summary(
+    workspace: &PickClusterWorkspaceResponse,
+    assignments: &[(i64, i64)],
+) -> Option<String> {
+    let selected = workspace
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            assignments
+                .iter()
+                .any(|(task_id, _)| *task_id == candidate.task_id)
+        })
+        .collect::<Vec<_>>();
+    let first = *selected.first()?;
+    if selected.len() < 2
+        || !selected.iter().all(|candidate| {
+            candidate.source_inventory_balance_id == first.source_inventory_balance_id
+                && candidate.source_location_id == first.source_location_id
+                && candidate.item_batch_id == first.item_batch_id
+                && candidate.uom == first.uom
+                && candidate.inventory_status == first.inventory_status
+        })
+    {
+        return None;
+    }
+    let total = selected.iter().try_fold(0_i64, |total, candidate| {
+        total.checked_add(candidate.planned_quantity)
+    })?;
+    Some(format!(
+        "Batch route · {total} {} from {} · batch #{}",
+        first.uom, first.source_location_barcode, first.item_batch_id
+    ))
 }
 
 fn request_workspace(signals: Signals, on_unauthorized: Callback<()>) {
@@ -406,7 +458,34 @@ fn resource_options(resources: StoredValue<Vec<AccessScopeResource>>) -> impl In
 
 #[cfg(test)]
 mod tests {
-    use super::order_slot_pairs_are_consistent;
+    use super::{order_slot_pairs_are_consistent, selected_batch_summary};
+    use wareboxes_api_contract::v1::{PickClusterCandidateResponse, PickClusterWorkspaceResponse};
+
+    fn candidate(
+        task_id: i64,
+        source_location_id: i64,
+        item_batch_id: i64,
+    ) -> PickClusterCandidateResponse {
+        PickClusterCandidateResponse {
+            task_id,
+            order_id: task_id + 100,
+            order_key: format!("ORDER-{task_id}"),
+            source_location_id,
+            source_inventory_balance_id: 40,
+            source_location_barcode: format!("SOURCE-{source_location_id}"),
+            source_location_name: None,
+            source_travel_sequence: 1,
+            item_id: 10,
+            item_batch_id,
+            item_description: "Widget".into(),
+            uom: "each".into(),
+            inventory_status: "available".into(),
+            planned_quantity: task_id,
+            priority: 50,
+            ship_by: None,
+            created_at: "2026-08-16T00:00:00Z".into(),
+        }
+    }
 
     #[test]
     fn cluster_slots_never_mix_orders_or_split_one_order() {
@@ -417,5 +496,20 @@ mod tests {
         ]));
         assert!(!order_slot_pairs_are_consistent(&[(10, 1), (10, 2)]));
         assert!(!order_slot_pairs_are_consistent(&[(10, 1), (20, 1)]));
+    }
+
+    #[test]
+    fn batch_label_requires_one_frozen_source_and_item_batch() {
+        let mut workspace = PickClusterWorkspaceResponse {
+            carts: Vec::new(),
+            candidates: vec![candidate(2, 20, 30), candidate(3, 20, 30)],
+            clusters: Vec::new(),
+        };
+        assert_eq!(
+            selected_batch_summary(&workspace, &[(2, 1), (3, 2)]).as_deref(),
+            Some("Batch route · 5 each from SOURCE-20 · batch #30")
+        );
+        workspace.candidates[1].item_batch_id = 31;
+        assert_eq!(selected_batch_summary(&workspace, &[(2, 1), (3, 2)]), None);
     }
 }

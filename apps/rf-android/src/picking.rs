@@ -69,6 +69,7 @@ pub enum PickExecutionMethod {
     Case,
     Pallet,
     ClusterCart,
+    BatchCart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +80,7 @@ pub struct PickExecutionEvidence {
     pub slot_code: Option<String>,
     pub sequence: Option<i64>,
     pub task_count: Option<i64>,
+    pub batch_total_quantity: Option<i64>,
 }
 
 impl PickExecutionEvidence {
@@ -90,6 +92,7 @@ impl PickExecutionEvidence {
             slot_code: None,
             sequence: None,
             task_count: None,
+            batch_total_quantity: None,
         }
     }
 
@@ -101,6 +104,7 @@ impl PickExecutionEvidence {
             slot_code: None,
             sequence: None,
             task_count: None,
+            batch_total_quantity: None,
         }
     }
 
@@ -112,6 +116,7 @@ impl PickExecutionEvidence {
             slot_code: None,
             sequence: None,
             task_count: None,
+            batch_total_quantity: None,
         }
     }
 }
@@ -242,11 +247,23 @@ enum Lane {
 }
 
 #[derive(Debug, Clone)]
+struct BatchScanEvidence {
+    cluster_id: i64,
+    source_inventory_balance_id: i64,
+    item_batch_id: i64,
+    source_location_barcode: Option<String>,
+    item_barcode: Option<String>,
+    source_license_plate_barcode: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PickingWorkflow {
     claim: Option<PickClaim>,
     lane: Lane,
     source_location_scan: Option<String>,
     item_scan: Option<String>,
+    source_location_was_scanned: bool,
+    item_was_scanned: bool,
     source_license_plate_scan: Option<String>,
     destination_license_plate_scan: Option<String>,
     shortage: Option<PickShortageDraft>,
@@ -255,6 +272,7 @@ pub struct PickingWorkflow {
     error: Option<String>,
     notice: Option<String>,
     reconcile_reason: Option<String>,
+    batch_scan_evidence: Option<BatchScanEvidence>,
 }
 
 impl Default for PickingWorkflow {
@@ -264,6 +282,8 @@ impl Default for PickingWorkflow {
             lane: Lane::Empty,
             source_location_scan: None,
             item_scan: None,
+            source_location_was_scanned: false,
+            item_was_scanned: false,
             source_license_plate_scan: None,
             destination_license_plate_scan: None,
             shortage: None,
@@ -272,6 +292,7 @@ impl Default for PickingWorkflow {
             error: None,
             notice: None,
             reconcile_reason: None,
+            batch_scan_evidence: None,
         }
     }
 }
@@ -589,8 +610,14 @@ impl PickingWorkflow {
         }
 
         match stage {
-            PickScanStage::SourceLocation => self.source_location_scan = Some(scanned),
-            PickScanStage::Item => self.item_scan = Some(scanned),
+            PickScanStage::SourceLocation => {
+                self.source_location_scan = Some(scanned);
+                self.source_location_was_scanned = true;
+            }
+            PickScanStage::Item => {
+                self.item_scan = Some(scanned);
+                self.item_was_scanned = true;
+            }
             PickScanStage::SourceLicensePlate => {
                 self.source_license_plate_scan = Some(scanned.clone());
                 if pallet_pick {
@@ -857,6 +884,14 @@ impl PickingWorkflow {
         match outcome {
             CommandOutcome::PickClaimed(claim) => {
                 self.claim = claim.map(|claim| *claim);
+                if self.claim.is_none()
+                    || !self
+                        .claim
+                        .as_ref()
+                        .is_some_and(|claim| self.batch_evidence_matches(claim))
+                {
+                    self.batch_scan_evidence = None;
+                }
                 self.reset_scans();
                 self.notice = self
                     .claim
@@ -867,6 +902,7 @@ impl PickingWorkflow {
                 order_ready_to_pack,
                 ..
             } => {
+                self.retain_batch_scan_evidence();
                 self.claim = None;
                 self.reset_scans();
                 self.notice = Some(if order_ready_to_pack {
@@ -876,6 +912,7 @@ impl PickingWorkflow {
                 });
             }
             CommandOutcome::PickShortageReported(result) => {
+                self.batch_scan_evidence = None;
                 self.claim = None;
                 self.reset_scans();
                 self.notice = Some(format!(
@@ -884,6 +921,7 @@ impl PickingWorkflow {
                 ));
             }
             CommandOutcome::PickReleased { .. } => {
+                self.batch_scan_evidence = None;
                 self.claim = None;
                 self.reset_scans();
                 self.notice = Some("Pick returned to the queue".into());
@@ -908,6 +946,7 @@ impl PickingWorkflow {
 
     pub fn restore_current_claim(&mut self, claim: Option<PickClaim>) {
         if matches!(self.lane, Lane::Empty) {
+            self.batch_scan_evidence = None;
             self.claim = claim;
             self.reset_scans();
             self.error = None;
@@ -978,6 +1017,7 @@ impl PickingWorkflow {
 
     #[cfg(all(debug_assertions, not(target_os = "android")))]
     pub fn load_debug_claim(&mut self, claim: PickClaim) {
+        self.batch_scan_evidence = None;
         self.claim = Some(claim);
         self.lane = Lane::Empty;
         self.error = None;
@@ -992,6 +1032,8 @@ impl PickingWorkflow {
     }
 
     fn reset_scans(&mut self) {
+        self.source_location_was_scanned = false;
+        self.item_was_scanned = false;
         self.source_location_scan = self.claim.as_ref().and_then(|claim| {
             (!claim.pick_policy.require_source_location_scan)
                 .then(|| claim.content.source_location_barcode.clone())
@@ -1009,7 +1051,80 @@ impl PickingWorkflow {
         });
         self.shortage = None;
         self.scan_draft.clear();
+        let Some(claim) = self.claim.as_ref() else {
+            return;
+        };
+        let Some(evidence) = self
+            .batch_scan_evidence
+            .as_ref()
+            .filter(|evidence| batch_evidence_matches_claim(evidence, claim))
+        else {
+            return;
+        };
+        if claim.pick_policy.require_source_location_scan
+            && evidence.source_location_barcode.as_deref()
+                == Some(claim.content.source_location_barcode.as_str())
+        {
+            self.source_location_scan = evidence.source_location_barcode.clone();
+            self.source_location_was_scanned = true;
+        }
+        if claim.pick_policy.require_item_scan
+            && evidence.item_barcode.as_ref().is_some_and(|barcode| {
+                claim
+                    .content
+                    .item_barcodes
+                    .iter()
+                    .any(|candidate| candidate == barcode)
+            })
+        {
+            self.item_scan = evidence.item_barcode.clone();
+            self.item_was_scanned = true;
+        }
+        if evidence.source_license_plate_barcode == claim.content.source_license_plate_barcode {
+            self.source_license_plate_scan = evidence.source_license_plate_barcode.clone();
+        }
     }
+
+    fn retain_batch_scan_evidence(&mut self) {
+        let Some(claim) = self.claim.as_ref() else {
+            return;
+        };
+        let Some(cluster_id) = claim
+            .execution
+            .cluster_id
+            .filter(|_| claim.execution.method == PickExecutionMethod::BatchCart)
+        else {
+            self.batch_scan_evidence = None;
+            return;
+        };
+        self.batch_scan_evidence = Some(BatchScanEvidence {
+            cluster_id,
+            source_inventory_balance_id: claim.content.source_inventory_balance_id,
+            item_batch_id: claim.content.item_batch_id,
+            source_location_barcode: self
+                .source_location_was_scanned
+                .then(|| self.source_location_scan.clone())
+                .flatten(),
+            item_barcode: self
+                .item_was_scanned
+                .then(|| self.item_scan.clone())
+                .flatten(),
+            source_license_plate_barcode: self.source_license_plate_scan.clone(),
+        });
+    }
+
+    fn batch_evidence_matches(&self, claim: &PickClaim) -> bool {
+        self.batch_scan_evidence
+            .as_ref()
+            .is_some_and(|evidence| batch_evidence_matches_claim(evidence, claim))
+    }
+}
+
+fn batch_evidence_matches_claim(evidence: &BatchScanEvidence, claim: &PickClaim) -> bool {
+    claim.execution.method == PickExecutionMethod::BatchCart
+        && claim.execution.cluster_id == Some(evidence.cluster_id)
+        && claim.content.source_inventory_balance_id == evidence.source_inventory_balance_id
+        && claim.content.item_batch_id == evidence.item_batch_id
 }
 
 fn outcome_matches(command: &RfCommand, outcome: &CommandOutcome) -> bool {

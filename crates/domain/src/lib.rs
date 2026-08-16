@@ -224,11 +224,11 @@ pub use packing::{
     MAX_PACK_SCAN_VALUE_LENGTH, MAX_PACK_SESSION_ABANDONMENT_NOTE_LENGTH,
 };
 pub use pick_cluster::{
-    validate_pick_cart_slot_count, validate_pick_cluster_plan, PickCartBarcode, PickCartName,
-    PickCartSlotCode, PickCartStatus, PickClusterError, PickClusterPlanLine, PickClusterStatus,
-    PickExecutionMethod, MAX_PICK_CART_BARCODE_LENGTH, MAX_PICK_CART_NAME_LENGTH,
-    MAX_PICK_CART_SLOTS, MAX_PICK_CART_SLOT_CODE_LENGTH, MAX_PICK_CLUSTER_CANCEL_NOTE_LENGTH,
-    MAX_PICK_CLUSTER_TASKS,
+    derive_pick_batch_evidence, validate_pick_cart_slot_count, validate_pick_cluster_plan,
+    PickBatchEvidence, PickBatchPlanLine, PickCartBarcode, PickCartName, PickCartSlotCode,
+    PickCartStatus, PickClusterError, PickClusterPlanLine, PickClusterStatus, PickExecutionMethod,
+    PickRouteMode, MAX_PICK_CART_BARCODE_LENGTH, MAX_PICK_CART_NAME_LENGTH, MAX_PICK_CART_SLOTS,
+    MAX_PICK_CART_SLOT_CODE_LENGTH, MAX_PICK_CLUSTER_CANCEL_NOTE_LENGTH, MAX_PICK_CLUSTER_TASKS,
 };
 pub use pick_wave::{
     cancel_pick_wave, release_pick_wave, validate_pick_wave_plan, PickWaveCancellationNote,

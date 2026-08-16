@@ -1634,6 +1634,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || response.execution.slot_code.is_some()
                     || response.execution.sequence.is_some()
                     || response.execution.task_count.is_some()
+                    || response.execution.batch_total_quantity.is_some()
                     || content.uom.eq_ignore_ascii_case("case")
                 {
                     return Err(WireResponseError::InvalidClaim);
@@ -1646,6 +1647,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || response.execution.slot_code.is_some()
                     || response.execution.sequence.is_some()
                     || response.execution.task_count.is_some()
+                    || response.execution.batch_total_quantity.is_some()
                     || !content.uom.eq_ignore_ascii_case("case")
                 {
                     return Err(WireResponseError::InvalidClaim);
@@ -1658,6 +1660,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || response.execution.slot_code.is_some()
                     || response.execution.sequence.is_some()
                     || response.execution.task_count.is_some()
+                    || response.execution.batch_total_quantity.is_some()
                     || content.source_license_plate_id.is_none()
                     || content.source_license_plate_barcode.is_none()
                     || response
@@ -1681,6 +1684,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                         .is_none_or(|value| value.trim().is_empty())
                     || execution.sequence.is_none_or(|value| value <= 0)
                     || execution.task_count.is_none_or(|value| value < 2)
+                    || execution.batch_total_quantity.is_some()
                 {
                     return Err(WireResponseError::InvalidClaim);
                 }
@@ -1691,6 +1695,36 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     slot_code: execution.slot_code,
                     sequence: execution.sequence,
                     task_count: execution.task_count,
+                    batch_total_quantity: None,
+                }
+            }
+            wareboxes_api_contract::v1::PickExecutionMethod::BatchCart => {
+                let execution = response.execution;
+                if execution.cluster_id.is_none_or(|value| value <= 0)
+                    || execution
+                        .cart_barcode
+                        .as_ref()
+                        .is_none_or(|value| value.trim().is_empty())
+                    || execution
+                        .slot_code
+                        .as_ref()
+                        .is_none_or(|value| value.trim().is_empty())
+                    || execution.sequence.is_none_or(|value| value <= 0)
+                    || execution.task_count.is_none_or(|value| value < 2)
+                    || execution
+                        .batch_total_quantity
+                        .is_none_or(|value| value <= 0)
+                {
+                    return Err(WireResponseError::InvalidClaim);
+                }
+                crate::picking::PickExecutionEvidence {
+                    method: crate::picking::PickExecutionMethod::BatchCart,
+                    cluster_id: execution.cluster_id,
+                    cart_barcode: execution.cart_barcode,
+                    slot_code: execution.slot_code,
+                    sequence: execution.sequence,
+                    task_count: execution.task_count,
+                    batch_total_quantity: execution.batch_total_quantity,
                 }
             }
         },
@@ -3085,6 +3119,39 @@ mod tests {
                 ResponseKind::PickOptionalClaim,
                 200,
                 &serde_json::to_vec(&pallet).unwrap(),
+            ),
+            Err(WireResponseError::InvalidClaim)
+        ));
+
+        let mut batch = response.clone();
+        batch["execution"] = json!({
+            "method": "batch_cart",
+            "cluster_id": 90,
+            "cart_barcode": "BATCH-CART",
+            "slot_code": "A",
+            "sequence": 1,
+            "task_count": 2,
+            "batch_total_quantity": 7
+        });
+        let CommandOutcome::PickClaimed(Some(batch_claim)) = decode_command_response(
+            ResponseKind::PickOptionalClaim,
+            200,
+            &serde_json::to_vec(&batch).unwrap(),
+        )
+        .unwrap() else {
+            panic!("expected batch-cart claim");
+        };
+        assert_eq!(
+            batch_claim.execution.method,
+            crate::picking::PickExecutionMethod::BatchCart
+        );
+        assert_eq!(batch_claim.execution.batch_total_quantity, Some(7));
+        batch["execution"]["batch_total_quantity"] = serde_json::Value::Null;
+        assert!(matches!(
+            decode_command_response(
+                ResponseKind::PickOptionalClaim,
+                200,
+                &serde_json::to_vec(&batch).unwrap(),
             ),
             Err(WireResponseError::InvalidClaim)
         ));

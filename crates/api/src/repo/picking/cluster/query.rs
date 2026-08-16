@@ -74,12 +74,15 @@ pub async fn workspace(
 
     let candidate_rows = sqlx::query(
         r#"SELECT task.id AS task_id,task.order_id,orders.order_key,
-          content.source_location_id,location.barcode AS source_location_barcode,
+          content.source_location_id,content.source_inventory_balance_id,
+          location.barcode AS source_location_barcode,
           location.name AS source_location_name,
           release_allocation.travel_sequence AS source_travel_sequence,
-          content.item_id,COALESCE(item.description,'Item #'||content.item_id::text)
+          content.item_id,content.item_batch_id,
+          COALESCE(item.description,'Item #'||content.item_id::text)
             AS item_description,
-          content.uom,content.planned_qty,task.priority,task.ship_by,task.created_at
+          content.uom,content.inventory_status,content.planned_qty,
+          task.priority,task.ship_by,task.created_at
         FROM pick_tasks task
         JOIN pick_task_contents content ON content.tenant_id=task.tenant_id
           AND content.task_id=task.id AND content.state='pending'
@@ -127,12 +130,15 @@ pub async fn workspace(
                     .map_err(internal)?,
                 order_key: row.try_get("order_key")?,
                 source_location_id: row.try_get("source_location_id")?,
+                source_inventory_balance_id: row.try_get("source_inventory_balance_id")?,
                 source_location_barcode: row.try_get("source_location_barcode")?,
                 source_location_name: row.try_get("source_location_name")?,
                 source_travel_sequence: row.try_get("source_travel_sequence")?,
                 item_id: row.try_get("item_id")?,
+                item_batch_id: row.try_get("item_batch_id")?,
                 item_description: row.try_get("item_description")?,
                 uom: row.try_get("uom")?,
+                inventory_status: row.try_get("inventory_status")?,
                 planned_quantity: row.try_get("planned_qty")?,
                 priority: row.try_get("priority")?,
                 ship_by: row.try_get("ship_by")?,

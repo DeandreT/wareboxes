@@ -1,3 +1,5 @@
+#[path = "api_v1_picking/batch_cart.rs"]
+mod batch_cart;
 #[path = "api_v1_picking/case_pick.rs"]
 mod case_pick;
 #[path = "api_v1_picking/cluster_cart.rs"]

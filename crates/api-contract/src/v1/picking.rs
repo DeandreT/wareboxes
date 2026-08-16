@@ -765,6 +765,7 @@ mod tests {
                 slot_code: None,
                 sequence: None,
                 task_count: None,
+                batch_total_quantity: None,
             },
             pick_policy: PickDecisionPolicyResponse {
                 source: PickDecisionPolicySource::ProductDefault,

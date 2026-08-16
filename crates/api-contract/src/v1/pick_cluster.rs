@@ -24,6 +24,14 @@ pub enum PickExecutionMethod {
     Case,
     Pallet,
     ClusterCart,
+    BatchCart,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickRouteMode {
+    ClusterCart,
+    BatchCart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +43,7 @@ pub struct PickExecutionResponse {
     pub slot_code: Option<String>,
     pub sequence: Option<i64>,
     pub task_count: Option<i64>,
+    pub batch_total_quantity: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,12 +120,15 @@ pub struct PickClusterCandidateResponse {
     pub order_id: i64,
     pub order_key: String,
     pub source_location_id: i64,
+    pub source_inventory_balance_id: i64,
     pub source_location_barcode: String,
     pub source_location_name: Option<String>,
     pub source_travel_sequence: i64,
     pub item_id: i64,
+    pub item_batch_id: i64,
     pub item_description: String,
     pub uom: String,
+    pub inventory_status: String,
     pub planned_quantity: i64,
     pub priority: i64,
     pub ship_by: Option<String>,
@@ -135,11 +147,14 @@ pub struct PickClusterMemberResponse {
     pub slot_id: i64,
     pub slot_code: String,
     pub source_location_id: i64,
+    pub source_inventory_balance_id: i64,
     pub source_location_barcode: String,
     pub source_location_name: Option<String>,
     pub item_id: i64,
+    pub item_batch_id: i64,
     pub item_description: String,
     pub uom: String,
+    pub inventory_status: String,
     pub planned_quantity: i64,
 }
 
@@ -152,6 +167,14 @@ pub struct PickClusterResponse {
     pub cart_id: i64,
     pub cart_barcode: String,
     pub cart_name: String,
+    pub mode: PickRouteMode,
+    pub batch_source_inventory_balance_id: Option<i64>,
+    pub batch_source_location_id: Option<i64>,
+    pub batch_source_location_barcode: Option<String>,
+    pub batch_item_batch_id: Option<i64>,
+    pub batch_uom: Option<String>,
+    pub batch_inventory_status: Option<String>,
+    pub batch_total_quantity: Option<i64>,
     pub status: PickClusterStatus,
     pub revision: i64,
     pub task_count: i64,
