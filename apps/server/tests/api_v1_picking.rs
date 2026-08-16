@@ -1,3 +1,5 @@
+#[path = "api_v1_picking/case_pick.rs"]
+mod case_pick;
 #[path = "api_v1_picking/cluster_cart.rs"]
 mod cluster_cart;
 mod common;

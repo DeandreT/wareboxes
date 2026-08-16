@@ -21,6 +21,7 @@ pub enum PickClusterStatus {
 #[serde(rename_all = "snake_case")]
 pub enum PickExecutionMethod {
     Discrete,
+    Case,
     ClusterCart,
 }
 

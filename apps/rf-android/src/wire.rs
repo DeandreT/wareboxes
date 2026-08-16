@@ -1634,10 +1634,23 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                     || response.execution.slot_code.is_some()
                     || response.execution.sequence.is_some()
                     || response.execution.task_count.is_some()
+                    || content.uom.eq_ignore_ascii_case("case")
                 {
                     return Err(WireResponseError::InvalidClaim);
                 }
                 crate::picking::PickExecutionEvidence::discrete()
+            }
+            wareboxes_api_contract::v1::PickExecutionMethod::Case => {
+                if response.execution.cluster_id.is_some()
+                    || response.execution.cart_barcode.is_some()
+                    || response.execution.slot_code.is_some()
+                    || response.execution.sequence.is_some()
+                    || response.execution.task_count.is_some()
+                    || !content.uom.eq_ignore_ascii_case("case")
+                {
+                    return Err(WireResponseError::InvalidClaim);
+                }
+                crate::picking::PickExecutionEvidence::case()
             }
             wareboxes_api_contract::v1::PickExecutionMethod::ClusterCart => {
                 let execution = response.execution;
@@ -2961,7 +2974,7 @@ mod tests {
 
     #[test]
     fn pick_claim_decoder_preserves_allocation_and_scan_identity() {
-        let response = serde_json::to_vec(&json!({
+        let response = json!({
             "task_id": 71,
             "order_id": 72,
             "inventory_owner_id": 7,
@@ -2975,7 +2988,7 @@ mod tests {
             "destination_location_barcode": "PACK-01",
             "destination_location_name": "Pack lane 1",
             "execution": {
-                "method": "discrete",
+                "method": "case",
                 "cluster_id": null,
                 "cart_barcode": null,
                 "slot_code": null,
@@ -3014,11 +3027,11 @@ mod tests {
                 "planned_quantity": 4,
                 "state": "pending"
             }
-        }))
-        .unwrap();
+        });
+        let encoded = serde_json::to_vec(&response).unwrap();
 
         let CommandOutcome::PickClaimed(Some(claim)) =
-            decode_command_response(ResponseKind::PickOptionalClaim, 200, &response).unwrap()
+            decode_command_response(ResponseKind::PickOptionalClaim, 200, &encoded).unwrap()
         else {
             panic!("expected pick claim");
         };
@@ -3026,11 +3039,26 @@ mod tests {
         assert_eq!(claim.order_revision, 3);
         assert_eq!(claim.content.content_id, 81);
         assert_eq!(claim.content.inventory_allocation_id, 83);
+        assert_eq!(
+            claim.execution.method,
+            crate::picking::PickExecutionMethod::Case
+        );
         assert_eq!(claim.content.item_barcodes, vec!["ITEM-71", "000071"]);
         assert_eq!(
             claim.content.source_license_plate_barcode.as_deref(),
             Some("LP-71")
         );
+
+        let mut invalid = response;
+        invalid["execution"]["method"] = json!("discrete");
+        assert!(matches!(
+            decode_command_response(
+                ResponseKind::PickOptionalClaim,
+                200,
+                &serde_json::to_vec(&invalid).unwrap(),
+            ),
+            Err(WireResponseError::InvalidClaim)
+        ));
     }
 
     #[test]

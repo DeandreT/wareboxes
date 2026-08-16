@@ -70,7 +70,18 @@ impl PickCartSlotCode {
 #[serde(rename_all = "snake_case")]
 pub enum PickExecutionMethod {
     Discrete,
+    Case,
     ClusterCart,
+}
+
+impl PickExecutionMethod {
+    pub fn for_unclustered_uom(uom: &str) -> Self {
+        if uom.eq_ignore_ascii_case("case") {
+            Self::Case
+        } else {
+            Self::Discrete
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -218,6 +229,22 @@ mod tests {
         assert_eq!(
             validate_pick_cluster_plan(&[line(1, 10, 100), line(2, 20, 100)]),
             Err(PickClusterError::SlotUsesMultipleOrders)
+        );
+    }
+
+    #[test]
+    fn case_uom_selects_explicit_case_execution() {
+        assert_eq!(
+            PickExecutionMethod::for_unclustered_uom("case"),
+            PickExecutionMethod::Case
+        );
+        assert_eq!(
+            PickExecutionMethod::for_unclustered_uom("CASE"),
+            PickExecutionMethod::Case
+        );
+        assert_eq!(
+            PickExecutionMethod::for_unclustered_uom("each"),
+            PickExecutionMethod::Discrete
         );
     }
 

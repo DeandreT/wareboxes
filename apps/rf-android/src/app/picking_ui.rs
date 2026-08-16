@@ -134,6 +134,19 @@ impl RfApp {
                     }
                 });
             });
+        } else if claim.execution.method == PickExecutionMethod::Case {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("CASE PICK").small().strong());
+                ui.label(format!(
+                    "Pick {} sealed case{} as whole handling units. Do not break case packaging.",
+                    claim.content.planned_quantity,
+                    if claim.content.planned_quantity == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            });
         }
 
         let lease_actions_allowed = if self.picking.activity() == Activity::Active {

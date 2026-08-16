@@ -104,6 +104,17 @@ impl PickExecutionEvidence {
             task_count: None,
         }
     }
+
+    pub const fn case() -> Self {
+        Self {
+            method: PickExecutionMethod::Case,
+            cluster_id: None,
+            cart_barcode: None,
+            slot_code: None,
+            sequence: None,
+            task_count: None,
+        }
+    }
 }
 
 /// Current-claim queries deliberately return absence instead of a synthetic task.

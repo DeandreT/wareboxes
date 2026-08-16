@@ -405,6 +405,7 @@ pub(super) async fn load_claim_tx(
     } else {
         None
     };
+    let uom: String = row.try_get("uom")?;
     let execution = match row.try_get::<Option<i64>, _>("cluster_id")? {
         Some(cluster_id) => PickExecutionEvidence {
             method: PickExecutionMethod::ClusterCart,
@@ -417,7 +418,15 @@ pub(super) async fn load_claim_tx(
             sequence: Some(row.try_get("cluster_sequence")?),
             task_count: Some(row.try_get("cluster_task_count")?),
         },
-        None => PickExecutionEvidence::discrete(),
+        None => match PickExecutionMethod::for_unclustered_uom(&uom) {
+            PickExecutionMethod::Case => PickExecutionEvidence::case(),
+            PickExecutionMethod::Discrete => PickExecutionEvidence::discrete(),
+            PickExecutionMethod::ClusterCart => {
+                return Err(AppError::internal(
+                    "unclustered pick resolved as cluster cart",
+                ));
+            }
+        },
     };
     Ok(PickClaim {
         task_id,
@@ -482,7 +491,7 @@ pub(super) async fn load_claim_tx(
                 .map(PickScanValue::new)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| AppError::internal(error.to_string()))?,
-            uom: row.try_get("uom")?,
+            uom,
             lot: row.try_get("lot")?,
             serial: row.try_get("serial")?,
             expiration: row.try_get("expiration")?,

@@ -7,8 +7,8 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType, TenantAccess};
 use wareboxes_domain::{
     InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, LicensePlateId, LocationId,
-    OrderId, OrderRevision, OrderStatus, PickContentId, PickContentState, PickQuantity, PickTaskId,
-    TenantId, Timestamp, UserId,
+    OrderId, OrderRevision, OrderStatus, PickContentId, PickContentState, PickExecutionMethod,
+    PickQuantity, PickTaskId, TenantId, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -127,6 +127,9 @@ pub async fn confirm_content(
             "pick task does not match its order scope",
         ));
     }
+    let execution_method =
+        execution_method_for_task_tx(&mut tx, access.tenant_id, command.task_id, &target.uom)
+            .await?;
     let destination_barcode =
         resolve_destination_barcode_tx(&mut tx, access.tenant_id, &target, &command).await?;
     lock_pick_license_plates_tx(
@@ -285,9 +288,10 @@ pub async fn confirm_content(
         target.order_id.get(),
         Some(context.actor_id.get()),
         &format!(
-            "confirmed pick task {} ({} units)",
+            "confirmed pick task {} ({} {})",
             command.task_id,
-            target.quantity.get()
+            target.quantity.get(),
+            target.uom
         ),
     )
     .await?;
@@ -325,6 +329,8 @@ pub async fn confirm_content(
         access.tenant_id,
         target.inventory_owner_id,
         target.facility_id,
+        &target.uom,
+        execution_method,
         &result,
     )
     .await?;
@@ -1144,6 +1150,8 @@ async fn enqueue_confirmation_event_tx(
     tenant_id: TenantId,
     inventory_owner_id: InventoryOwnerId,
     facility_id: i64,
+    uom: &str,
+    execution_method: &'static str,
     result: &ConfirmPickContentResult,
 ) -> AppResult<()> {
     let facility_id = wareboxes_domain::FacilityId::new(facility_id)
@@ -1162,6 +1170,8 @@ async fn enqueue_confirmation_event_tx(
         "source_inventory_balance_id": result.source_inventory_balance_id,
         "destination_inventory_balance_id": result.destination_inventory_balance_id,
         "picked_quantity": result.picked_quantity,
+        "uom": uom,
+        "execution_method": execution_method,
         "pick_policy": result.pick_policy,
         "scan_evidence": {
             "source_location_verified": result.source_location_scan_verified,
@@ -1194,4 +1204,32 @@ async fn enqueue_confirmation_event_tx(
     )
     .await?;
     Ok(())
+}
+
+async fn execution_method_for_task_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    task_id: PickTaskId,
+    uom: &str,
+) -> AppResult<&'static str> {
+    let has_active_cluster: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM pick_cluster_members member
+        JOIN pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+          AND cluster.id=member.cluster_id
+        WHERE member.tenant_id=$1 AND member.task_id=$2 AND cluster.status='in_progress')"#,
+    )
+    .bind(tenant_id.get())
+    .bind(task_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if has_active_cluster {
+        return Ok("cluster_cart");
+    }
+    match PickExecutionMethod::for_unclustered_uom(uom) {
+        PickExecutionMethod::Discrete => Ok("discrete"),
+        PickExecutionMethod::Case => Ok("case"),
+        PickExecutionMethod::ClusterCart => Err(AppError::internal(
+            "unclustered pick resolved as cluster cart",
+        )),
+    }
 }

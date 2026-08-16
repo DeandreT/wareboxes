@@ -66,6 +66,7 @@ pub struct PickClaim {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickExecutionMethod {
     Discrete,
+    Case,
     ClusterCart,
 }
 
@@ -83,6 +84,17 @@ impl PickExecutionEvidence {
     pub const fn discrete() -> Self {
         Self {
             method: PickExecutionMethod::Discrete,
+            cluster_id: None,
+            cart_barcode: None,
+            slot_code: None,
+            sequence: None,
+            task_count: None,
+        }
+    }
+
+    pub const fn case() -> Self {
+        Self {
+            method: PickExecutionMethod::Case,
             cluster_id: None,
             cart_barcode: None,
             slot_code: None,
