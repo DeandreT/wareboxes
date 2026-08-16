@@ -147,7 +147,7 @@ pub struct PickClaimResponse {
 /// The current claim is absent when the RF identity owns no active pick work.
 pub type CurrentPickResponse = Option<PickClaimResponse>;
 
-/// Confirms the immutable planned quantity using scanned source and tote identifiers.
+/// Confirms the immutable planned quantity using scanned source and outbound-container evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmPickContentRequest {

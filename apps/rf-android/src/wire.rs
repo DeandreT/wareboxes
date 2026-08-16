@@ -1652,6 +1652,22 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
                 }
                 crate::picking::PickExecutionEvidence::case()
             }
+            wareboxes_api_contract::v1::PickExecutionMethod::Pallet => {
+                if response.execution.cluster_id.is_some()
+                    || response.execution.cart_barcode.is_some()
+                    || response.execution.slot_code.is_some()
+                    || response.execution.sequence.is_some()
+                    || response.execution.task_count.is_some()
+                    || content.source_license_plate_id.is_none()
+                    || content.source_license_plate_barcode.is_none()
+                    || response
+                        .suggested_destination_license_plate_barcode
+                        .is_some()
+                {
+                    return Err(WireResponseError::InvalidClaim);
+                }
+                crate::picking::PickExecutionEvidence::pallet()
+            }
             wareboxes_api_contract::v1::PickExecutionMethod::ClusterCart => {
                 let execution = response.execution;
                 if execution.cluster_id.is_none_or(|value| value <= 0)
@@ -3048,6 +3064,30 @@ mod tests {
             claim.content.source_license_plate_barcode.as_deref(),
             Some("LP-71")
         );
+
+        let mut pallet = response.clone();
+        pallet["execution"]["method"] = json!("pallet");
+        let CommandOutcome::PickClaimed(Some(pallet_claim)) = decode_command_response(
+            ResponseKind::PickOptionalClaim,
+            200,
+            &serde_json::to_vec(&pallet).unwrap(),
+        )
+        .unwrap() else {
+            panic!("expected full pallet claim");
+        };
+        assert_eq!(
+            pallet_claim.execution.method,
+            crate::picking::PickExecutionMethod::Pallet
+        );
+        pallet["suggested_destination_license_plate_barcode"] = json!("LP-71");
+        assert!(matches!(
+            decode_command_response(
+                ResponseKind::PickOptionalClaim,
+                200,
+                &serde_json::to_vec(&pallet).unwrap(),
+            ),
+            Err(WireResponseError::InvalidClaim)
+        ));
 
         let mut invalid = response;
         invalid["execution"]["method"] = json!("discrete");

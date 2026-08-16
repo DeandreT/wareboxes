@@ -147,6 +147,13 @@ impl RfApp {
                     }
                 ));
             });
+        } else if claim.execution.method == PickExecutionMethod::Pallet {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("FULL PALLET PICK").small().strong());
+                ui.label(
+                    "Move the directed pallet intact. Its source license-plate scan also verifies the outbound pallet identity.",
+                );
+            });
         }
 
         let lease_actions_allowed = if self.picking.activity() == Activity::Active {

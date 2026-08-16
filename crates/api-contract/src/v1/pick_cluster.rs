@@ -22,6 +22,7 @@ pub enum PickClusterStatus {
 pub enum PickExecutionMethod {
     Discrete,
     Case,
+    Pallet,
     ClusterCart,
 }
 

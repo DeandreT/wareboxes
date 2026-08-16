@@ -238,6 +238,7 @@ pub(crate) fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
             method: match claim.execution.method {
                 PickExecutionMethod::Discrete => ApiPickExecutionMethod::Discrete,
                 PickExecutionMethod::Case => ApiPickExecutionMethod::Case,
+                PickExecutionMethod::Pallet => ApiPickExecutionMethod::Pallet,
                 PickExecutionMethod::ClusterCart => ApiPickExecutionMethod::ClusterCart,
             },
             cluster_id: claim.execution.cluster_id.map(|id| id.get()),

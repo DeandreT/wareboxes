@@ -27,7 +27,12 @@ use super::shortage::{
 };
 use super::CONFIRM_OPERATION;
 
+mod container;
 mod scan_policy;
+use container::{
+    bind_outbound_order_container_tx, lock_destination_plate_tx, lock_full_pallet_source_tx,
+    move_full_pallet_header_tx,
+};
 use scan_policy::{resolve_destination_barcode_tx, validate_scans_tx};
 
 #[derive(Debug)]
@@ -127,9 +132,7 @@ pub async fn confirm_content(
             "pick task does not match its order scope",
         ));
     }
-    let execution_method =
-        execution_method_for_task_tx(&mut tx, access.tenant_id, command.task_id, &target.uom)
-            .await?;
+    let cluster_pick = active_cluster_pick_tx(&mut tx, access.tenant_id, command.task_id).await?;
     let destination_barcode =
         resolve_destination_barcode_tx(&mut tx, access.tenant_id, &target, &command).await?;
     lock_pick_license_plates_tx(
@@ -142,19 +145,41 @@ pub async fn confirm_content(
     )
     .await?;
     validate_scans_tx(&mut tx, access.tenant_id, &target, &command).await?;
-    let destination_plate = lock_destination_plate_tx(
-        &mut tx,
-        access.tenant_id,
-        &target,
-        destination_barcode.as_str(),
-    )
-    .await?;
+    let pallet_pick = if cluster_pick {
+        None
+    } else {
+        lock_full_pallet_source_tx(
+            &mut tx,
+            access.tenant_id,
+            &target,
+            destination_barcode.as_str(),
+        )
+        .await?
+    };
+    let destination_plate = match pallet_pick.as_ref() {
+        Some(plate) => DestinationPlate { id: plate.id },
+        None => {
+            lock_destination_plate_tx(
+                &mut tx,
+                access.tenant_id,
+                &target,
+                destination_barcode.as_str(),
+            )
+            .await?
+        }
+    };
+    let execution_method = execution_method(cluster_pick, pallet_pick.is_some(), &target.uom)?;
+    if pallet_pick.is_some() {
+        move_full_pallet_header_tx(&mut tx, access.tenant_id, &target, destination_plate.id)
+            .await?;
+    }
     bind_outbound_order_container_tx(
         &mut tx,
         access.tenant_id,
         context.actor_id.get(),
         &target,
         destination_plate.id,
+        pallet_pick.is_some(),
     )
     .await?;
 
@@ -200,7 +225,6 @@ pub async fn confirm_content(
         confirmed_at,
     )
     .await?;
-
     for (location_id, license_plate_id, quantity_delta) in [
         (
             target.source_location_id,
@@ -647,144 +671,6 @@ fn validate_target_row(row: &sqlx::postgres::PgRow, target: &PickTarget) -> AppR
     Ok(())
 }
 
-async fn lock_destination_plate_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    target: &PickTarget,
-    barcode: &str,
-) -> AppResult<DestinationPlate> {
-    let row = sqlx::query(
-        r#"
-        SELECT plate.id, plate.location_id,
-               location.active, location.pickable, location.barcode, location.type
-        FROM license_plates plate
-        INNER JOIN locations location
-          ON location.tenant_id = plate.tenant_id
-         AND location.facility_id = plate.facility_id
-         AND location.id = plate.location_id AND location.deleted IS NULL
-        WHERE plate.tenant_id = $1 AND plate.inventory_owner_id = $2
-          AND plate.facility_id = $3 AND plate.barcode = $4
-          AND plate.deleted IS NULL
-        FOR UPDATE OF plate
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(target.inventory_owner_id.get())
-    .bind(target.facility_id)
-    .bind(barcode)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| {
-        AppError::bad_request("scanned destination license plate is not available in this facility")
-    })?;
-    let location_id: i64 = row.try_get("location_id")?;
-    if location_id != target.destination_location_id.get()
-        || !row.try_get::<bool, _>("active")?
-        || row.try_get::<bool, _>("pickable")?
-        || !matches!(
-            row.try_get::<String, _>("type")?
-                .to_ascii_lowercase()
-                .as_str(),
-            "staging" | "packing"
-        )
-        || row
-            .try_get::<Option<String>, _>("barcode")?
-            .is_none_or(|value| value.trim().is_empty())
-    {
-        return Err(AppError::conflict(
-            "destination license plate is not at the directed staging location",
-        ));
-    }
-    let id = LicensePlateId::new(row.try_get("id")?)
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    if Some(id) == target.source_license_plate_id {
-        return Err(AppError::conflict(
-            "source and destination license plates must differ",
-        ));
-    }
-    Ok(DestinationPlate { id })
-}
-
-async fn bind_outbound_order_container_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    actor_user_id: i64,
-    target: &PickTarget,
-    destination_plate_id: LicensePlateId,
-) -> AppResult<()> {
-    let existing = sqlx::query(
-        r#"
-        SELECT order_release_id, order_id, destination_location_id
-        FROM outbound_order_containers
-        WHERE tenant_id = $1 AND inventory_owner_id = $2
-          AND facility_id = $3 AND license_plate_id = $4
-          AND released_at IS NULL
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(target.inventory_owner_id.get())
-    .bind(target.facility_id)
-    .bind(destination_plate_id.get())
-    .fetch_optional(&mut **tx)
-    .await?;
-    if let Some(existing) = existing {
-        let matches_order = existing.try_get::<i64, _>("order_release_id")? == target.release_id
-            && existing.try_get::<i64, _>("order_id")? == target.order_id.get()
-            && existing.try_get::<i64, _>("destination_location_id")?
-                == target.destination_location_id.get();
-        return if matches_order {
-            Ok(())
-        } else {
-            Err(AppError::conflict(
-                "destination license plate is assigned to another outbound order",
-            ))
-        };
-    }
-
-    let occupied_balance_ids: Vec<i64> = sqlx::query_scalar(
-        r#"
-        SELECT id FROM inventory_balances
-        WHERE tenant_id = $1 AND inventory_owner_id = $2
-          AND facility_id = $3 AND license_plate_id = $4
-          AND deleted IS NULL AND qty_on_hand > 0
-        ORDER BY id FOR UPDATE
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(target.inventory_owner_id.get())
-    .bind(target.facility_id)
-    .bind(destination_plate_id.get())
-    .fetch_all(&mut **tx)
-    .await?;
-    if !occupied_balance_ids.is_empty() {
-        return Err(AppError::conflict(
-            "unassigned destination license plate is not empty",
-        ));
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO outbound_order_containers (
-            tenant_id, inventory_owner_id, facility_id, order_release_id,
-            order_id, destination_location_id, license_plate_id,
-            created_by_user_id, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(target.inventory_owner_id.get())
-    .bind(target.facility_id)
-    .bind(target.release_id)
-    .bind(target.order_id.get())
-    .bind(target.destination_location_id.get())
-    .bind(destination_plate_id.get())
-    .bind(actor_user_id)
-    .bind(now_iso())
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
 async fn fulfill_source_allocation_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
@@ -1206,13 +1092,12 @@ async fn enqueue_confirmation_event_tx(
     Ok(())
 }
 
-async fn execution_method_for_task_tx(
+async fn active_cluster_pick_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     task_id: PickTaskId,
-    uom: &str,
-) -> AppResult<&'static str> {
-    let has_active_cluster: bool = sqlx::query_scalar(
+) -> AppResult<bool> {
+    Ok(sqlx::query_scalar(
         r#"SELECT EXISTS(SELECT 1 FROM pick_cluster_members member
         JOIN pick_clusters cluster ON cluster.tenant_id=member.tenant_id
           AND cluster.id=member.cluster_id
@@ -1221,15 +1106,21 @@ async fn execution_method_for_task_tx(
     .bind(tenant_id.get())
     .bind(task_id.get())
     .fetch_one(&mut **tx)
-    .await?;
-    if has_active_cluster {
+    .await?)
+}
+
+fn execution_method(cluster_pick: bool, pallet_pick: bool, uom: &str) -> AppResult<&'static str> {
+    if cluster_pick {
         return Ok("cluster_cart");
+    }
+    if pallet_pick {
+        return Ok("pallet");
     }
     match PickExecutionMethod::for_unclustered_uom(uom) {
         PickExecutionMethod::Discrete => Ok("discrete"),
         PickExecutionMethod::Case => Ok("case"),
-        PickExecutionMethod::ClusterCart => Err(AppError::internal(
-            "unclustered pick resolved as cluster cart",
+        PickExecutionMethod::Pallet | PickExecutionMethod::ClusterCart => Err(AppError::internal(
+            "unclustered pick resolved as grouped execution",
         )),
     }
 }

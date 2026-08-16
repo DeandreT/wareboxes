@@ -208,6 +208,9 @@ pub async fn reverse_confirmation(
 
     release_staged_allocation_tx(&mut tx, access.tenant_id, &target, reversed_at).await?;
     decrement_staged_balance_tx(&mut tx, access.tenant_id, &target, reversed_at).await?;
+    if target.source_license_plate_id == Some(target.staged_license_plate_id) {
+        return_full_pallet_header_tx(&mut tx, access.tenant_id, &target).await?;
+    }
     increment_source_balance_tx(&mut tx, access.tenant_id, &target, reversed_at).await?;
     reactivate_source_allocation_tx(&mut tx, access.tenant_id, &target).await?;
 
@@ -937,6 +940,45 @@ async fn increment_source_balance_tx(
     if updated.rows_affected() != 1 {
         return Err(AppError::conflict(
             "source inventory changed during pick reversal",
+        ));
+    }
+    Ok(())
+}
+
+async fn return_full_pallet_header_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    target: &ReversalTarget,
+) -> AppResult<()> {
+    let updated = sqlx::query(
+        r#"UPDATE license_plates SET location_id=$1
+        WHERE tenant_id=$2 AND inventory_owner_id=$3 AND facility_id=$4
+          AND id=$5 AND location_id=$6 AND parent_license_plate_id IS NULL
+          AND deleted IS NULL
+          AND NOT EXISTS(SELECT 1 FROM license_plates child
+            WHERE child.tenant_id=license_plates.tenant_id
+              AND child.inventory_owner_id=license_plates.inventory_owner_id
+              AND child.facility_id=license_plates.facility_id
+              AND child.parent_license_plate_id=license_plates.id
+              AND child.deleted IS NULL)
+          AND NOT EXISTS(SELECT 1 FROM inventory_balances balance
+            WHERE balance.tenant_id=license_plates.tenant_id
+              AND balance.inventory_owner_id=license_plates.inventory_owner_id
+              AND balance.facility_id=license_plates.facility_id
+              AND balance.license_plate_id=license_plates.id
+              AND balance.deleted IS NULL AND balance.qty_on_hand>0)"#,
+    )
+    .bind(target.source_location_id.get())
+    .bind(tenant_id.get())
+    .bind(target.inventory_owner_id.get())
+    .bind(target.facility_id)
+    .bind(target.staged_license_plate_id.get())
+    .bind(target.staged_location_id.get())
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict(
+            "full pallet changed after pick confirmation",
         ));
     }
     Ok(())

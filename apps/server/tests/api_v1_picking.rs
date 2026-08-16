@@ -5,6 +5,8 @@ mod cluster_cart;
 mod common;
 #[path = "api_v1_picking/decision_policy.rs"]
 mod decision_policy;
+#[path = "api_v1_picking/pallet_pick.rs"]
+mod pallet_pick;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};

@@ -317,7 +317,27 @@ pub(super) async fn load_claim_tx(
                balance.item_batch_id AS balance_batch_id,
                balance.item_id AS balance_item_id,
                balance.uom AS balance_uom, balance.status AS balance_status,
-               balance.qty_on_hand, balance.qty_reserved,
+               balance.qty_on_hand, balance.qty_reserved, balance.qty_held,
+               (content.source_license_plate_id IS NOT NULL
+                 AND balance.qty_on_hand=content.planned_qty
+                 AND balance.qty_reserved=content.planned_qty
+                 AND balance.qty_held=0
+                 AND source_plate.parent_license_plate_id IS NULL
+                 AND NOT EXISTS(
+                   SELECT 1 FROM license_plates child
+                   WHERE child.tenant_id=source_plate.tenant_id
+                     AND child.inventory_owner_id=source_plate.inventory_owner_id
+                     AND child.facility_id=source_plate.facility_id
+                     AND child.parent_license_plate_id=source_plate.id
+                     AND child.deleted IS NULL)
+                 AND 1=(
+                   SELECT COUNT(*) FROM inventory_balances position
+                   WHERE position.tenant_id=balance.tenant_id
+                     AND position.inventory_owner_id=balance.inventory_owner_id
+                     AND position.facility_id=balance.facility_id
+                     AND position.license_plate_id=balance.license_plate_id
+                     AND position.deleted IS NULL AND position.qty_on_hand>0)
+               ) AS full_pallet_pick,
                balance.deleted AS balance_deleted,
                batch.lot, batch.serial, batch.expiration,
                batch.deleted AS batch_deleted,
@@ -394,17 +414,6 @@ pub(super) async fn load_claim_tx(
     let pick_policy = decision_policy_from_task_row(&row)?;
     let destination_container_barcodes: Vec<String> =
         row.try_get("destination_container_barcodes")?;
-    let suggested_destination_license_plate_barcode = if !pick_policy
-        .require_destination_container_scan
-        && destination_container_barcodes.len() == 1
-    {
-        Some(
-            PickScanValue::new(destination_container_barcodes[0].clone())
-                .map_err(|error| AppError::internal(error.to_string()))?,
-        )
-    } else {
-        None
-    };
     let uom: String = row.try_get("uom")?;
     let execution = match row.try_get::<Option<i64>, _>("cluster_id")? {
         Some(cluster_id) => PickExecutionEvidence {
@@ -418,15 +427,28 @@ pub(super) async fn load_claim_tx(
             sequence: Some(row.try_get("cluster_sequence")?),
             task_count: Some(row.try_get("cluster_task_count")?),
         },
+        None if row.try_get::<bool, _>("full_pallet_pick")? => PickExecutionEvidence::pallet(),
         None => match PickExecutionMethod::for_unclustered_uom(&uom) {
             PickExecutionMethod::Case => PickExecutionEvidence::case(),
             PickExecutionMethod::Discrete => PickExecutionEvidence::discrete(),
-            PickExecutionMethod::ClusterCart => {
+            PickExecutionMethod::Pallet | PickExecutionMethod::ClusterCart => {
                 return Err(AppError::internal(
-                    "unclustered pick resolved as cluster cart",
+                    "unclustered pick resolved as grouped execution",
                 ));
             }
         },
+    };
+    let suggested_destination_license_plate_barcode = if execution.method
+        != PickExecutionMethod::Pallet
+        && !pick_policy.require_destination_container_scan
+        && destination_container_barcodes.len() == 1
+    {
+        Some(
+            PickScanValue::new(destination_container_barcodes[0].clone())
+                .map_err(|error| AppError::internal(error.to_string()))?,
+        )
+    } else {
+        None
     };
     Ok(PickClaim {
         task_id,

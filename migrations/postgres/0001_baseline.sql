@@ -6439,6 +6439,7 @@ BEGIN
           AND plate.deleted IS NULL
     ) OR (
         NEW.source_license_plate_id IS NOT NULL
+        AND NEW.source_license_plate_id IS DISTINCT FROM NEW.staged_license_plate_id
         AND NOT EXISTS (
             SELECT 1 FROM public.license_plates plate
             WHERE plate.tenant_id = NEW.tenant_id
@@ -6551,6 +6552,30 @@ BEGIN
           AND source_balance.qty_reserved >= NEW.reversed_qty
           AND staged_balance.qty_on_hand >= 0
           AND staged_balance.qty_reserved >= 0
+          AND (
+              NEW.source_license_plate_id IS NULL
+              OR EXISTS (
+                  SELECT 1 FROM public.license_plates source_plate
+                  WHERE source_plate.tenant_id = NEW.tenant_id
+                    AND source_plate.inventory_owner_id = NEW.inventory_owner_id
+                    AND source_plate.facility_id = NEW.facility_id
+                    AND source_plate.id = NEW.source_license_plate_id
+                    AND source_plate.location_id = NEW.source_location_id
+                    AND source_plate.deleted IS NULL
+              )
+          )
+          AND (
+              NEW.source_license_plate_id IS NOT DISTINCT FROM NEW.staged_license_plate_id
+              OR EXISTS (
+                  SELECT 1 FROM public.license_plates staged_plate
+                  WHERE staged_plate.tenant_id = NEW.tenant_id
+                    AND staged_plate.inventory_owner_id = NEW.inventory_owner_id
+                    AND staged_plate.facility_id = NEW.facility_id
+                    AND staged_plate.id = NEW.staged_license_plate_id
+                    AND staged_plate.location_id = NEW.staged_location_id
+                    AND staged_plate.deleted IS NULL
+              )
+          )
     ) THEN
         RAISE EXCEPTION 'pick reversal does not reconcile with reopened work or inventory projections'
             USING ERRCODE = '23514';

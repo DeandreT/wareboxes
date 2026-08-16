@@ -71,6 +71,7 @@ impl PickCartSlotCode {
 pub enum PickExecutionMethod {
     Discrete,
     Case,
+    Pallet,
     ClusterCart,
 }
 
