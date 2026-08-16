@@ -1,9 +1,32 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AllocationPolicyResponse, CursorPage, OpaqueCursor, OrderAllocationOutcome,
+    AllocationPolicyResponse, ConfigurationScope, CursorPage, OpaqueCursor, OrderAllocationOutcome,
     OrderAllocationStrategy, PageLimit, Revision,
 };
+
+pub const PRODUCT_DEFAULT_PICK_DECISION_POLICY_HASH: &str =
+    "306876e6546bd2e6b2fc6ae5d05f452cd186d2fbb5303809d7a06242ca3f13e5";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickDecisionPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickDecisionPolicyResponse {
+    pub source: PickDecisionPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub require_source_location_scan: bool,
+    pub require_item_scan: bool,
+    pub require_destination_container_scan: bool,
+    pub policy_hash: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +137,8 @@ pub struct PickClaimResponse {
     pub destination_location_id: i64,
     pub destination_location_barcode: String,
     pub destination_location_name: Option<String>,
+    pub pick_policy: PickDecisionPolicyResponse,
+    pub suggested_destination_license_plate_barcode: Option<String>,
     pub content: PickClaimContent,
 }
 
@@ -124,11 +149,14 @@ pub type CurrentPickResponse = Option<PickClaimResponse>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmPickContentRequest {
-    pub source_location_barcode: String,
-    pub item_barcode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_location_barcode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_barcode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_license_plate_barcode: Option<String>,
-    pub destination_license_plate_barcode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_license_plate_barcode: Option<String>,
 }
 
 /// Result of atomically moving one pick and advancing its workflow state.
@@ -148,6 +176,10 @@ pub struct PickContentConfirmationResponse {
     pub destination_location_id: i64,
     pub source_license_plate_id: Option<i64>,
     pub destination_license_plate_id: i64,
+    pub pick_policy: PickDecisionPolicyResponse,
+    pub source_location_scan_verified: bool,
+    pub item_scan_verified: bool,
+    pub destination_container_scan_verified: bool,
     pub picked_quantity: i64,
     pub confirmed_by: i64,
     pub confirmed_at: String,
@@ -249,6 +281,10 @@ pub struct PickConfirmationHistoryResponse {
     pub staged_location_id: i64,
     pub staged_location_name: String,
     pub staged_license_plate_id: i64,
+    pub pick_policy: PickDecisionPolicyResponse,
+    pub source_location_scan_verified: bool,
+    pub item_scan_verified: bool,
+    pub destination_container_scan_verified: bool,
     pub confirmed_by: i64,
     pub confirmed_at: String,
     pub reversal: Option<PickReversalHistoryResponse>,
@@ -653,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_accepts_scans_but_not_a_client_selected_quantity() {
+    fn confirmation_accepts_policy_optional_scans_but_not_client_selected_quantity() {
         let request = serde_json::from_value::<ConfirmPickContentRequest>(json!({
             "source_location_barcode": "A-01",
             "item_barcode": "SKU-1",
@@ -661,7 +697,11 @@ mod tests {
             "destination_license_plate_barcode": "TOTE-1"
         }))
         .unwrap();
-        assert_eq!(request.source_location_barcode, "A-01");
+        assert_eq!(request.source_location_barcode.as_deref(), Some("A-01"));
+        let omitted = serde_json::from_value::<ConfirmPickContentRequest>(json!({})).unwrap();
+        assert!(omitted.source_location_barcode.is_none());
+        assert!(omitted.item_barcode.is_none());
+        assert!(omitted.destination_license_plate_barcode.is_none());
 
         assert!(serde_json::from_value::<ConfirmPickContentRequest>(json!({
             "source_location_barcode": "A-01",
@@ -716,6 +756,17 @@ mod tests {
             destination_location_id: 5,
             destination_location_barcode: "PACK-01".into(),
             destination_location_name: Some("Pack lane 1".into()),
+            pick_policy: PickDecisionPolicyResponse {
+                source: PickDecisionPolicySource::ProductDefault,
+                configuration_id: None,
+                configuration_revision: None,
+                configuration_scope: None,
+                require_source_location_scan: true,
+                require_item_scan: true,
+                require_destination_container_scan: true,
+                policy_hash: PRODUCT_DEFAULT_PICK_DECISION_POLICY_HASH.to_owned(),
+            },
+            suggested_destination_license_plate_barcode: None,
             content: PickClaimContent {
                 content_id: 6,
                 order_line_id: 7,

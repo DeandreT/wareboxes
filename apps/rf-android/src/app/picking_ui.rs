@@ -106,6 +106,19 @@ impl RfApp {
                     pick_scan_hint(&claim, stage),
                     lease_actions_allowed,
                 );
+            } else if lease_actions_allowed {
+                let confirm_clicked = ui
+                    .add_sized(
+                        [ui.available_width(), 54.0],
+                        egui::Button::new(egui::RichText::new("Confirm directed pick").strong())
+                            .fill(Self::primary_fill(true)),
+                    )
+                    .clicked();
+                if confirm_clicked {
+                    let (command_id, key) = Self::command_identity("pick-confirm");
+                    let effect = self.picking.begin_confirmation(command_id, key);
+                    self.emit_pick(effect);
+                }
             }
 
             ui.add_space(4.0);
@@ -597,6 +610,8 @@ fn debug_pick_claim() -> PickClaim {
         destination_location_id: 9,
         destination_location_barcode: "STAGE-01".into(),
         destination_location_name: Some("Outbound stage 1".into()),
+        pick_policy: crate::picking::PickDecisionPolicy::product_default(),
+        suggested_destination_license_plate_barcode: None,
         content: PickClaimContent {
             content_id: 610,
             order_line_id: 710,

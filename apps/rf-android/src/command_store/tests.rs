@@ -73,10 +73,10 @@ fn pick_confirmation_draft(command_id: &str, key: &str) -> DurableCommandDraft {
         command: RfCommand::Picking(PickingCommand::Confirm {
             task_id: 91,
             content_id: 92,
-            source_location_barcode: "A-09-01".into(),
-            item_barcode: "ITEM-91".into(),
+            source_location_barcode: Some("A-09-01".into()),
+            item_barcode: Some("ITEM-91".into()),
             source_license_plate_barcode: Some("LP-91".into()),
-            destination_license_plate_barcode: "TOTE-91".into(),
+            destination_license_plate_barcode: Some("TOTE-91".into()),
         }),
     }
 }

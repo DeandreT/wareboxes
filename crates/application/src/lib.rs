@@ -39,6 +39,7 @@ pub mod outbox;
 pub mod packing;
 pub mod pick_wave;
 pub mod picking;
+pub mod picking_decision_policy;
 pub mod purchase_order;
 pub mod putaway;
 pub mod putaway_policy;

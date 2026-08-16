@@ -14,6 +14,7 @@ use wareboxes_domain::{
 };
 
 use crate::order_allocation::AllocationPolicyReadModel;
+use crate::picking_decision_policy::PickDecisionPolicyReadModel;
 
 pub const REPORT_PICK_SHORTAGE_OPERATION: &str = "picking.shortage.report.v1";
 pub const REVERSE_PICK_CONFIRMATION_OPERATION: &str = "picking.confirmation.reverse.v1";
@@ -74,6 +75,9 @@ pub struct PickClaim {
     pub destination_location_id: LocationId,
     pub destination_location_barcode: PickScanValue,
     pub destination_location_name: Option<String>,
+    pub pick_policy: PickDecisionPolicyReadModel,
+    /// Present only when the task's existing outbound container is unambiguous.
+    pub suggested_destination_license_plate_barcode: Option<PickScanValue>,
     pub content: PickClaimContent,
 }
 
@@ -113,10 +117,10 @@ pub struct PickClaimReleaseResult {
 pub struct ConfirmPickContentCommand {
     pub task_id: PickTaskId,
     pub content_id: PickContentId,
-    pub source_location_barcode: PickScanValue,
-    pub item_barcode: PickScanValue,
+    pub source_location_barcode: Option<PickScanValue>,
+    pub item_barcode: Option<PickScanValue>,
     pub source_license_plate_barcode: Option<PickScanValue>,
-    pub destination_license_plate_barcode: PickScanValue,
+    pub destination_license_plate_barcode: Option<PickScanValue>,
 }
 
 /// Atomic inventory and workflow result of confirming one pick content line.
@@ -135,6 +139,10 @@ pub struct ConfirmPickContentResult {
     pub destination_location_id: LocationId,
     pub source_license_plate_id: Option<LicensePlateId>,
     pub destination_license_plate_id: LicensePlateId,
+    pub pick_policy: PickDecisionPolicyReadModel,
+    pub source_location_scan_verified: bool,
+    pub item_scan_verified: bool,
+    pub destination_container_scan_verified: bool,
     pub picked_quantity: PickQuantity,
     pub confirmed_by: UserId,
     pub confirmed_at: Timestamp,
@@ -238,6 +246,10 @@ pub struct PickConfirmationHistoryReadModel {
     pub staged_location_id: LocationId,
     pub staged_location_name: String,
     pub staged_license_plate_id: LicensePlateId,
+    pub pick_policy: PickDecisionPolicyReadModel,
+    pub source_location_scan_verified: bool,
+    pub item_scan_verified: bool,
+    pub destination_container_scan_verified: bool,
     pub confirmed_by: UserId,
     pub confirmed_at: Timestamp,
     pub reversal: Option<PickReversalHistoryReadModel>,
@@ -694,15 +706,18 @@ mod tests {
         let command = ConfirmPickContentCommand {
             task_id: PickTaskId::new(7).unwrap(),
             content_id: PickContentId::new(8).unwrap(),
-            source_location_barcode: PickScanValue::new("A-01").unwrap(),
-            item_barcode: PickScanValue::new("SKU-1").unwrap(),
+            source_location_barcode: Some(PickScanValue::new("A-01").unwrap()),
+            item_barcode: Some(PickScanValue::new("SKU-1").unwrap()),
             source_license_plate_barcode: Some(PickScanValue::new("LP-1").unwrap()),
-            destination_license_plate_barcode: PickScanValue::new("TOTE-1").unwrap(),
+            destination_license_plate_barcode: Some(PickScanValue::new("TOTE-1").unwrap()),
         };
 
         assert_eq!(command.task_id.get(), 7);
         assert_eq!(command.content_id.get(), 8);
-        assert_eq!(command.source_location_barcode.as_str(), "A-01");
+        assert_eq!(
+            command.source_location_barcode.as_ref().unwrap().as_str(),
+            "A-01"
+        );
     }
 
     #[test]

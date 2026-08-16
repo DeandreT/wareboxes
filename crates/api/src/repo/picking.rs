@@ -3,6 +3,7 @@
 mod claim;
 mod confirmation;
 mod lifecycle;
+mod policy;
 mod readiness;
 mod reversal;
 mod short_shipment;

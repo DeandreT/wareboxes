@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_picking/decision_policy.rs"]
+mod decision_policy;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -12,8 +14,8 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     AllocationPolicyReference, ErrorReason, ErrorResponse, OrderAllocationOutcome,
     PickClaimHeartbeatResponse, PickClaimReleaseResponse, PickClaimResponse,
-    PickContentConfirmationResponse, PickContentState, PickOrderStatus, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse, ReleaseOrderResponse, Revision,
+    PickContentConfirmationResponse, PickContentState, PickDecisionPolicySource, PickOrderStatus,
+    PlanOrderAllocationRequest, PlanOrderAllocationResponse, ReleaseOrderResponse, Revision,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -1051,6 +1053,13 @@ async fn confirmation_requires_exact_scans_and_atomically_transfers_reserved_inv
     let claim = response_json::<Option<PickClaimResponse>>(claim)
         .await
         .unwrap();
+    assert_eq!(
+        claim.pick_policy.source,
+        PickDecisionPolicySource::ProductDefault
+    );
+    assert!(claim.pick_policy.require_source_location_scan);
+    assert!(claim.pick_policy.require_item_scan);
+    assert!(claim.pick_policy.require_destination_container_scan);
     let confirmation_path = format!(
         "/api/v1/picking-tasks/{}/contents/{}/confirmations",
         claim.task_id, claim.content.content_id
@@ -1060,6 +1069,18 @@ async fn confirmation_requires_exact_scans_and_atomically_transfers_reserved_inv
         "item_barcode": claim.content.item_barcodes[0],
         "destination_license_plate_barcode": "PICK-CONFIRM-TOTE"
     });
+
+    let missing_required_scans = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &confirmation_path,
+        Some("pick-confirm-missing-required-scans"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(missing_required_scans.status(), StatusCode::BAD_REQUEST);
 
     for (key, body, expected_status) in [
         (
@@ -1193,6 +1214,9 @@ async fn confirmation_requires_exact_scans_and_atomically_transfers_reserved_inv
     let confirmed: PickContentConfirmationResponse = response_json(success).await;
     assert_eq!(confirmed.picked_quantity, 4);
     assert_eq!(confirmed.destination_license_plate_id, destination_plate_id);
+    assert!(confirmed.source_location_scan_verified);
+    assert!(confirmed.item_scan_verified);
+    assert!(confirmed.destination_container_scan_verified);
     assert_eq!(confirmed.content_state, PickContentState::Completed);
     assert!(confirmed.task_completed);
     assert!(confirmed.order_ready_to_pack);

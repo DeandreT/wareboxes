@@ -50121,3 +50121,246 @@ CREATE TRIGGER replenishment_plan_runs_decision_policy_validate
 BEFORE INSERT ON public.replenishment_plan_runs FOR EACH ROW
 EXECUTE FUNCTION public.validate_replenishment_decision_policy_snapshot();
 REVOKE ALL ON FUNCTION public.validate_replenishment_decision_policy_snapshot() FROM PUBLIC;
+
+-- Pick scan policy is resolved once at first claim and remains immutable through
+-- release, reclaim, confirmation, and reversal. Product defaults preserve all
+-- pre-configuration scan requirements.
+ALTER TABLE public.pick_tasks
+  ADD COLUMN pick_policy_source text,
+  ADD COLUMN pick_configuration_id bigint,
+  ADD COLUMN pick_configuration_revision bigint,
+  ADD COLUMN pick_scope_level text,
+  ADD COLUMN pick_inventory_owner_id bigint,
+  ADD COLUMN pick_facility_id bigint,
+  ADD COLUMN require_source_location_scan boolean,
+  ADD COLUMN require_item_scan boolean,
+  ADD COLUMN require_destination_container_scan boolean,
+  ADD COLUMN pick_policy_hash text,
+  ADD CONSTRAINT pick_tasks_policy_state_check CHECK (
+    (pick_policy_source IS NULL
+      AND pick_configuration_id IS NULL AND pick_configuration_revision IS NULL
+      AND pick_scope_level IS NULL AND pick_inventory_owner_id IS NULL
+      AND pick_facility_id IS NULL AND require_source_location_scan IS NULL
+      AND require_item_scan IS NULL AND require_destination_container_scan IS NULL
+      AND pick_policy_hash IS NULL)
+    OR
+    (pick_policy_source IN ('product_default','configuration')
+      AND require_source_location_scan IS NOT NULL AND require_item_scan IS NOT NULL
+      AND require_destination_container_scan IS NOT NULL
+      AND pick_policy_hash~'^[0-9a-f]{64}$'
+      AND ((pick_policy_source='product_default'
+        AND pick_configuration_id IS NULL AND pick_configuration_revision IS NULL
+        AND pick_scope_level IS NULL AND pick_inventory_owner_id IS NULL
+        AND pick_facility_id IS NULL AND require_source_location_scan
+        AND require_item_scan AND require_destination_container_scan)
+      OR (pick_policy_source='configuration'
+        AND pick_configuration_id IS NOT NULL AND pick_configuration_revision>0
+        AND ((pick_scope_level='tenant' AND pick_inventory_owner_id IS NULL
+              AND pick_facility_id IS NULL)
+          OR (pick_scope_level='inventory_owner' AND pick_inventory_owner_id IS NOT NULL
+              AND pick_facility_id IS NULL)
+          OR (pick_scope_level='facility' AND pick_inventory_owner_id IS NULL
+              AND pick_facility_id IS NOT NULL)
+          OR (pick_scope_level='owner_facility' AND pick_inventory_owner_id IS NOT NULL
+              AND pick_facility_id IS NOT NULL))))));
+ALTER TABLE public.pick_tasks
+  ADD CONSTRAINT pick_tasks_policy_configuration_fkey
+  FOREIGN KEY (tenant_id,pick_configuration_id)
+  REFERENCES public.configuration_versions(tenant_id,id);
+CREATE INDEX pick_tasks_policy_configuration_idx
+ON public.pick_tasks(tenant_id,pick_configuration_id)
+WHERE pick_configuration_id IS NOT NULL;
+
+ALTER TABLE public.pick_confirmations
+  ADD COLUMN pick_policy_source text NOT NULL,
+  ADD COLUMN pick_configuration_id bigint,
+  ADD COLUMN pick_configuration_revision bigint,
+  ADD COLUMN pick_scope_level text,
+  ADD COLUMN pick_inventory_owner_id bigint,
+  ADD COLUMN pick_facility_id bigint,
+  ADD COLUMN require_source_location_scan boolean NOT NULL,
+  ADD COLUMN require_item_scan boolean NOT NULL,
+  ADD COLUMN require_destination_container_scan boolean NOT NULL,
+  ADD COLUMN pick_policy_hash text NOT NULL,
+  ADD COLUMN source_location_scan_verified boolean NOT NULL,
+  ADD COLUMN item_scan_verified boolean NOT NULL,
+  ADD COLUMN destination_container_scan_verified boolean NOT NULL,
+  ADD CONSTRAINT pick_confirmations_policy_identity_check CHECK (
+    pick_policy_source IN ('product_default','configuration')
+    AND pick_policy_hash~'^[0-9a-f]{64}$'
+    AND ((pick_policy_source='product_default'
+      AND pick_configuration_id IS NULL AND pick_configuration_revision IS NULL
+      AND pick_scope_level IS NULL AND pick_inventory_owner_id IS NULL
+      AND pick_facility_id IS NULL AND require_source_location_scan
+      AND require_item_scan AND require_destination_container_scan)
+    OR (pick_policy_source='configuration'
+      AND pick_configuration_id IS NOT NULL AND pick_configuration_revision>0
+      AND ((pick_scope_level='tenant' AND pick_inventory_owner_id IS NULL
+            AND pick_facility_id IS NULL)
+        OR (pick_scope_level='inventory_owner' AND pick_inventory_owner_id IS NOT NULL
+            AND pick_facility_id IS NULL)
+        OR (pick_scope_level='facility' AND pick_inventory_owner_id IS NULL
+            AND pick_facility_id IS NOT NULL)
+        OR (pick_scope_level='owner_facility' AND pick_inventory_owner_id IS NOT NULL
+            AND pick_facility_id IS NOT NULL))))),
+  ADD CONSTRAINT pick_confirmations_required_scan_evidence_check CHECK (
+    (NOT require_source_location_scan OR source_location_scan_verified)
+    AND (NOT require_item_scan OR item_scan_verified)
+    AND (NOT require_destination_container_scan OR destination_container_scan_verified));
+ALTER TABLE public.pick_confirmations
+  ADD CONSTRAINT pick_confirmations_policy_configuration_fkey
+  FOREIGN KEY (tenant_id,pick_configuration_id)
+  REFERENCES public.configuration_versions(tenant_id,id);
+CREATE INDEX pick_confirmations_policy_configuration_idx
+ON public.pick_confirmations(tenant_id,pick_configuration_id)
+WHERE pick_configuration_id IS NOT NULL;
+
+CREATE FUNCTION public.validate_pick_task_policy_snapshot() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE scope_component text;
+DECLARE calculated_hash text;
+BEGIN
+  IF TG_OP='INSERT' THEN
+    IF NEW.pick_policy_source IS NOT NULL THEN
+      RAISE EXCEPTION 'pick policy is frozen only when work is first claimed'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF OLD.pick_policy_source IS NOT NULL THEN
+    IF ROW(NEW.pick_policy_source,NEW.pick_configuration_id,
+      NEW.pick_configuration_revision,NEW.pick_scope_level,
+      NEW.pick_inventory_owner_id,NEW.pick_facility_id,
+      NEW.require_source_location_scan,NEW.require_item_scan,
+      NEW.require_destination_container_scan,NEW.pick_policy_hash)
+      IS DISTINCT FROM
+      ROW(OLD.pick_policy_source,OLD.pick_configuration_id,
+      OLD.pick_configuration_revision,OLD.pick_scope_level,
+      OLD.pick_inventory_owner_id,OLD.pick_facility_id,
+      OLD.require_source_location_scan,OLD.require_item_scan,
+      OLD.require_destination_container_scan,OLD.pick_policy_hash) THEN
+      RAISE EXCEPTION 'frozen Pick policy evidence is immutable' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF OLD.status<>'open' OR NEW.status<>'in_progress' OR NEW.claimed_at IS NULL
+    OR NEW.pick_policy_source IS NULL THEN
+    RAISE EXCEPTION 'first Pick policy snapshot requires a claim transition'
+      USING ERRCODE='55000';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:pick',NEW.tenant_id),0));
+  SELECT configuration.id INTO resolved_configuration_id
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id AND configuration.kind='pick'
+    AND configuration.status='active' AND configuration.activated_at<=NEW.claimed_at
+    AND configuration.effective_from<=NEW.claimed_at
+    AND (configuration.effective_until IS NULL OR configuration.effective_until>NEW.claimed_at)
+    AND (configuration.inventory_owner_id IS NULL
+      OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level
+    WHEN 'owner_facility' THEN 2 WHEN 'inventory_owner' THEN 1
+    WHEN 'facility' THEN 1 ELSE 0 END DESC,
+    configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+
+  IF NEW.pick_policy_source='product_default' THEN
+    IF resolved_configuration_id IS NOT NULL OR NOT NEW.require_source_location_scan
+      OR NOT NEW.require_item_scan OR NOT NEW.require_destination_container_scan THEN
+      RAISE EXCEPTION 'Pick product default is not effective' USING ERRCODE='23514';
+    END IF;
+    scope_component:='-';
+  ELSIF NEW.pick_policy_source='configuration' THEN
+    SELECT * INTO configuration_row FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.id=NEW.pick_configuration_id;
+    IF configuration_row.id IS NULL
+      OR resolved_configuration_id IS DISTINCT FROM configuration_row.id
+      OR configuration_row.kind<>'pick' OR configuration_row.status<>'active'
+      OR configuration_row.revision<>NEW.pick_configuration_revision
+      OR configuration_row.scope_level<>NEW.pick_scope_level
+      OR configuration_row.inventory_owner_id IS DISTINCT FROM NEW.pick_inventory_owner_id
+      OR configuration_row.facility_id IS DISTINCT FROM NEW.pick_facility_id
+      OR configuration_row.definition<>jsonb_build_object(
+        'kind','pick','require_source_location_scan',NEW.require_source_location_scan,
+        'require_item_scan',NEW.require_item_scan,
+        'require_destination_container_scan',NEW.require_destination_container_scan) THEN
+      RAISE EXCEPTION 'Pick configuration snapshot is stale or inapplicable'
+        USING ERRCODE='23514';
+    END IF;
+    scope_component:=CASE NEW.pick_scope_level
+      WHEN 'tenant' THEN 'tenant'
+      WHEN 'inventory_owner' THEN 'inventory_owner:'||NEW.pick_inventory_owner_id::text
+      WHEN 'facility' THEN 'facility:'||NEW.pick_facility_id::text
+      WHEN 'owner_facility' THEN 'owner_facility:'||NEW.pick_inventory_owner_id::text
+        ||':'||NEW.pick_facility_id::text ELSE NULL END;
+  ELSE
+    RAISE EXCEPTION 'Pick policy source is invalid' USING ERRCODE='23514';
+  END IF;
+  calculated_hash:=encode(sha256(convert_to(
+    'pick-decision-policy-v1|'||NEW.pick_policy_source||'|'
+    ||COALESCE(NEW.pick_configuration_id::text,'-')||'|'
+    ||COALESCE(NEW.pick_configuration_revision::text,'-')||'|'
+    ||scope_component||'|'||NEW.require_source_location_scan::text||'|'
+    ||NEW.require_item_scan::text||'|'||NEW.require_destination_container_scan::text,
+    'UTF8')),'hex');
+  IF calculated_hash IS DISTINCT FROM NEW.pick_policy_hash THEN
+    RAISE EXCEPTION 'Pick policy hash does not match its evidence' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_pick_confirmation_policy_evidence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE task_row public.pick_tasks%ROWTYPE;
+DECLARE matching_container_count bigint;
+BEGIN
+  SELECT * INTO task_row FROM public.pick_tasks task
+  WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.task_id FOR SHARE;
+  IF task_row.id IS NULL OR task_row.pick_policy_source IS NULL
+    OR ROW(NEW.pick_policy_source,NEW.pick_configuration_id,
+      NEW.pick_configuration_revision,NEW.pick_scope_level,
+      NEW.pick_inventory_owner_id,NEW.pick_facility_id,
+      NEW.require_source_location_scan,NEW.require_item_scan,
+      NEW.require_destination_container_scan,NEW.pick_policy_hash)
+      IS DISTINCT FROM
+      ROW(task_row.pick_policy_source,task_row.pick_configuration_id,
+      task_row.pick_configuration_revision,task_row.pick_scope_level,
+      task_row.pick_inventory_owner_id,task_row.pick_facility_id,
+      task_row.require_source_location_scan,task_row.require_item_scan,
+      task_row.require_destination_container_scan,task_row.pick_policy_hash) THEN
+    RAISE EXCEPTION 'pick confirmation policy does not match the claimed task'
+      USING ERRCODE='23514';
+  END IF;
+  IF NOT NEW.destination_container_scan_verified THEN
+    SELECT COUNT(*) INTO matching_container_count
+    FROM public.outbound_order_containers container
+    WHERE container.tenant_id=NEW.tenant_id
+      AND container.inventory_owner_id=NEW.inventory_owner_id
+      AND container.facility_id=NEW.facility_id
+      AND container.order_release_id=NEW.order_release_id
+      AND container.order_id=NEW.order_id
+      AND container.destination_location_id=NEW.destination_location_id
+      AND container.license_plate_id=NEW.destination_license_plate_id
+      AND container.released_at IS NULL;
+    IF NEW.require_destination_container_scan OR matching_container_count<>1 THEN
+      RAISE EXCEPTION 'unscanned destination requires one existing order container'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER pick_tasks_policy_snapshot_validate
+BEFORE INSERT OR UPDATE ON public.pick_tasks FOR EACH ROW
+EXECUTE FUNCTION public.validate_pick_task_policy_snapshot();
+CREATE TRIGGER pick_confirmations_policy_evidence_validate
+BEFORE INSERT ON public.pick_confirmations FOR EACH ROW
+EXECUTE FUNCTION public.validate_pick_confirmation_policy_evidence();
+REVOKE ALL ON FUNCTION public.validate_pick_task_policy_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_pick_confirmation_policy_evidence() FROM PUBLIC;

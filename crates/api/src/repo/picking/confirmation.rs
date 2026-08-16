@@ -2,6 +2,7 @@ use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::outbox::NewOutboxEvent;
 use wareboxes_application::picking::{ConfirmPickContentCommand, ConfirmPickContentResult};
+use wareboxes_application::picking_decision_policy::PickDecisionPolicyReadModel;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType, TenantAccess};
 use wareboxes_domain::{
@@ -19,11 +20,15 @@ use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::inventory_locking;
 use crate::repo::orders::insert_order_activity_tx;
 
+use super::policy::decision_policy_from_task_row;
 use super::readiness::order_pick_readiness_tx;
 use super::shortage::{
     advance_parent_shortage_for_terminal_work_tx, enqueue_parent_shortage_transition_event_tx,
 };
 use super::CONFIRM_OPERATION;
+
+mod scan_policy;
+use scan_policy::{resolve_destination_barcode_tx, validate_scans_tx};
 
 #[derive(Debug)]
 struct LockedOrder {
@@ -50,6 +55,7 @@ struct PickTarget {
     inventory_status: InventoryStatus,
     quantity: PickQuantity,
     destination_location_id: LocationId,
+    pick_policy: PickDecisionPolicyReadModel,
 }
 
 #[derive(Debug)]
@@ -108,15 +114,6 @@ pub async fn confirm_content(
         command.content_id,
     )
     .await?;
-    lock_pick_license_plates_tx(
-        &mut tx,
-        access.tenant_id,
-        command.task_id,
-        command.content_id,
-        command.destination_license_plate_barcode.as_str(),
-        &scope,
-    )
-    .await?;
     let target = lock_pick_target_tx(
         &mut tx,
         access.tenant_id,
@@ -130,12 +127,23 @@ pub async fn confirm_content(
             "pick task does not match its order scope",
         ));
     }
+    let destination_barcode =
+        resolve_destination_barcode_tx(&mut tx, access.tenant_id, &target, &command).await?;
+    lock_pick_license_plates_tx(
+        &mut tx,
+        access.tenant_id,
+        command.task_id,
+        command.content_id,
+        destination_barcode.as_str(),
+        &scope,
+    )
+    .await?;
     validate_scans_tx(&mut tx, access.tenant_id, &target, &command).await?;
     let destination_plate = lock_destination_plate_tx(
         &mut tx,
         access.tenant_id,
         &target,
-        command.destination_license_plate_barcode.as_str(),
+        destination_barcode.as_str(),
     )
     .await?;
     bind_outbound_order_container_tx(
@@ -291,6 +299,10 @@ pub async fn confirm_content(
         destination_location_id: target.destination_location_id,
         source_license_plate_id: target.source_license_plate_id,
         destination_license_plate_id: destination_plate.id,
+        pick_policy: target.pick_policy.clone(),
+        source_location_scan_verified: command.source_location_barcode.is_some(),
+        item_scan_verified: command.item_barcode.is_some(),
+        destination_container_scan_verified: command.destination_license_plate_barcode.is_some(),
         picked_quantity: target.quantity,
         confirmed_by: UserId::new(context.actor_id.get())
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -488,6 +500,11 @@ async fn lock_pick_target_tx(
         SELECT task.order_id, task.order_release_id, task.inventory_owner_id,
                task.facility_id, task.destination_location_id,
                task.lease_expires_at,
+               task.pick_policy_source,task.pick_configuration_id,
+               task.pick_configuration_revision,task.pick_scope_level,
+               task.pick_inventory_owner_id,task.pick_facility_id,
+               task.require_source_location_scan,task.require_item_scan,
+               task.require_destination_container_scan,task.pick_policy_hash,
                content.order_item_id, content.reservation_id,
                content.source_allocation_id, content.source_inventory_balance_id,
                content.source_location_id, content.source_license_plate_id,
@@ -544,6 +561,7 @@ async fn lock_pick_target_tx(
     if row.try_get::<Timestamp, _>("lease_expires_at")? <= now {
         return Err(AppError::conflict("pick claim has expired"));
     }
+    let pick_policy = decision_policy_from_task_row(&row)?;
     let target = PickTarget {
         order_id: OrderId::new(row.try_get("order_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -573,6 +591,7 @@ async fn lock_pick_target_tx(
             .map_err(|error| AppError::internal(error.to_string()))?,
         destination_location_id: LocationId::new(row.try_get("destination_location_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
+        pick_policy,
     };
     validate_target_row(&row, &target)?;
     Ok(target)
@@ -611,92 +630,6 @@ fn validate_target_row(row: &sqlx::postgres::PgRow, target: &PickTarget) -> AppR
         return Err(AppError::conflict(
             "allocated source stock changed before pick confirmation",
         ));
-    }
-    Ok(())
-}
-
-async fn validate_scans_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    target: &PickTarget,
-    command: &ConfirmPickContentCommand,
-) -> AppResult<()> {
-    let source_barcode: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT barcode FROM locations
-        WHERE tenant_id = $1 AND facility_id = $2 AND id = $3
-          AND deleted IS NULL AND active AND pickable
-        FOR SHARE
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(target.facility_id)
-    .bind(target.source_location_id.get())
-    .fetch_optional(&mut **tx)
-    .await?
-    .flatten();
-    let source_barcode = source_barcode.ok_or_else(|| {
-        AppError::conflict("directed source location is no longer available for picking")
-    })?;
-    if source_barcode != command.source_location_barcode.as_str() {
-        return Err(AppError::bad_request(
-            "scanned source location does not match the directed pick",
-        ));
-    }
-    let item_matches: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM barcodes
-            WHERE tenant_id = $1 AND item_id = $2 AND deleted IS NULL AND name = $3
-        )
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(target.item_id)
-    .bind(command.item_barcode.as_str())
-    .fetch_one(&mut **tx)
-    .await?;
-    if !item_matches {
-        return Err(AppError::bad_request(
-            "scanned item does not match the directed pick",
-        ));
-    }
-    match (
-        target.source_license_plate_id,
-        command.source_license_plate_barcode.as_ref(),
-    ) {
-        (None, None) => {}
-        (Some(plate_id), Some(scanned)) => {
-            let barcode: Option<String> = sqlx::query_scalar(
-                r#"
-                SELECT barcode FROM license_plates
-                WHERE tenant_id = $1 AND inventory_owner_id = $2 AND facility_id = $3
-                  AND id = $4 AND location_id = $5 AND deleted IS NULL
-                FOR UPDATE
-                "#,
-            )
-            .bind(tenant_id.get())
-            .bind(target.inventory_owner_id.get())
-            .bind(target.facility_id)
-            .bind(plate_id.get())
-            .bind(target.source_location_id.get())
-            .fetch_optional(&mut **tx)
-            .await?
-            .flatten();
-            let barcode = barcode.ok_or_else(|| {
-                AppError::conflict("directed source license plate is no longer available")
-            })?;
-            if barcode != scanned.as_str() {
-                return Err(AppError::bad_request(
-                    "scanned source license plate does not match the directed pick",
-                ));
-            }
-        }
-        _ => {
-            return Err(AppError::bad_request(
-                "source license plate scan does not match the directed pick",
-            ));
-        }
     }
     Ok(())
 }
@@ -1084,11 +1017,17 @@ async fn insert_confirmation_tx(
             destination_location_id, source_license_plate_id,
             destination_license_plate_id, item_batch_id, item_id, uom,
             inventory_status, inventory_transaction_id, picked_qty,
-            confirmed_by_user_id, confirmed_at
+            confirmed_by_user_id, confirmed_at,
+            pick_policy_source,pick_configuration_id,pick_configuration_revision,
+            pick_scope_level,pick_inventory_owner_id,pick_facility_id,
+            require_source_location_scan,require_item_scan,
+            require_destination_container_scan,pick_policy_hash,
+            source_location_scan_verified,item_scan_verified,
+            destination_container_scan_verified
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
             $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-            $24, $25
+            $24, $25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38
         ) RETURNING id
         "#,
     )
@@ -1117,6 +1056,51 @@ async fn insert_confirmation_tx(
     .bind(target.quantity.get())
     .bind(actor_user_id)
     .bind(confirmed_at)
+    .bind(target.pick_policy.source.as_str())
+    .bind(target.pick_policy.configuration_id.map(|id| id.get()))
+    .bind(target.pick_policy.configuration_revision)
+    .bind(
+        target
+            .pick_policy
+            .configuration_scope
+            .map(|scope| match scope {
+                wareboxes_domain::ConfigurationScope::Tenant => "tenant",
+                wareboxes_domain::ConfigurationScope::InventoryOwner { .. } => "inventory_owner",
+                wareboxes_domain::ConfigurationScope::Facility { .. } => "facility",
+                wareboxes_domain::ConfigurationScope::OwnerFacility { .. } => "owner_facility",
+            }),
+    )
+    .bind(
+        target
+            .pick_policy
+            .configuration_scope
+            .and_then(|scope| match scope {
+                wareboxes_domain::ConfigurationScope::InventoryOwner { inventory_owner_id }
+                | wareboxes_domain::ConfigurationScope::OwnerFacility {
+                    inventory_owner_id, ..
+                } => Some(inventory_owner_id.get()),
+                _ => None,
+            }),
+    )
+    .bind(
+        target
+            .pick_policy
+            .configuration_scope
+            .and_then(|scope| match scope {
+                wareboxes_domain::ConfigurationScope::Facility { facility_id }
+                | wareboxes_domain::ConfigurationScope::OwnerFacility { facility_id, .. } => {
+                    Some(facility_id.get())
+                }
+                _ => None,
+            }),
+    )
+    .bind(target.pick_policy.require_source_location_scan)
+    .bind(target.pick_policy.require_item_scan)
+    .bind(target.pick_policy.require_destination_container_scan)
+    .bind(&target.pick_policy.policy_hash)
+    .bind(command.source_location_barcode.is_some())
+    .bind(command.item_barcode.is_some())
+    .bind(command.destination_license_plate_barcode.is_some())
     .fetch_one(&mut **tx)
     .await?)
 }
@@ -1171,6 +1155,12 @@ async fn enqueue_confirmation_event_tx(
         "source_inventory_balance_id": result.source_inventory_balance_id,
         "destination_inventory_balance_id": result.destination_inventory_balance_id,
         "picked_quantity": result.picked_quantity,
+        "pick_policy": result.pick_policy,
+        "scan_evidence": {
+            "source_location_verified": result.source_location_scan_verified,
+            "item_verified": result.item_scan_verified,
+            "destination_container_verified": result.destination_container_scan_verified,
+        },
         "order_ready_to_pack": result.order_ready_to_pack,
         "order_status": result.order_status,
         "order_revision": result.order_revision,

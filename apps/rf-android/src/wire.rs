@@ -19,11 +19,11 @@ use wareboxes_api_contract::v1::{
     InventoryRelocationClaimWork, InventoryRelocationConfirmationResponse,
     InventoryRelocationWorkflow, LicensePlatePutawayConfirmationResponse,
     PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimResponse,
-    PickContentConfirmationResponse, PickShortageDetails as ApiPickShortageDetails,
-    PickShortageReason as ApiPickShortageReason, PickShortageStatus as ApiPickShortageStatus,
-    PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
-    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
-    PutawayPolicyExpectation as ApiPutawayPolicyExpectation,
+    PickContentConfirmationResponse, PickDecisionPolicySource as ApiPickDecisionPolicySource,
+    PickShortageDetails as ApiPickShortageDetails, PickShortageReason as ApiPickShortageReason,
+    PickShortageStatus as ApiPickShortageStatus, PutawayClaimHeartbeatResponse,
+    PutawayClaimReleaseReason, PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
+    PutawayConfirmationResponse, PutawayPolicyExpectation as ApiPutawayPolicyExpectation,
     PutawayPolicyResponse as ApiPutawayPolicyResponse,
     PutawayPolicySource as ApiPutawayPolicySource, PutawayWorkflow as ApiPutawayWorkflow,
     ReceiptPolicyExpectation as ApiReceiptPolicyExpectation,
@@ -52,8 +52,9 @@ use crate::expected_receiving::{
     UnloadingStartCommand, UnloadingStartIntent, UnloadingStartResult,
 };
 use crate::picking::{
-    PickClaim, PickClaimContent, PickContentState, PickReleaseReason, PickShortageOutcome,
-    PickShortageReason, PickShortageReportResult, PickShortageStatus, PickingCommand,
+    PickClaim, PickClaimContent, PickContentState, PickDecisionPolicy, PickDecisionPolicyScope,
+    PickDecisionPolicySource, PickReleaseReason, PickShortageOutcome, PickShortageReason,
+    PickShortageReportResult, PickShortageStatus, PickingCommand,
 };
 use crate::workflow::{
     CommandOutcome, CycleCountCommand, DurableCommandDraft, InventoryRelocationClaim,
@@ -1537,6 +1538,24 @@ fn map_cycle_count_claim(
 
 fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponseError> {
     let content = response.content;
+    let policy = response.pick_policy;
+    let policy_identity_valid = match policy.source {
+        ApiPickDecisionPolicySource::ProductDefault => {
+            policy.configuration_id.is_none()
+                && policy.configuration_revision.is_none()
+                && policy.configuration_scope.is_none()
+                && policy.require_source_location_scan
+                && policy.require_item_scan
+                && policy.require_destination_container_scan
+        }
+        ApiPickDecisionPolicySource::Configuration => {
+            policy.configuration_id.is_some_and(|id| id > 0)
+                && policy
+                    .configuration_revision
+                    .is_some_and(|revision| revision > 0)
+                && policy.configuration_scope.is_some()
+        }
+    };
     if response.task_id <= 0
         || response.order_id <= 0
         || response.inventory_owner_id <= 0
@@ -1565,6 +1584,20 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
             .as_ref()
             .is_some_and(|barcode| barcode.trim().is_empty())
         || DateTime::parse_from_rfc3339(&response.lease_expires_at).is_err()
+        || !policy_identity_valid
+        || policy.policy_hash.len() != 64
+        || !policy
+            .policy_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || response
+            .suggested_destination_license_plate_barcode
+            .as_ref()
+            .is_some_and(|barcode| barcode.trim().is_empty())
+        || (policy.require_destination_container_scan
+            && response
+                .suggested_destination_license_plate_barcode
+                .is_some())
     {
         return Err(WireResponseError::InvalidClaim);
     }
@@ -1584,6 +1617,40 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
         destination_location_id: response.destination_location_id,
         destination_location_barcode: response.destination_location_barcode,
         destination_location_name: response.destination_location_name,
+        pick_policy: PickDecisionPolicy {
+            source: match policy.source {
+                ApiPickDecisionPolicySource::ProductDefault => {
+                    PickDecisionPolicySource::ProductDefault
+                }
+                ApiPickDecisionPolicySource::Configuration => {
+                    PickDecisionPolicySource::Configuration
+                }
+            },
+            configuration_id: policy.configuration_id,
+            configuration_revision: policy.configuration_revision,
+            configuration_scope: policy.configuration_scope.map(|scope| match scope {
+                ApiConfigurationScope::Tenant => PickDecisionPolicyScope::Tenant,
+                ApiConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                    PickDecisionPolicyScope::InventoryOwner { inventory_owner_id }
+                }
+                ApiConfigurationScope::Facility { facility_id } => {
+                    PickDecisionPolicyScope::Facility { facility_id }
+                }
+                ApiConfigurationScope::OwnerFacility {
+                    inventory_owner_id,
+                    facility_id,
+                } => PickDecisionPolicyScope::OwnerFacility {
+                    inventory_owner_id,
+                    facility_id,
+                },
+            }),
+            require_source_location_scan: policy.require_source_location_scan,
+            require_item_scan: policy.require_item_scan,
+            require_destination_container_scan: policy.require_destination_container_scan,
+            policy_hash: policy.policy_hash,
+        },
+        suggested_destination_license_plate_barcode: response
+            .suggested_destination_license_plate_barcode,
         content: PickClaimContent {
             content_id: content.content_id,
             order_line_id: content.order_line_id,
@@ -2760,10 +2827,10 @@ mod tests {
         let confirmation = build_durable_request(&pick_draft(PickingCommand::Confirm {
             task_id: 71,
             content_id: 81,
-            source_location_barcode: "A-01-02".into(),
-            item_barcode: "ITEM-71".into(),
+            source_location_barcode: Some("A-01-02".into()),
+            item_barcode: Some("ITEM-71".into()),
             source_license_plate_barcode: Some("LP-71".into()),
-            destination_license_plate_barcode: "TOTE-9".into(),
+            destination_license_plate_barcode: Some("TOTE-9".into()),
         }))
         .unwrap();
         assert_eq!(
@@ -2852,6 +2919,17 @@ mod tests {
             "destination_location_id": 10,
             "destination_location_barcode": "PACK-01",
             "destination_location_name": "Pack lane 1",
+            "pick_policy": {
+                "source": "product_default",
+                "configuration_id": null,
+                "configuration_revision": null,
+                "configuration_scope": null,
+                "require_source_location_scan": true,
+                "require_item_scan": true,
+                "require_destination_container_scan": true,
+                "policy_hash": wareboxes_api_contract::v1::PRODUCT_DEFAULT_PICK_DECISION_POLICY_HASH
+            },
+            "suggested_destination_license_plate_barcode": null,
             "content": {
                 "content_id": 81,
                 "order_line_id": 82,

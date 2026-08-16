@@ -12,6 +12,7 @@ use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
+use crate::repo::picking::policy::decision_policy_from_task_row;
 
 pub async fn list_confirmation_history(
     db: &Db,
@@ -59,6 +60,19 @@ pub async fn list_confirmation_history(
                confirmation.destination_location_id AS staged_location_id,
                staged_location.name AS staged_location_name,
                confirmation.destination_license_plate_id AS staged_license_plate_id,
+               confirmation.pick_policy_source,
+               confirmation.pick_configuration_id,
+               confirmation.pick_configuration_revision,
+               confirmation.pick_scope_level,
+               confirmation.pick_inventory_owner_id,
+               confirmation.pick_facility_id,
+               confirmation.require_source_location_scan,
+               confirmation.require_item_scan,
+               confirmation.require_destination_container_scan,
+               confirmation.pick_policy_hash,
+               confirmation.source_location_scan_verified,
+               confirmation.item_scan_verified,
+               confirmation.destination_container_scan_verified,
                confirmation.confirmed_by_user_id, confirmation.confirmed_at,
                reversal.id AS reversal_id, reversal.reason AS reversal_reason,
                reversal.note AS reversal_note,
@@ -124,6 +138,7 @@ pub async fn list_confirmation_history(
 }
 
 fn map_history_row(row: sqlx::postgres::PgRow) -> AppResult<PickConfirmationHistoryReadModel> {
+    let pick_policy = decision_policy_from_task_row(&row)?;
     let reversal = match row.try_get::<Option<i64>, _>("reversal_id")? {
         Some(id) => {
             let reason = PickReversalReason::parse(&row.try_get::<String, _>("reversal_reason")?)
@@ -170,6 +185,10 @@ fn map_history_row(row: sqlx::postgres::PgRow) -> AppResult<PickConfirmationHist
         staged_location_name: row.try_get("staged_location_name")?,
         staged_license_plate_id: LicensePlateId::new(row.try_get("staged_license_plate_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
+        pick_policy,
+        source_location_scan_verified: row.try_get("source_location_scan_verified")?,
+        item_scan_verified: row.try_get("item_scan_verified")?,
+        destination_container_scan_verified: row.try_get("destination_container_scan_verified")?,
         confirmed_by: UserId::new(row.try_get("confirmed_by_user_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         confirmed_at: row.try_get("confirmed_at")?,

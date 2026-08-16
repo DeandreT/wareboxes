@@ -16,6 +16,7 @@ use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
 
+use super::policy::{decision_policy_from_task_row, policy_bindings, resolve_decision_policy_tx};
 use super::{CLAIM_BY_ID_OPERATION, CLAIM_NEXT_OPERATION};
 
 pub async fn claim_next(
@@ -53,47 +54,52 @@ pub async fn claim_next(
     }
 
     let claimed_at = now_iso();
-    let task_id: Option<i64> = sqlx::query_scalar(
+    let candidate = sqlx::query(
         r#"
-        WITH candidate AS (
-            SELECT id
-            FROM pick_tasks
-            WHERE tenant_id = $1 AND status = 'open'
-              AND assigned_user_id IS NULL
-              AND ($3 OR facility_id = ANY($4))
-              AND ($5 OR inventory_owner_id = ANY($6))
-            ORDER BY priority DESC, ship_by ASC NULLS LAST, created_at, id
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-        )
-        UPDATE pick_tasks task
-        SET status = 'in_progress', assigned_user_id = $2,
-            claimed_at = $7,
-            lease_expires_at = $7 + make_interval(secs => task.task_timeout_seconds::INT)
-        FROM candidate
-        WHERE task.tenant_id = $1 AND task.id = candidate.id
-        RETURNING task.id
+        SELECT id,inventory_owner_id,facility_id
+        FROM pick_tasks
+        WHERE tenant_id = $1 AND status = 'open'
+          AND assigned_user_id IS NULL
+          AND ($2 OR facility_id = ANY($3))
+          AND ($4 OR inventory_owner_id = ANY($5))
+        ORDER BY priority DESC, ship_by ASC NULLS LAST, created_at, id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
         "#,
     )
     .bind(access.tenant_id.get())
-    .bind(context.actor_id.get())
     .bind(scope.all_facilities)
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .bind(claimed_at)
     .fetch_optional(&mut *tx)
     .await?;
-    let claim = match task_id {
-        Some(task_id) => Some(
-            load_claim_tx(
+    let claim = match candidate {
+        Some(candidate) => {
+            let task_id: i64 = candidate.try_get("id")?;
+            claim_open_task_tx(
                 &mut tx,
                 access.tenant_id,
-                PickTaskId::new(task_id).map_err(|error| AppError::internal(error.to_string()))?,
+                task_id,
+                InventoryOwnerId::new(candidate.try_get("inventory_owner_id")?)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                FacilityId::new(candidate.try_get("facility_id")?)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
                 context.actor_id.get(),
+                claimed_at,
             )
-            .await?,
-        ),
+            .await?;
+            Some(
+                load_claim_tx(
+                    &mut tx,
+                    access.tenant_id,
+                    PickTaskId::new(task_id)
+                        .map_err(|error| AppError::internal(error.to_string()))?,
+                    context.actor_id.get(),
+                )
+                .await?,
+            )
+        }
         None => None,
     };
     Ok(prepared.commit(tx, claim).await?)
@@ -165,25 +171,18 @@ pub async fn claim_by_id(
     }
 
     let claimed_at = now_iso();
-    let updated = sqlx::query(
-        r#"
-        UPDATE pick_tasks
-        SET status = 'in_progress', assigned_user_id = $1,
-            claimed_at = $2,
-            lease_expires_at = $2 + make_interval(secs => task_timeout_seconds::INT)
-        WHERE tenant_id = $3 AND id = $4
-          AND status = 'open' AND assigned_user_id IS NULL
-        "#,
+    claim_open_task_tx(
+        &mut tx,
+        access.tenant_id,
+        command.task_id.get(),
+        InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        FacilityId::new(row.try_get("facility_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        context.actor_id.get(),
+        claimed_at,
     )
-    .bind(context.actor_id.get())
-    .bind(claimed_at)
-    .bind(access.tenant_id.get())
-    .bind(command.task_id.get())
-    .execute(&mut *tx)
     .await?;
-    if updated.rows_affected() != 1 {
-        return Err(AppError::conflict("pick task cannot be claimed"));
-    }
     let claim = load_claim_tx(
         &mut tx,
         access.tenant_id,
@@ -243,6 +242,29 @@ pub(super) async fn load_claim_tx(
                orders.revision AS order_revision,
                destination.barcode AS destination_barcode,
                destination.name AS destination_name,
+               task.pick_policy_source,task.pick_configuration_id,
+               task.pick_configuration_revision,task.pick_scope_level,
+               task.pick_inventory_owner_id,task.pick_facility_id,
+               task.require_source_location_scan,task.require_item_scan,
+               task.require_destination_container_scan,task.pick_policy_hash,
+               ARRAY(
+                   SELECT plate.barcode
+                   FROM outbound_order_containers container
+                   INNER JOIN license_plates plate
+                     ON plate.tenant_id=container.tenant_id
+                    AND plate.inventory_owner_id=container.inventory_owner_id
+                    AND plate.facility_id=container.facility_id
+                    AND plate.id=container.license_plate_id
+                    AND plate.deleted IS NULL
+                   WHERE container.tenant_id=task.tenant_id
+                     AND container.inventory_owner_id=task.inventory_owner_id
+                     AND container.facility_id=task.facility_id
+                     AND container.order_release_id=task.order_release_id
+                     AND container.order_id=task.order_id
+                     AND container.destination_location_id=task.destination_location_id
+                     AND container.released_at IS NULL
+                   ORDER BY container.id LIMIT 2
+               ) AS destination_container_barcodes,
                destination.active AS destination_active,
                destination.pickable AS destination_pickable,
                content.id AS content_id, content.order_item_id,
@@ -334,6 +356,20 @@ pub(super) async fn load_claim_tx(
     validate_claim_row(&row)?;
 
     let item_barcodes: Vec<String> = row.try_get("item_barcodes")?;
+    let pick_policy = decision_policy_from_task_row(&row)?;
+    let destination_container_barcodes: Vec<String> =
+        row.try_get("destination_container_barcodes")?;
+    let suggested_destination_license_plate_barcode = if !pick_policy
+        .require_destination_container_scan
+        && destination_container_barcodes.len() == 1
+    {
+        Some(
+            PickScanValue::new(destination_container_barcodes[0].clone())
+                .map_err(|error| AppError::internal(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     Ok(PickClaim {
         task_id,
         order_id: OrderId::new(row.try_get("order_id")?)
@@ -355,6 +391,8 @@ pub(super) async fn load_claim_tx(
             "destination location",
         )?,
         destination_location_name: row.try_get("destination_name")?,
+        pick_policy,
+        suggested_destination_license_plate_barcode,
         content: PickClaimContent {
             content_id: PickContentId::new(row.try_get("content_id")?)
                 .map_err(|error| AppError::internal(error.to_string()))?,
@@ -403,6 +441,70 @@ pub(super) async fn load_claim_tx(
             state: PickContentState::Pending,
         },
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claim_open_task_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    task_id: i64,
+    inventory_owner_id: InventoryOwnerId,
+    facility_id: FacilityId,
+    actor_user_id: i64,
+    claimed_at: Timestamp,
+) -> AppResult<()> {
+    let existing = sqlx::query(
+        r#"SELECT pick_policy_source,pick_configuration_id,
+        pick_configuration_revision,pick_scope_level,pick_inventory_owner_id,
+        pick_facility_id,require_source_location_scan,require_item_scan,
+        require_destination_container_scan,pick_policy_hash
+        FROM pick_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE"#,
+    )
+    .bind(tenant_id.get())
+    .bind(task_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let policy = if existing
+        .try_get::<Option<String>, _>("pick_policy_source")?
+        .is_some()
+    {
+        decision_policy_from_task_row(&existing)?
+    } else {
+        resolve_decision_policy_tx(tx, tenant_id, inventory_owner_id, facility_id, claimed_at)
+            .await?
+    };
+    let policy = policy_bindings(&policy);
+    let updated = sqlx::query(
+        r#"UPDATE pick_tasks
+        SET status='in_progress',assigned_user_id=$1,claimed_at=$2,
+            lease_expires_at=$2+make_interval(secs=>task_timeout_seconds::INT),
+            pick_policy_source=$3,pick_configuration_id=$4,
+            pick_configuration_revision=$5,pick_scope_level=$6,
+            pick_inventory_owner_id=$7,pick_facility_id=$8,
+            require_source_location_scan=$9,require_item_scan=$10,
+            require_destination_container_scan=$11,pick_policy_hash=$12
+        WHERE tenant_id=$13 AND id=$14 AND status='open' AND assigned_user_id IS NULL"#,
+    )
+    .bind(actor_user_id)
+    .bind(claimed_at)
+    .bind(policy.source)
+    .bind(policy.configuration_id)
+    .bind(policy.configuration_revision)
+    .bind(policy.scope_level)
+    .bind(policy.inventory_owner_id)
+    .bind(policy.facility_id)
+    .bind(policy.require_source_location_scan)
+    .bind(policy.require_item_scan)
+    .bind(policy.require_destination_container_scan)
+    .bind(policy.policy_hash)
+    .bind(tenant_id.get())
+    .bind(task_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict("pick task cannot be claimed"));
+    }
+    Ok(())
 }
 
 fn validate_claim_row(row: &sqlx::postgres::PgRow) -> AppResult<()> {

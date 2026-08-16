@@ -57,7 +57,58 @@ pub struct PickClaim {
     pub destination_location_id: i64,
     pub destination_location_barcode: String,
     pub destination_location_name: Option<String>,
+    pub pick_policy: PickDecisionPolicy,
+    pub suggested_destination_license_plate_barcode: Option<String>,
     pub content: PickClaimContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickDecisionPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickDecisionPolicyScope {
+    Tenant,
+    InventoryOwner {
+        inventory_owner_id: i64,
+    },
+    Facility {
+        facility_id: i64,
+    },
+    OwnerFacility {
+        inventory_owner_id: i64,
+        facility_id: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickDecisionPolicy {
+    pub source: PickDecisionPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<PickDecisionPolicyScope>,
+    pub require_source_location_scan: bool,
+    pub require_item_scan: bool,
+    pub require_destination_container_scan: bool,
+    pub policy_hash: String,
+}
+
+impl PickDecisionPolicy {
+    pub fn product_default() -> Self {
+        Self {
+            source: PickDecisionPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            configuration_scope: None,
+            require_source_location_scan: true,
+            require_item_scan: true,
+            require_destination_container_scan: true,
+            policy_hash: wareboxes_api_contract::v1::PRODUCT_DEFAULT_PICK_DECISION_POLICY_HASH
+                .to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,10 +159,10 @@ pub enum PickingCommand {
     Confirm {
         task_id: i64,
         content_id: i64,
-        source_location_barcode: String,
-        item_barcode: String,
+        source_location_barcode: Option<String>,
+        item_barcode: Option<String>,
         source_license_plate_barcode: Option<String>,
-        destination_license_plate_barcode: String,
+        destination_license_plate_barcode: Option<String>,
     },
     ReportShortage(Box<PickShortageCommand>),
     Release {
@@ -477,15 +528,36 @@ impl PickingWorkflow {
         if stage != PickScanStage::DestinationLicensePlate {
             return None;
         }
+        self.begin_confirmation(command_id, idempotency_key)
+    }
+
+    pub fn begin_confirmation(
+        &mut self,
+        command_id: String,
+        idempotency_key: String,
+    ) -> Option<WorkflowEffect> {
+        if self.expected_scan().is_some() || self.shortage.is_some() {
+            return None;
+        }
         let claim = self.claim.as_ref()?;
+        let policy = &claim.pick_policy;
         self.begin_active(
             PickingCommand::Confirm {
                 task_id: claim.task_id,
                 content_id: claim.content.content_id,
-                source_location_barcode: self.source_location_scan.clone()?,
-                item_barcode: self.item_scan.clone()?,
+                source_location_barcode: policy
+                    .require_source_location_scan
+                    .then(|| self.source_location_scan.clone())
+                    .flatten(),
+                item_barcode: policy
+                    .require_item_scan
+                    .then(|| self.item_scan.clone())
+                    .flatten(),
                 source_license_plate_barcode: self.source_license_plate_scan.clone(),
-                destination_license_plate_barcode: self.destination_license_plate_scan.clone()?,
+                destination_license_plate_barcode: policy
+                    .require_destination_container_scan
+                    .then(|| self.destination_license_plate_scan.clone())
+                    .flatten(),
             },
             command_id,
             idempotency_key,
@@ -829,10 +901,21 @@ impl PickingWorkflow {
     }
 
     fn reset_scans(&mut self) {
-        self.source_location_scan = None;
-        self.item_scan = None;
+        self.source_location_scan = self.claim.as_ref().and_then(|claim| {
+            (!claim.pick_policy.require_source_location_scan)
+                .then(|| claim.content.source_location_barcode.clone())
+        });
+        self.item_scan = self.claim.as_ref().and_then(|claim| {
+            (!claim.pick_policy.require_item_scan)
+                .then(|| claim.content.item_barcodes.first().cloned())
+                .flatten()
+        });
         self.source_license_plate_scan = None;
-        self.destination_license_plate_scan = None;
+        self.destination_license_plate_scan = self.claim.as_ref().and_then(|claim| {
+            (!claim.pick_policy.require_destination_container_scan)
+                .then(|| claim.suggested_destination_license_plate_barcode.clone())
+                .flatten()
+        });
         self.shortage = None;
         self.scan_draft.clear();
     }
@@ -904,6 +987,8 @@ mod tests {
             destination_location_id: 9,
             destination_location_barcode: "STAGE-01".into(),
             destination_location_name: Some("Outbound stage 1".into()),
+            pick_policy: PickDecisionPolicy::product_default(),
+            suggested_destination_license_plate_barcode: None,
             content: PickClaimContent {
                 content_id: 61,
                 order_line_id: 71,
@@ -975,9 +1060,47 @@ mod tests {
                 ref item_barcode,
                 source_license_plate_barcode: None,
                 ref destination_license_plate_barcode,
-            }) if source_location_barcode == "A-01-02"
-                && item_barcode == "CASE-111"
-                && destination_license_plate_barcode == "LP-DEST"
+            }) if source_location_barcode.as_deref() == Some("A-01-02")
+                && item_barcode.as_deref() == Some("CASE-111")
+                && destination_license_plate_barcode.as_deref() == Some("LP-DEST")
+        ));
+    }
+
+    #[test]
+    fn configured_optional_scans_skip_only_to_an_unambiguous_container() {
+        let mut configured = claim(false);
+        configured.pick_policy = PickDecisionPolicy {
+            source: PickDecisionPolicySource::Configuration,
+            configuration_id: Some(7),
+            configuration_revision: Some(3),
+            configuration_scope: Some(PickDecisionPolicyScope::OwnerFacility {
+                inventory_owner_id: configured.inventory_owner_id,
+                facility_id: configured.facility_id,
+            }),
+            require_source_location_scan: false,
+            require_item_scan: false,
+            require_destination_container_scan: false,
+            policy_hash: "a".repeat(64),
+        };
+        configured.suggested_destination_license_plate_barcode = Some("TOTE-7".into());
+        let mut workflow = PickingWorkflow::default();
+        activate(&mut workflow, configured);
+        assert_eq!(workflow.expected_scan(), None);
+
+        let WorkflowEffect::PersistCommand(draft) = workflow
+            .begin_confirmation("pick-policy-confirm".into(), "pick-policy-key".into())
+            .unwrap()
+        else {
+            panic!("policy-driven confirmation must be durable");
+        };
+        assert!(matches!(
+            draft.command,
+            RfCommand::Picking(PickingCommand::Confirm {
+                source_location_barcode: None,
+                item_barcode: None,
+                destination_license_plate_barcode: None,
+                ..
+            })
         ));
     }
 

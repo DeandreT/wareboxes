@@ -362,7 +362,8 @@ pub use picking::{
     PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimReleaseResponse,
     PickClaimResponse, PickConfirmationHistoryPage, PickConfirmationHistoryPageRequest,
     PickConfirmationHistoryResponse, PickContentConfirmationResponse, PickContentState,
-    PickOrderStatus, PickReversalHistoryResponse, PickReversalReason, PickShortShipReason,
+    PickDecisionPolicyResponse, PickDecisionPolicySource, PickOrderStatus,
+    PickReversalHistoryResponse, PickReversalReason, PickShortShipReason,
     PickShortageAllocationResponse, PickShortageDetails, PickShortageHoldResponse,
     PickShortageMovementResponse, PickShortagePage, PickShortagePageRequest,
     PickShortageQuantitiesResponse, PickShortageQueueSort, PickShortageQueueSortDirection,
@@ -370,7 +371,7 @@ pub use picking::{
     PickShortageTaskResponse, ReallocatePickShortageRequest, ReallocatePickShortageResponse,
     ReleasePickClaimRequest, ReportPickShortageOutcome, ReportPickShortageRequest,
     ReportPickShortageResponse, ReversePickConfirmationRequest, ReversePickConfirmationResponse,
-    ShortShipDemandResponse,
+    ShortShipDemandResponse, PRODUCT_DEFAULT_PICK_DECISION_POLICY_HASH,
 };
 pub use purchase_order::{
     CancelPurchaseOrderRequest, CancelPurchaseOrderResponse, CreatePurchaseOrderLineRequest,

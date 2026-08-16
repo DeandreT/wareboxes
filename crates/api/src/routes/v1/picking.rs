@@ -6,8 +6,10 @@ use wareboxes_api_contract::v1::{
     PickClaimReleaseReason as ApiReleaseReason, PickClaimReleaseResponse, PickClaimResponse,
     PickConfirmationHistoryPage as ApiConfirmationHistoryPage, PickConfirmationHistoryPageRequest,
     PickConfirmationHistoryResponse, PickContentConfirmationResponse,
-    PickContentState as ApiContentState, PickOrderStatus, PickReversalHistoryResponse,
-    PickReversalReason as ApiReversalReason, ReleasePickClaimRequest,
+    PickContentState as ApiContentState,
+    PickDecisionPolicyResponse as ApiPickDecisionPolicyResponse,
+    PickDecisionPolicySource as ApiPickDecisionPolicySource, PickOrderStatus,
+    PickReversalHistoryResponse, PickReversalReason as ApiReversalReason, ReleasePickClaimRequest,
     ReversePickConfirmationRequest, ReversePickConfirmationResponse, Revision,
 };
 use wareboxes_application::picking::{
@@ -17,9 +19,12 @@ use wareboxes_application::picking::{
     PickConfirmationHistoryPage, PickConfirmationHistoryQuery, PickConfirmationHistoryReadModel,
     ReleasePickClaimCommand, ReversePickConfirmationCommand, ReversePickConfirmationResult,
 };
+use wareboxes_application::picking_decision_policy::{
+    PickDecisionPolicyReadModel, PickDecisionPolicySource,
+};
 use wareboxes_domain::{
-    OrderStatus, PickClaimReleaseReason, PickConfirmationId, PickContentId, PickContentState,
-    PickReversalNote, PickReversalReason, PickScanValue, PickTaskId, Timestamp,
+    ConfigurationScope, OrderStatus, PickClaimReleaseReason, PickConfirmationId, PickContentId,
+    PickContentState, PickReversalNote, PickReversalReason, PickScanValue, PickTaskId, Timestamp,
     MAX_PICK_SCAN_VALUE_LENGTH,
 };
 
@@ -118,16 +123,22 @@ pub async fn confirm(
     let command = ConfirmPickContentCommand {
         task_id: pick_task_id(task_id)?,
         content_id: PickContentId::new(content_id).map_err(domain_validation)?,
-        source_location_barcode: scan(body.source_location_barcode, "source location barcode")?,
-        item_barcode: scan(body.item_barcode, "item barcode")?,
+        source_location_barcode: body
+            .source_location_barcode
+            .map(|value| scan(value, "source location barcode"))
+            .transpose()?,
+        item_barcode: body
+            .item_barcode
+            .map(|value| scan(value, "item barcode"))
+            .transpose()?,
         source_license_plate_barcode: body
             .source_license_plate_barcode
             .map(|value| scan(value, "source license plate barcode"))
             .transpose()?,
-        destination_license_plate_barcode: scan(
-            body.destination_license_plate_barcode,
-            "destination license plate barcode",
-        )?,
+        destination_license_plate_barcode: body
+            .destination_license_plate_barcode
+            .map(|value| scan(value, "destination license plate barcode"))
+            .transpose()?,
     };
     let context = user.command_context(&idempotency_key);
     let result = repo::picking::confirm_content(&state.db, &user.tenant, &context, command).await?;
@@ -222,6 +233,10 @@ fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
         destination_location_id: claim.destination_location_id.get(),
         destination_location_barcode: claim.destination_location_barcode.into_inner(),
         destination_location_name: claim.destination_location_name,
+        pick_policy: map_pick_policy(claim.pick_policy),
+        suggested_destination_license_plate_barcode: claim
+            .suggested_destination_license_plate_barcode
+            .map(PickScanValue::into_inner),
         content: map_content(claim.content),
     })
 }
@@ -298,6 +313,10 @@ fn map_confirmation(result: ConfirmPickContentResult) -> V1Result<PickContentCon
         destination_location_id: result.destination_location_id.get(),
         source_license_plate_id: result.source_license_plate_id.map(|id| id.get()),
         destination_license_plate_id: result.destination_license_plate_id.get(),
+        pick_policy: map_pick_policy(result.pick_policy),
+        source_location_scan_verified: result.source_location_scan_verified,
+        item_scan_verified: result.item_scan_verified,
+        destination_container_scan_verified: result.destination_container_scan_verified,
         picked_quantity: result.picked_quantity.get(),
         confirmed_by: result.confirmed_by.get(),
         confirmed_at: result.confirmed_at.to_rfc3339(),
@@ -308,6 +327,41 @@ fn map_confirmation(result: ConfirmPickContentResult) -> V1Result<PickContentCon
         order_revision: Revision::new(result.order_revision.get())
             .map_err(|error| V1Error::internal(error.to_string()))?,
     })
+}
+
+fn map_pick_policy(value: PickDecisionPolicyReadModel) -> ApiPickDecisionPolicyResponse {
+    ApiPickDecisionPolicyResponse {
+        source: match value.source {
+            PickDecisionPolicySource::ProductDefault => ApiPickDecisionPolicySource::ProductDefault,
+            PickDecisionPolicySource::Configuration => ApiPickDecisionPolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id.map(|id| id.get()),
+        configuration_revision: value.configuration_revision,
+        configuration_scope: value.configuration_scope.map(|scope| match scope {
+            ConfigurationScope::Tenant => wareboxes_api_contract::v1::ConfigurationScope::Tenant,
+            ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::InventoryOwner {
+                    inventory_owner_id: inventory_owner_id.get(),
+                }
+            }
+            ConfigurationScope::Facility { facility_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::Facility {
+                    facility_id: facility_id.get(),
+                }
+            }
+            ConfigurationScope::OwnerFacility {
+                inventory_owner_id,
+                facility_id,
+            } => wareboxes_api_contract::v1::ConfigurationScope::OwnerFacility {
+                inventory_owner_id: inventory_owner_id.get(),
+                facility_id: facility_id.get(),
+            },
+        }),
+        require_source_location_scan: value.require_source_location_scan,
+        require_item_scan: value.require_item_scan,
+        require_destination_container_scan: value.require_destination_container_scan,
+        policy_hash: value.policy_hash,
+    }
 }
 
 fn map_reversal(
@@ -382,6 +436,10 @@ fn map_confirmation_history(
         staged_location_id: item.staged_location_id.get(),
         staged_location_name: item.staged_location_name,
         staged_license_plate_id: item.staged_license_plate_id.get(),
+        pick_policy: map_pick_policy(item.pick_policy),
+        source_location_scan_verified: item.source_location_scan_verified,
+        item_scan_verified: item.item_scan_verified,
+        destination_container_scan_verified: item.destination_container_scan_verified,
         confirmed_by: item.confirmed_by.get(),
         confirmed_at: item.confirmed_at.to_rfc3339(),
         reversal: item.reversal.map(|reversal| PickReversalHistoryResponse {
