@@ -52740,3 +52740,704 @@ REVOKE ALL ON FUNCTION public.seal_dynamic_release_selection() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.dynamic_release_eligible_orders(
   bigint,bigint,bigint,timestamptz,bigint) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_dynamic_release_integrity() FROM PUBLIC;
+
+-- Cloud automation registry, replay-safe edge delivery, and immutable evidence.
+CREATE TABLE public.automation_devices (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  device_key text NOT NULL,
+  device_class text NOT NULL,
+  display_name text NOT NULL,
+  control_mode text NOT NULL,
+  control_reason text NOT NULL,
+  control_changed_by_user_id bigint NOT NULL,
+  control_changed_at timestamptz NOT NULL,
+  revision integer NOT NULL,
+  health text NOT NULL,
+  health_message text,
+  last_heartbeat_at timestamptz,
+  registered_by_user_id bigint NOT NULL,
+  registered_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,facility_id,id),
+  CHECK(device_key=btrim(device_key) AND device_key<>''
+    AND char_length(device_key)<=128 AND device_key!~'[[:cntrl:]]'),
+  CHECK(display_name=btrim(display_name) AND display_name<>''
+    AND char_length(display_name)<=200 AND display_name!~'[[:cntrl:]]'),
+  CHECK(device_class IN ('plc','conveyor','robotics','sortation','printer','scale')),
+  CHECK(control_mode IN ('disabled','automatic','manual_fallback')),
+  CHECK(control_reason=btrim(control_reason) AND control_reason<>''
+    AND char_length(control_reason)<=1000 AND control_reason!~'[[:cntrl:]]'),
+  CHECK(revision>0),
+  CHECK(health IN ('unknown','healthy','degraded','offline','faulted')),
+  CHECK(health_message IS NULL OR (health_message=btrim(health_message)
+    AND health_message<>'' AND char_length(health_message)<=1000
+    AND health_message!~'[[:cntrl:]]')),
+  CHECK((health='unknown' AND last_heartbeat_at IS NULL)
+    OR (health<>'unknown' AND last_heartbeat_at IS NOT NULL)),
+  CHECK(control_changed_at>=registered_at),
+  FOREIGN KEY(tenant_id) REFERENCES public.tenants(id),
+  FOREIGN KEY(tenant_id,facility_id) REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY(tenant_id,control_changed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,registered_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE UNIQUE INDEX automation_devices_key_unique
+ON public.automation_devices(tenant_id,lower(device_key));
+CREATE INDEX automation_devices_facility_idx
+ON public.automation_devices(tenant_id,facility_id,lower(display_name),id);
+
+CREATE FUNCTION public.automation_json_text_valid(
+  document jsonb,field_name text,maximum integer) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT COALESCE(jsonb_typeof(document->field_name)='string'
+    AND document->>field_name=btrim(document->>field_name)
+    AND document->>field_name<>''
+    AND char_length(document->>field_name)<=maximum
+    AND document->>field_name!~'[[:cntrl:]]',false)
+$$;
+
+CREATE FUNCTION public.automation_json_object_size(document jsonb) RETURNS integer
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT count(*)::integer FROM jsonb_object_keys(document)
+$$;
+
+CREATE FUNCTION public.automation_command_payload_is_valid(
+  expected_class text,payload jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE command jsonb;
+DECLARE operation text;
+BEGIN
+  IF jsonb_typeof(payload)<>'object' OR public.automation_json_object_size(payload)<>2
+    OR payload->>'device_class'<>expected_class
+    OR jsonb_typeof(payload->'command')<>'object' THEN
+    RETURN false;
+  END IF;
+  command:=payload->'command';
+  operation:=command->>'operation';
+  RETURN CASE expected_class
+    WHEN 'plc' THEN CASE operation
+      WHEN 'set_discrete_output' THEN public.automation_json_object_size(command)=3
+        AND public.automation_json_text_valid(command,'point',128)
+        AND jsonb_typeof(command->'value')='boolean'
+      WHEN 'pulse_discrete_output' THEN public.automation_json_object_size(command)=3
+        AND public.automation_json_text_valid(command,'point',128)
+        AND jsonb_typeof(command->'duration_ms')='number'
+        AND (command->>'duration_ms')::numeric BETWEEN 1 AND 60000
+        AND (command->>'duration_ms')::numeric=trunc((command->>'duration_ms')::numeric)
+      WHEN 'reset_fault' THEN public.automation_json_object_size(command)=2
+        AND public.automation_json_text_valid(command,'fault_code',128)
+      ELSE false END
+    WHEN 'conveyor' THEN CASE operation
+      WHEN 'route_carrier' THEN public.automation_json_object_size(command)=3
+        AND public.automation_json_text_valid(command,'carrier_id',128)
+        AND public.automation_json_text_valid(command,'destination',128)
+      WHEN 'start_zone' THEN public.automation_json_object_size(command)=2
+        AND public.automation_json_text_valid(command,'zone',128)
+      WHEN 'stop_zone' THEN public.automation_json_object_size(command)=2
+        AND public.automation_json_text_valid(command,'zone',128)
+      ELSE false END
+    WHEN 'robotics' THEN CASE operation
+      WHEN 'dispatch_mission' THEN public.automation_json_object_size(command)=6
+        AND public.automation_json_text_valid(command,'mission_id',128)
+        AND command->>'mission_kind' IN ('pick','place','transport','charge')
+        AND public.automation_json_text_valid(command,'source',128)
+        AND public.automation_json_text_valid(command,'destination',128)
+        AND (command->'payload_id'='null'::jsonb
+          OR public.automation_json_text_valid(command,'payload_id',128))
+      WHEN 'cancel_mission' THEN public.automation_json_object_size(command)=2
+        AND public.automation_json_text_valid(command,'mission_id',128)
+      ELSE false END
+    WHEN 'sortation' THEN CASE operation
+      WHEN 'divert' THEN public.automation_json_object_size(command)=3
+        AND public.automation_json_text_valid(command,'tracking_id',128)
+        AND public.automation_json_text_valid(command,'chute',128)
+      WHEN 'reject' THEN public.automation_json_object_size(command)=4
+        AND public.automation_json_text_valid(command,'tracking_id',128)
+        AND public.automation_json_text_valid(command,'lane',128)
+        AND public.automation_json_text_valid(command,'reason_code',128)
+      ELSE false END
+    WHEN 'printer' THEN CASE operation
+      WHEN 'print_document' THEN public.automation_json_object_size(command)=5
+        AND public.automation_json_text_valid(command,'document_id',128)
+        AND command->>'format' IN ('zpl','pdf','png')
+        AND jsonb_typeof(command->'content')='string'
+        AND octet_length(command->>'content') BETWEEN 1 AND 10485760
+        AND jsonb_typeof(command->'copies')='number'
+        AND (command->>'copies')::numeric BETWEEN 1 AND 65535
+        AND (command->>'copies')::numeric=trunc((command->>'copies')::numeric)
+      WHEN 'cancel_print_job' THEN public.automation_json_object_size(command)=2
+        AND public.automation_json_text_valid(command,'spool_job_id',128)
+      ELSE false END
+    WHEN 'scale' THEN CASE operation
+      WHEN 'read_stable_weight' THEN public.automation_json_object_size(command)=3
+        AND command->>'requested_unit' IN ('gram','kilogram','pound')
+        AND jsonb_typeof(command->'timeout_ms')='number'
+        AND (command->>'timeout_ms')::numeric BETWEEN 1 AND 120000
+        AND (command->>'timeout_ms')::numeric=trunc((command->>'timeout_ms')::numeric)
+      WHEN 'tare' THEN public.automation_json_object_size(command)=1
+      ELSE false END
+    ELSE false END;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+  RETURN false;
+END $$;
+
+CREATE FUNCTION public.automation_result_payload_is_valid(
+  expected_class text,payload jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE result jsonb;
+BEGIN
+  IF jsonb_typeof(payload)<>'object' OR public.automation_json_object_size(payload)<>2
+    OR payload->>'device_class'<>expected_class
+    OR jsonb_typeof(payload->'result')<>'object' THEN
+    RETURN false;
+  END IF;
+  result:=payload->'result';
+  RETURN CASE expected_class
+    WHEN 'plc' THEN public.automation_json_object_size(result)=2
+      AND (result->'controller_reference'='null'::jsonb
+        OR public.automation_json_text_valid(result,'controller_reference',128))
+      AND (result->'output_state'='null'::jsonb
+        OR jsonb_typeof(result->'output_state')='boolean')
+    WHEN 'conveyor' THEN public.automation_json_object_size(result)=2
+      AND (result->'controller_reference'='null'::jsonb
+        OR public.automation_json_text_valid(result,'controller_reference',128))
+      AND (result->'observed_zone'='null'::jsonb
+        OR public.automation_json_text_valid(result,'observed_zone',128))
+    WHEN 'robotics' THEN public.automation_json_object_size(result)=2
+      AND public.automation_json_text_valid(result,'controller_reference',128)
+      AND public.automation_json_text_valid(result,'mission_state',128)
+    WHEN 'sortation' THEN public.automation_json_object_size(result)=2
+      AND (result->'controller_reference'='null'::jsonb
+        OR public.automation_json_text_valid(result,'controller_reference',128))
+      AND public.automation_json_text_valid(result,'observed_lane',128)
+    WHEN 'printer' THEN public.automation_json_object_size(result)=1
+      AND public.automation_json_text_valid(result,'spool_job_id',128)
+    WHEN 'scale' THEN public.automation_json_object_size(result)=2
+      AND jsonb_typeof(result->'mass_milligrams')='number'
+      AND (result->>'mass_milligrams')::numeric BETWEEN -9223372036854775808
+        AND 9223372036854775807
+      AND (result->>'mass_milligrams')::numeric=
+        trunc((result->>'mass_milligrams')::numeric)
+      AND jsonb_typeof(result->'stable')='boolean'
+    ELSE false END;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+  RETURN false;
+END $$;
+
+CREATE TABLE public.automation_commands (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  device_id bigint NOT NULL,
+  device_class text NOT NULL,
+  correlation_id text NOT NULL,
+  recovery_policy text NOT NULL,
+  command_payload jsonb NOT NULL,
+  status text NOT NULL,
+  revision integer NOT NULL,
+  delivery_attempts integer NOT NULL,
+  assigned_service_account_id bigint,
+  agent_instance text,
+  delivery_token text,
+  delivered_at timestamptz,
+  delivery_expires_at timestamptz,
+  accepted_at timestamptz,
+  completed_at timestamptz,
+  result_payload jsonb,
+  error_code text,
+  error_message text,
+  resolved_by_user_id bigint,
+  resolution_outcome text,
+  resolution_reason text,
+  resolved_at timestamptz,
+  requested_by_user_id bigint NOT NULL,
+  requested_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,facility_id,id),
+  UNIQUE(tenant_id,correlation_id),
+  CHECK(device_class IN ('plc','conveyor','robotics','sortation','printer','scale')),
+  CHECK(correlation_id=btrim(correlation_id) AND correlation_id<>''
+    AND char_length(correlation_id)<=1000 AND correlation_id!~'[[:cntrl:]]'),
+  CHECK(recovery_policy IN
+    ('device_deduplicated_replay','probe_then_retry','manual_review')),
+  CHECK(public.automation_command_payload_is_valid(device_class,command_payload)),
+  CHECK(status IN
+    ('queued','delivered','accepted','succeeded','failed','manual_review',
+      'resolved_manually','cancelled')),
+  CHECK(revision>0 AND delivery_attempts>=0),
+  CHECK(agent_instance IS NULL OR (agent_instance=btrim(agent_instance)
+    AND agent_instance<>'' AND char_length(agent_instance)<=1000
+    AND agent_instance!~'[[:cntrl:]]')),
+  CHECK(delivery_token IS NULL OR (delivery_token=btrim(delivery_token)
+    AND char_length(delivery_token) BETWEEN 32 AND 200)),
+  CHECK(error_code IS NULL OR (error_code=btrim(error_code) AND error_code<>''
+    AND char_length(error_code)<=1000 AND error_code!~'[[:cntrl:]]')),
+  CHECK(error_message IS NULL OR (error_message=btrim(error_message) AND error_message<>''
+    AND char_length(error_message)<=1000 AND error_message!~'[[:cntrl:]]')),
+  CHECK(resolution_reason IS NULL OR (resolution_reason=btrim(resolution_reason)
+    AND resolution_reason<>'' AND char_length(resolution_reason)<=1000
+    AND resolution_reason!~'[[:cntrl:]]')),
+  CHECK((status='resolved_manually' AND resolved_by_user_id IS NOT NULL
+      AND resolution_outcome IN ('confirmed_executed','confirmed_not_executed')
+      AND resolution_reason IS NOT NULL AND resolved_at IS NOT NULL)
+    OR (status<>'resolved_manually' AND resolved_by_user_id IS NULL
+      AND resolution_outcome IS NULL AND resolution_reason IS NULL
+      AND resolved_at IS NULL)),
+  CHECK(result_payload IS NULL
+    OR public.automation_result_payload_is_valid(device_class,result_payload)),
+  CHECK(
+    (status='queued' AND revision=1 AND delivery_attempts=0
+      AND assigned_service_account_id IS NULL AND agent_instance IS NULL
+      AND delivery_token IS NULL AND delivered_at IS NULL
+      AND delivery_expires_at IS NULL AND accepted_at IS NULL
+      AND completed_at IS NULL AND result_payload IS NULL
+      AND error_code IS NULL AND error_message IS NULL)
+    OR (status='delivered' AND delivery_attempts>0
+      AND assigned_service_account_id IS NOT NULL AND agent_instance IS NOT NULL
+      AND delivery_token IS NOT NULL AND delivered_at IS NOT NULL
+      AND delivery_expires_at>delivered_at AND accepted_at IS NULL
+      AND completed_at IS NULL AND result_payload IS NULL
+      AND error_code IS NULL AND error_message IS NULL)
+    OR (status='accepted' AND delivery_attempts>0
+      AND assigned_service_account_id IS NOT NULL AND agent_instance IS NOT NULL
+      AND delivery_token IS NOT NULL AND delivered_at IS NOT NULL
+      AND delivery_expires_at IS NULL AND accepted_at>=delivered_at
+      AND completed_at IS NULL AND result_payload IS NULL
+      AND error_code IS NULL AND error_message IS NULL)
+    OR (status='succeeded' AND assigned_service_account_id IS NOT NULL
+      AND accepted_at IS NOT NULL AND completed_at>=accepted_at
+      AND result_payload IS NOT NULL AND error_code IS NULL AND error_message IS NULL)
+    OR (status IN ('failed','manual_review')
+      AND assigned_service_account_id IS NOT NULL AND accepted_at IS NOT NULL
+      AND completed_at>=accepted_at AND result_payload IS NULL
+      AND error_message IS NOT NULL)
+    OR (status='resolved_manually'
+      AND assigned_service_account_id IS NOT NULL AND accepted_at IS NOT NULL
+      AND completed_at>=accepted_at AND result_payload IS NULL
+      AND error_message IS NOT NULL AND resolved_at>=completed_at)
+    OR (status='cancelled' AND completed_at IS NOT NULL
+      AND result_payload IS NULL)),
+  FOREIGN KEY(tenant_id,facility_id,device_id)
+    REFERENCES public.automation_devices(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,assigned_service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id),
+  FOREIGN KEY(tenant_id,requested_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,resolved_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE INDEX automation_commands_delivery_idx
+ON public.automation_commands(tenant_id,facility_id,status,requested_at,id);
+CREATE INDEX automation_commands_device_history_idx
+ON public.automation_commands(tenant_id,device_id,requested_at DESC,id DESC);
+
+CREATE TABLE public.automation_command_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  command_id bigint NOT NULL,
+  transition text NOT NULL,
+  actor_user_id bigint NOT NULL,
+  service_account_id bigint,
+  occurred_at timestamptz NOT NULL,
+  evidence jsonb NOT NULL,
+  UNIQUE(tenant_id,id),
+  CHECK(transition IN
+    ('delivered','accepted','succeeded','failed','manual_review',
+      'resolved_manually','cancelled')),
+  CHECK(jsonb_typeof(evidence)='object'),
+  FOREIGN KEY(tenant_id,command_id)
+    REFERENCES public.automation_commands(tenant_id,id),
+  FOREIGN KEY(tenant_id,actor_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id)
+);
+CREATE INDEX automation_command_events_history_idx
+ON public.automation_command_events(tenant_id,command_id,occurred_at,id);
+
+CREATE TABLE public.automation_heartbeats (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  device_id bigint NOT NULL,
+  service_account_id bigint NOT NULL,
+  agent_instance text NOT NULL,
+  health text NOT NULL,
+  control_mode text NOT NULL,
+  message text,
+  queued_commands integer NOT NULL,
+  manual_review_commands integer NOT NULL,
+  observed_at timestamptz NOT NULL,
+  received_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  CHECK(agent_instance=btrim(agent_instance) AND agent_instance<>''
+    AND char_length(agent_instance)<=1000 AND agent_instance!~'[[:cntrl:]]'),
+  CHECK(health IN ('unknown','healthy','degraded','offline','faulted')),
+  CHECK(control_mode IN ('disabled','automatic','manual_fallback')),
+  CHECK(message IS NULL OR (message=btrim(message) AND message<>''
+    AND char_length(message)<=1000 AND message!~'[[:cntrl:]]')),
+  CHECK(queued_commands>=0 AND manual_review_commands>=0),
+  CHECK(observed_at BETWEEN received_at-INTERVAL '5 minutes'
+    AND received_at+INTERVAL '1 minute'),
+  FOREIGN KEY(tenant_id,facility_id,device_id)
+    REFERENCES public.automation_devices(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id)
+);
+CREATE INDEX automation_heartbeats_device_history_idx
+ON public.automation_heartbeats(tenant_id,device_id,observed_at DESC,id DESC);
+
+CREATE FUNCTION public.automation_user_has_permission(
+  checked_tenant_id bigint,checked_user_id bigint,checked_permission text) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  WITH RECURSIVE granted_roles AS (
+    SELECT role.id,role.parent_id
+    FROM public.tenant_memberships membership
+    JOIN public.user_roles user_role ON user_role.tenant_id=membership.tenant_id
+      AND user_role.user_id=membership.user_id AND user_role.deleted IS NULL
+    JOIN public.roles role ON role.tenant_id=user_role.tenant_id
+      AND role.id=user_role.role_id AND role.deleted IS NULL
+    WHERE membership.tenant_id=checked_tenant_id
+      AND membership.user_id=checked_user_id AND membership.deleted IS NULL
+    UNION
+    SELECT parent.id,parent.parent_id FROM granted_roles child
+    JOIN public.roles parent ON parent.tenant_id=checked_tenant_id
+      AND parent.id=child.parent_id AND parent.deleted IS NULL
+  ), role_grant AS (
+    SELECT 1 FROM granted_roles role
+    JOIN public.role_permissions role_permission
+      ON role_permission.tenant_id=checked_tenant_id
+      AND role_permission.role_id=role.id AND role_permission.deleted IS NULL
+    JOIN public.permissions permission ON permission.tenant_id=role_permission.tenant_id
+      AND permission.id=role_permission.permission_id AND permission.deleted IS NULL
+    WHERE upper(permission.name) IN ('ADMIN',upper(checked_permission)) LIMIT 1
+  ), service_grant AS (
+    SELECT 1 FROM public.service_accounts account
+    JOIN public.service_account_permissions grant_record
+      ON grant_record.tenant_id=account.tenant_id
+      AND grant_record.service_account_id=account.id AND grant_record.revoked_at IS NULL
+    JOIN public.permissions permission ON permission.tenant_id=grant_record.tenant_id
+      AND permission.id=grant_record.permission_id AND permission.deleted IS NULL
+    WHERE account.tenant_id=checked_tenant_id
+      AND account.principal_user_id=checked_user_id AND account.status='active'
+      AND upper(permission.name) IN ('ADMIN',upper(checked_permission)) LIMIT 1
+  )
+  SELECT EXISTS(SELECT 1 FROM role_grant) OR EXISTS(SELECT 1 FROM service_grant)
+$$;
+
+CREATE FUNCTION public.automation_interactive_user_scoped(
+  checked_tenant_id bigint,checked_user_id bigint,checked_facility_id bigint) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  SELECT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+    WHERE membership.tenant_id=checked_tenant_id AND membership.user_id=checked_user_id
+      AND membership.deleted IS NULL
+      AND NOT EXISTS(SELECT 1 FROM public.service_accounts account
+        WHERE account.tenant_id=membership.tenant_id
+          AND account.principal_user_id=membership.user_id)
+      AND (membership.all_facilities OR EXISTS(
+        SELECT 1 FROM public.user_facilities assignment
+        WHERE assignment.tenant_id=membership.tenant_id
+          AND assignment.user_id=membership.user_id
+          AND assignment.facility_id=checked_facility_id
+          AND assignment.deleted IS NULL)))
+$$;
+
+CREATE FUNCTION public.automation_edge_service_account(
+  checked_tenant_id bigint,checked_user_id bigint,checked_facility_id bigint) RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  SELECT account.id FROM public.service_accounts account
+  JOIN public.tenant_memberships membership ON membership.tenant_id=account.tenant_id
+    AND membership.user_id=account.principal_user_id AND membership.deleted IS NULL
+  WHERE account.tenant_id=checked_tenant_id
+    AND account.principal_user_id=checked_user_id AND account.status='active'
+    AND public.automation_user_has_permission(
+      checked_tenant_id,checked_user_id,'automation_edge')
+    AND (account.all_facilities OR EXISTS(
+      SELECT 1 FROM public.service_account_facilities assignment
+      WHERE assignment.tenant_id=account.tenant_id
+        AND assignment.service_account_id=account.id
+        AND assignment.facility_id=checked_facility_id
+        AND assignment.revoked_at IS NULL))
+  LIMIT 1
+$$;
+
+CREATE FUNCTION public.validate_automation_device() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+DECLARE latest_heartbeat public.automation_heartbeats%ROWTYPE;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'automation devices cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF actor_id IS DISTINCT FROM NEW.registered_by_user_id
+      OR NEW.control_changed_by_user_id<>NEW.registered_by_user_id
+      OR NEW.registered_at<>NEW.control_changed_at
+      OR NEW.control_mode<>'disabled' OR NEW.revision<>1 OR NEW.health<>'unknown'
+      OR NOT public.automation_user_has_permission(
+        NEW.tenant_id,actor_id,'wms_supervisor')
+      OR NOT public.automation_interactive_user_scoped(
+        NEW.tenant_id,actor_id,NEW.facility_id) THEN
+      RAISE EXCEPTION 'invalid automation device registration' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.facility_id,NEW.device_key,NEW.device_class,
+      NEW.display_name,NEW.registered_by_user_id,NEW.registered_at) IS DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.facility_id,OLD.device_key,OLD.device_class,
+      OLD.display_name,OLD.registered_by_user_id,OLD.registered_at) THEN
+    RAISE EXCEPTION 'automation device identity is immutable' USING ERRCODE='55000';
+  END IF;
+  IF ROW(NEW.control_mode,NEW.control_reason,NEW.control_changed_by_user_id,
+      NEW.control_changed_at,NEW.revision) IS DISTINCT FROM
+    ROW(OLD.control_mode,OLD.control_reason,OLD.control_changed_by_user_id,
+      OLD.control_changed_at,OLD.revision) THEN
+    IF (NEW.control_mode='automatic' AND (
+        NEW.health NOT IN ('healthy','degraded')
+        OR NEW.last_heartbeat_at<CURRENT_TIMESTAMP-INTERVAL '2 minutes'
+        OR EXISTS(SELECT 1 FROM public.automation_commands command
+          WHERE command.tenant_id=NEW.tenant_id AND command.device_id=NEW.id
+            AND command.status='manual_review')))
+      OR ROW(NEW.health,NEW.health_message,NEW.last_heartbeat_at) IS DISTINCT FROM
+      ROW(OLD.health,OLD.health_message,OLD.last_heartbeat_at)
+      OR actor_id IS DISTINCT FROM NEW.control_changed_by_user_id
+      OR NEW.revision<>OLD.revision+1 OR NEW.control_changed_at<OLD.control_changed_at
+      OR NOT public.automation_user_has_permission(
+        NEW.tenant_id,actor_id,'wms_supervisor')
+      OR NOT public.automation_interactive_user_scoped(
+        NEW.tenant_id,actor_id,NEW.facility_id) THEN
+      RAISE EXCEPTION 'invalid automation control transition' USING ERRCODE='23514';
+    END IF;
+  ELSE
+    SELECT * INTO latest_heartbeat FROM public.automation_heartbeats heartbeat
+    WHERE heartbeat.tenant_id=NEW.tenant_id AND heartbeat.device_id=NEW.id
+    ORDER BY heartbeat.id DESC LIMIT 1;
+    IF ROW(NEW.health,NEW.health_message,NEW.last_heartbeat_at) IS NOT DISTINCT FROM
+      ROW(OLD.health,OLD.health_message,OLD.last_heartbeat_at)
+      OR latest_heartbeat.id IS NULL
+      OR latest_heartbeat.health<>NEW.health
+      OR latest_heartbeat.message IS DISTINCT FROM NEW.health_message
+      OR latest_heartbeat.observed_at<>NEW.last_heartbeat_at
+      OR public.automation_edge_service_account(
+        NEW.tenant_id,actor_id,NEW.facility_id) IS DISTINCT FROM
+        latest_heartbeat.service_account_id THEN
+      RAISE EXCEPTION 'invalid automation health projection update' USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_automation_command() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+DECLARE device public.automation_devices%ROWTYPE;
+DECLARE edge_account_id bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'automation commands cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  SELECT * INTO device FROM public.automation_devices candidate
+  WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id=NEW.device_id FOR SHARE;
+  IF device.id IS NULL OR device.facility_id<>NEW.facility_id
+    OR device.device_class<>NEW.device_class THEN
+    RAISE EXCEPTION 'automation command device snapshot is invalid' USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF actor_id IS DISTINCT FROM NEW.requested_by_user_id
+      OR NOT public.automation_user_has_permission(
+        NEW.tenant_id,actor_id,'wms_supervisor')
+      OR NOT public.automation_interactive_user_scoped(
+        NEW.tenant_id,actor_id,NEW.facility_id)
+      OR device.control_mode<>'automatic' OR device.health NOT IN ('healthy','degraded')
+      OR device.last_heartbeat_at<CURRENT_TIMESTAMP-INTERVAL '2 minutes'
+      OR EXISTS(SELECT 1 FROM public.automation_commands held
+        WHERE held.tenant_id=NEW.tenant_id AND held.device_id=NEW.device_id
+          AND held.status='manual_review') THEN
+      RAISE EXCEPTION 'invalid automation command enqueue' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.facility_id,NEW.device_id,NEW.device_class,
+      NEW.correlation_id,NEW.recovery_policy,NEW.command_payload,
+      NEW.requested_by_user_id,NEW.requested_at) IS DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.facility_id,OLD.device_id,OLD.device_class,
+      OLD.correlation_id,OLD.recovery_policy,OLD.command_payload,
+      OLD.requested_by_user_id,OLD.requested_at) THEN
+    RAISE EXCEPTION 'automation command envelope is immutable' USING ERRCODE='55000';
+  END IF;
+  IF OLD.status='manual_review' AND NEW.status='resolved_manually' THEN
+    IF NEW.revision<>OLD.revision+1
+      OR actor_id IS DISTINCT FROM NEW.resolved_by_user_id
+      OR NEW.resolved_at NOT BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+        AND CURRENT_TIMESTAMP+INTERVAL '1 minute'
+      OR ROW(NEW.delivery_attempts,NEW.assigned_service_account_id,
+          NEW.agent_instance,NEW.delivery_token,NEW.delivered_at,
+          NEW.delivery_expires_at,NEW.accepted_at,NEW.completed_at,
+          NEW.result_payload,NEW.error_code,NEW.error_message) IS DISTINCT FROM
+        ROW(OLD.delivery_attempts,OLD.assigned_service_account_id,
+          OLD.agent_instance,OLD.delivery_token,OLD.delivered_at,
+          OLD.delivery_expires_at,OLD.accepted_at,OLD.completed_at,
+          OLD.result_payload,OLD.error_code,OLD.error_message)
+      OR NOT public.automation_user_has_permission(
+        NEW.tenant_id,actor_id,'wms_supervisor')
+      OR NOT public.automation_interactive_user_scoped(
+        NEW.tenant_id,actor_id,NEW.facility_id) THEN
+      RAISE EXCEPTION 'invalid automation manual resolution' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  edge_account_id:=public.automation_edge_service_account(
+    NEW.tenant_id,actor_id,NEW.facility_id);
+  IF edge_account_id IS NULL OR NEW.revision<>OLD.revision+1
+    OR NEW.assigned_service_account_id IS DISTINCT FROM edge_account_id
+    OR NOT (
+      (OLD.status IN ('queued','delivered') AND NEW.status='delivered'
+        AND NEW.delivery_attempts=OLD.delivery_attempts+1
+        AND NOT EXISTS(SELECT 1 FROM public.automation_commands held
+          WHERE held.tenant_id=NEW.tenant_id AND held.device_id=NEW.device_id
+            AND held.status='manual_review')
+        AND (OLD.assigned_service_account_id IS NULL
+          OR OLD.assigned_service_account_id=NEW.assigned_service_account_id)
+        AND NEW.accepted_at IS NULL AND NEW.completed_at IS NULL)
+      OR (OLD.status='delivered' AND NEW.status='accepted'
+        AND NEW.delivery_attempts=OLD.delivery_attempts
+        AND NOT EXISTS(SELECT 1 FROM public.automation_commands held
+          WHERE held.tenant_id=NEW.tenant_id AND held.device_id=NEW.device_id
+            AND held.status='manual_review')
+        AND NEW.assigned_service_account_id=OLD.assigned_service_account_id
+        AND NEW.agent_instance=OLD.agent_instance
+        AND NEW.delivery_token=OLD.delivery_token
+        AND NEW.delivered_at=OLD.delivered_at AND NEW.accepted_at IS NOT NULL)
+      OR (OLD.status='accepted' AND NEW.status IN ('succeeded','failed','manual_review')
+        AND NEW.delivery_attempts=OLD.delivery_attempts
+        AND NEW.assigned_service_account_id=OLD.assigned_service_account_id
+        AND NEW.agent_instance=OLD.agent_instance
+        AND NEW.delivery_token=OLD.delivery_token
+        AND NEW.delivered_at=OLD.delivered_at AND NEW.accepted_at=OLD.accepted_at
+        AND NEW.completed_at IS NOT NULL)) THEN
+    RAISE EXCEPTION 'invalid automation command transition' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_automation_command_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+DECLARE command public.automation_commands%ROWTYPE;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'automation command events are immutable' USING ERRCODE='55000';
+  END IF;
+  SELECT * INTO command FROM public.automation_commands candidate
+  WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id=NEW.command_id;
+  IF command.id IS NULL OR actor_id IS DISTINCT FROM NEW.actor_user_id
+    OR command.status<>NEW.transition THEN
+    RAISE EXCEPTION 'invalid automation command event' USING ERRCODE='23514';
+  END IF;
+  IF NEW.transition='resolved_manually' THEN
+    IF NEW.service_account_id IS NOT NULL
+      OR command.resolved_by_user_id IS DISTINCT FROM actor_id
+      OR NOT public.automation_user_has_permission(
+        NEW.tenant_id,actor_id,'wms_supervisor')
+      OR NOT public.automation_interactive_user_scoped(
+        NEW.tenant_id,actor_id,command.facility_id) THEN
+      RAISE EXCEPTION 'invalid automation command resolution event' USING ERRCODE='23514';
+    END IF;
+  ELSIF command.assigned_service_account_id IS DISTINCT FROM NEW.service_account_id
+    OR public.automation_edge_service_account(
+      NEW.tenant_id,actor_id,command.facility_id) IS DISTINCT FROM NEW.service_account_id THEN
+    RAISE EXCEPTION 'invalid automation edge command event' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_automation_heartbeat() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+DECLARE device public.automation_devices%ROWTYPE;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'automation heartbeats are immutable' USING ERRCODE='55000';
+  END IF;
+  SELECT * INTO device FROM public.automation_devices candidate
+  WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id=NEW.device_id FOR SHARE;
+  IF device.id IS NULL OR device.facility_id<>NEW.facility_id
+    OR (device.last_heartbeat_at IS NOT NULL
+      AND NEW.observed_at<=device.last_heartbeat_at)
+    OR public.automation_edge_service_account(
+      NEW.tenant_id,actor_id,NEW.facility_id) IS DISTINCT FROM NEW.service_account_id
+    OR NEW.received_at<>transaction_timestamp() THEN
+    RAISE EXCEPTION 'invalid automation heartbeat' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER automation_devices_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.automation_devices FOR EACH ROW EXECUTE FUNCTION public.validate_automation_device();
+CREATE TRIGGER automation_commands_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.automation_commands FOR EACH ROW EXECUTE FUNCTION public.validate_automation_command();
+CREATE TRIGGER automation_command_events_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.automation_command_events FOR EACH ROW
+EXECUTE FUNCTION public.validate_automation_command_event();
+CREATE TRIGGER automation_heartbeats_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.automation_heartbeats FOR EACH ROW
+EXECUTE FUNCTION public.validate_automation_heartbeat();
+
+ALTER TABLE public.automation_devices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.automation_devices FORCE ROW LEVEL SECURITY;
+CREATE POLICY automation_devices_tenant_isolation ON public.automation_devices
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.automation_commands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.automation_commands FORCE ROW LEVEL SECURITY;
+CREATE POLICY automation_commands_tenant_isolation ON public.automation_commands
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.automation_command_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.automation_command_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY automation_command_events_tenant_isolation ON public.automation_command_events
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.automation_heartbeats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.automation_heartbeats FORCE ROW LEVEL SECURITY;
+CREATE POLICY automation_heartbeats_tenant_isolation ON public.automation_heartbeats
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.automation_devices TO wareboxes_app;
+GRANT UPDATE(control_mode,control_reason,control_changed_by_user_id,
+  control_changed_at,revision,health,health_message,last_heartbeat_at)
+ON public.automation_devices TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.automation_devices_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.automation_commands TO wareboxes_app;
+GRANT UPDATE(status,revision,delivery_attempts,assigned_service_account_id,
+  agent_instance,delivery_token,delivered_at,delivery_expires_at,accepted_at,
+  completed_at,result_payload,error_code,error_message,resolved_by_user_id,
+  resolution_outcome,resolution_reason,resolved_at)
+ON public.automation_commands TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.automation_commands_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.automation_command_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.automation_command_events_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.automation_heartbeats TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.automation_heartbeats_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.automation_user_has_permission(bigint,bigint,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.automation_json_text_valid(jsonb,text,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.automation_json_object_size(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.automation_command_payload_is_valid(text,jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.automation_result_payload_is_valid(text,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.automation_json_text_valid(jsonb,text,integer)
+  TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.automation_json_object_size(jsonb) TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.automation_command_payload_is_valid(text,jsonb)
+  TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.automation_result_payload_is_valid(text,jsonb)
+  TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.automation_interactive_user_scoped(bigint,bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.automation_edge_service_account(bigint,bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_automation_device() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_automation_command() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_automation_command_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_automation_heartbeat() FROM PUBLIC;

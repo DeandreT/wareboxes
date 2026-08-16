@@ -1,5 +1,6 @@
 //! Version 1 public API primitives.
 
+mod automation;
 mod backorder;
 mod billing;
 mod configuration;
@@ -67,6 +68,7 @@ mod work_orchestration;
 mod workforce_identity;
 mod yard;
 
+pub use automation::*;
 pub use backorder::{
     BackorderPolicyMode, BackorderPolicyRequest, BackorderPolicyResponse, BackorderReason,
     BackorderSplitLineResponse, ConfigureBackorderPolicyRequest, SplitOrderBackorderRequest,

@@ -1,5 +1,6 @@
 //! Version 1 public HTTP routes.
 
+pub(crate) mod automation;
 mod backorders;
 mod billing;
 mod configurations;
@@ -73,6 +74,42 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/automation/workspace",
+            get(automation::workspace),
+        )
+        .route(
+            "/automation/devices",
+            post(automation::register_device),
+        )
+        .route(
+            "/automation/devices/{device_id}/control-changes",
+            post(automation::change_control),
+        )
+        .route(
+            "/automation/devices/{device_id}/commands",
+            post(automation::enqueue_command),
+        )
+        .route(
+            "/automation/commands/{command_id}/resolutions",
+            post(automation::resolve_command),
+        )
+        .route(
+            "/edge/automation/command-pulls",
+            post(automation::pull_commands),
+        )
+        .route(
+            "/edge/automation/commands/{command_id}/acknowledgements",
+            post(automation::acknowledge_command),
+        )
+        .route(
+            "/edge/automation/commands/{command_id}/reports",
+            post(automation::report_command),
+        )
+        .route(
+            "/edge/automation/devices/{device_id}/heartbeats",
+            post(automation::record_heartbeat),
+        )
         .route(
             "/platform/tenants",
             get(tenant_lifecycle::list).post(tenant_lifecycle::create),

@@ -35,7 +35,12 @@ use wareboxes_api_contract::v1::{
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
+mod automation;
 mod backorder;
+pub use automation::{
+    automation_workspace, change_automation_control, enqueue_automation_command,
+    register_automation_device, resolve_automation_command,
+};
 pub use backorder::{configure_backorder_policy, split_order_backorder};
 mod billing;
 pub use billing::{

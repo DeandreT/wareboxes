@@ -128,6 +128,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/work-orchestration" | "/work-orchestration/" => {
             Some(WorkspaceBootstrapSection::WorkOrchestration)
         }
+        "/automation" | "/automation/" => Some(WorkspaceBootstrapSection::Automation),
         "/administration/service-accounts" | "/administration/service-accounts/" => {
             Some(WorkspaceBootstrapSection::ServiceAccounts)
         }
@@ -439,6 +440,27 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::Automation => {
+            if !has_permission(session, "wms_supervisor") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let (automation_workspace, access_workspace) = tokio::try_join!(
+                routes::v1::automation::workspace_for_access(
+                    state,
+                    access,
+                    &wareboxes_application::automation::AutomationWorkspaceFilter {
+                        facility_id: None,
+                        include_history: false,
+                    },
+                ),
+                routes::access::workspace_for_access(state, access),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                automation_workspace: Some(automation_workspace),
+                access: access_workspace,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::ServiceAccounts => {
             if !has_permission(session, "admin") {
                 return Ok(WorkspaceBootstrapData::default());
@@ -588,6 +610,10 @@ mod tests {
         assert_eq!(
             section_for_path("/work-orchestration"),
             Some(WorkspaceBootstrapSection::WorkOrchestration)
+        );
+        assert_eq!(
+            section_for_path("/automation"),
+            Some(WorkspaceBootstrapSection::Automation)
         );
         assert_eq!(
             section_for_path("/administration/service-accounts"),

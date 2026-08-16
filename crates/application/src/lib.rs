@@ -1,6 +1,7 @@
 //! Transport- and persistence-independent application workflow contracts.
 
 pub mod authorization;
+pub mod automation;
 pub mod backorder;
 pub mod billing;
 pub mod billing_decision_policy;

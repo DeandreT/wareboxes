@@ -4,6 +4,7 @@ mod administration;
 pub mod api;
 pub mod app;
 mod app_frame;
+mod automation;
 mod catalog;
 mod components;
 mod cross_dock;

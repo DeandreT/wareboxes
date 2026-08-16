@@ -319,6 +319,22 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'employee_identity_changes_tenant_isolation'
                 ),
                 (
+                    'automation_devices',
+                    'automation_devices_tenant_isolation'
+                ),
+                (
+                    'automation_commands',
+                    'automation_commands_tenant_isolation'
+                ),
+                (
+                    'automation_command_events',
+                    'automation_command_events_tenant_isolation'
+                ),
+                (
+                    'automation_heartbeats',
+                    'automation_heartbeats_tenant_isolation'
+                ),
+                (
                     'loads',
                     'loads_tenant_isolation'
                 ),

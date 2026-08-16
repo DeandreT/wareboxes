@@ -283,6 +283,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 active=section == Section::Slotting
                             />
                             <NavItem
+                                href="/automation"
+                                label="Automation"
+                                icon=UiIcon::Orchestration
+                                active=section == Section::Automation
+                            />
+                            <NavItem
                                 href="/cross-dock"
                                 label="Cross-dock"
                                 icon=UiIcon::CrossDock

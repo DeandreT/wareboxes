@@ -5,6 +5,7 @@
 pub mod access;
 pub mod address;
 pub mod audits;
+pub mod automation;
 pub mod backorder;
 pub mod billing;
 pub mod configuration;
