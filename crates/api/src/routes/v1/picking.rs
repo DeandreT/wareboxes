@@ -8,7 +8,8 @@ use wareboxes_api_contract::v1::{
     PickConfirmationHistoryResponse, PickContentConfirmationResponse,
     PickContentState as ApiContentState,
     PickDecisionPolicyResponse as ApiPickDecisionPolicyResponse,
-    PickDecisionPolicySource as ApiPickDecisionPolicySource, PickOrderStatus,
+    PickDecisionPolicySource as ApiPickDecisionPolicySource,
+    PickExecutionMethod as ApiPickExecutionMethod, PickExecutionResponse, PickOrderStatus,
     PickReversalHistoryResponse, PickReversalReason as ApiReversalReason, ReleasePickClaimRequest,
     ReversePickConfirmationRequest, ReversePickConfirmationResponse, Revision,
 };
@@ -24,8 +25,8 @@ use wareboxes_application::picking_decision_policy::{
 };
 use wareboxes_domain::{
     ConfigurationScope, OrderStatus, PickClaimReleaseReason, PickConfirmationId, PickContentId,
-    PickContentState, PickReversalNote, PickReversalReason, PickScanValue, PickTaskId, Timestamp,
-    MAX_PICK_SCAN_VALUE_LENGTH,
+    PickContentState, PickExecutionMethod, PickReversalNote, PickReversalReason, PickScanValue,
+    PickTaskId, Timestamp, MAX_PICK_SCAN_VALUE_LENGTH,
 };
 
 use super::error::{V1Error, V1Result};
@@ -218,7 +219,7 @@ pub async fn list_confirmation_history(
     Ok(Json(map_confirmation_history_page(page, order_id)?))
 }
 
-fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
+pub(crate) fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
     Ok(PickClaimResponse {
         task_id: claim.task_id.get(),
         order_id: claim.order_id.get(),
@@ -233,6 +234,17 @@ fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
         destination_location_id: claim.destination_location_id.get(),
         destination_location_barcode: claim.destination_location_barcode.into_inner(),
         destination_location_name: claim.destination_location_name,
+        execution: PickExecutionResponse {
+            method: match claim.execution.method {
+                PickExecutionMethod::Discrete => ApiPickExecutionMethod::Discrete,
+                PickExecutionMethod::ClusterCart => ApiPickExecutionMethod::ClusterCart,
+            },
+            cluster_id: claim.execution.cluster_id.map(|id| id.get()),
+            cart_barcode: claim.execution.cart_barcode,
+            slot_code: claim.execution.slot_code,
+            sequence: claim.execution.sequence,
+            task_count: claim.execution.task_count,
+        },
         pick_policy: map_pick_policy(claim.pick_policy),
         suggested_destination_license_plate_barcode: claim
             .suggested_destination_license_plate_barcode

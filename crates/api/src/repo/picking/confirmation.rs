@@ -247,6 +247,13 @@ pub async fn confirm_content(
         confirmed_at,
     )
     .await?;
+    super::cluster::enqueue_terminal_event_for_task_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id,
+        command.task_id,
+    )
+    .await?;
     let parent_shortage_transition = advance_parent_shortage_for_terminal_work_tx(
         &mut tx,
         access.tenant_id,

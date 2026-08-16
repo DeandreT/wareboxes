@@ -12,6 +12,7 @@ use wareboxes_core::dto::OrderPage;
 use wareboxes_core::models::{Location, Order, OrderStatus};
 
 use crate::api;
+use crate::pick_clusters::PickClustersWorkspace;
 use crate::sorting::{SortDirection, SortableHeader};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
@@ -78,6 +79,7 @@ pub(crate) fn PickWavesWorkspace(
     locations: Vec<Location>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
+    let cluster_access = access.clone();
     let signals = Signals {
         page: RwSignal::new(initial_page),
         selected: RwSignal::new(None),
@@ -228,6 +230,7 @@ pub(crate) fn PickWavesWorkspace(
     });
 
     view! {
+        <PickClustersWorkspace access=cluster_access on_unauthorized/>
         <section class="pick-wave-page operations-page">
             <header class="page-heading pick-wave-heading">
                 <div><span class="eyebrow">"Outbound execution"</span><h1>"Pick waves"</h1></div>

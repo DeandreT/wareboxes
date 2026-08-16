@@ -57,9 +57,39 @@ pub struct PickClaim {
     pub destination_location_id: i64,
     pub destination_location_barcode: String,
     pub destination_location_name: Option<String>,
+    pub execution: PickExecutionEvidence,
     pub pick_policy: PickDecisionPolicy,
     pub suggested_destination_license_plate_barcode: Option<String>,
     pub content: PickClaimContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickExecutionMethod {
+    Discrete,
+    ClusterCart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickExecutionEvidence {
+    pub method: PickExecutionMethod,
+    pub cluster_id: Option<i64>,
+    pub cart_barcode: Option<String>,
+    pub slot_code: Option<String>,
+    pub sequence: Option<i64>,
+    pub task_count: Option<i64>,
+}
+
+impl PickExecutionEvidence {
+    pub const fn discrete() -> Self {
+        Self {
+            method: PickExecutionMethod::Discrete,
+            cluster_id: None,
+            cart_barcode: None,
+            slot_code: None,
+            sequence: None,
+            task_count: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +183,9 @@ pub enum PickReleaseReason {
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum PickingCommand {
     ClaimNext,
+    ClaimCluster {
+        cluster_id: i64,
+    },
     ClaimById {
         task_id: i64,
     },
@@ -194,6 +227,7 @@ pub struct PickingWorkflow {
     destination_license_plate_scan: Option<String>,
     shortage: Option<PickShortageDraft>,
     scan_draft: String,
+    cluster_id_draft: String,
     error: Option<String>,
     notice: Option<String>,
     reconcile_reason: Option<String>,
@@ -210,6 +244,7 @@ impl Default for PickingWorkflow {
             destination_license_plate_scan: None,
             shortage: None,
             scan_draft: String::new(),
+            cluster_id_draft: String::new(),
             error: None,
             notice: None,
             reconcile_reason: None,
@@ -362,6 +397,10 @@ impl PickingWorkflow {
         &mut self.scan_draft
     }
 
+    pub fn cluster_id_draft_mut(&mut self) -> &mut String {
+        &mut self.cluster_id_draft
+    }
+
     pub fn expected_scan(&self) -> Option<PickScanStage> {
         if self.activity() != Activity::Active {
             return None;
@@ -412,6 +451,25 @@ impl PickingWorkflow {
         }
         self.begin_idle(
             PickingCommand::ClaimById { task_id },
+            command_id,
+            idempotency_key,
+        )
+    }
+
+    pub fn begin_cluster_claim(
+        &mut self,
+        command_id: String,
+        idempotency_key: String,
+    ) -> Option<WorkflowEffect> {
+        let cluster_id = match self.cluster_id_draft.trim().parse::<i64>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                self.error = Some("Scan or enter a positive cluster route ID".into());
+                return None;
+            }
+        };
+        self.begin_idle(
+            PickingCommand::ClaimCluster { cluster_id },
             command_id,
             idempotency_key,
         )
@@ -925,6 +983,10 @@ fn outcome_matches(command: &RfCommand, outcome: &CommandOutcome) -> bool {
     match (command, outcome) {
         (RfCommand::Picking(PickingCommand::ClaimNext), CommandOutcome::PickClaimed(_)) => true,
         (
+            RfCommand::Picking(PickingCommand::ClaimCluster { .. }),
+            CommandOutcome::PickClaimed(_),
+        ) => true,
+        (
             RfCommand::Picking(PickingCommand::ClaimById { task_id }),
             CommandOutcome::PickClaimed(Some(claim)),
         ) => *task_id == claim.task_id,
@@ -987,6 +1049,7 @@ mod tests {
             destination_location_id: 9,
             destination_location_barcode: "STAGE-01".into(),
             destination_location_name: Some("Outbound stage 1".into()),
+            execution: PickExecutionEvidence::discrete(),
             pick_policy: PickDecisionPolicy::product_default(),
             suggested_destination_license_plate_barcode: None,
             content: PickClaimContent {
@@ -1029,6 +1092,33 @@ mod tests {
     fn scan(workflow: &mut PickingWorkflow, value: &str) -> Option<WorkflowEffect> {
         *workflow.scan_draft_mut() = value.into();
         workflow.submit_scan("confirm-command".into(), "confirm-key".into())
+    }
+
+    #[test]
+    fn cluster_claim_requires_a_positive_scanned_route_id() {
+        let mut workflow = PickingWorkflow::default();
+        *workflow.cluster_id_draft_mut() = "bad-route".into();
+        assert!(
+            workflow
+                .begin_cluster_claim("cluster-command".into(), "cluster-key".into())
+                .is_none()
+        );
+        assert_eq!(
+            workflow.error(),
+            Some("Scan or enter a positive cluster route ID")
+        );
+
+        *workflow.cluster_id_draft_mut() = "44".into();
+        let effect = workflow
+            .begin_cluster_claim("cluster-command".into(), "cluster-key".into())
+            .unwrap();
+        let WorkflowEffect::PersistCommand(draft) = effect else {
+            panic!("cluster claim should persist before dispatch");
+        };
+        assert_eq!(
+            draft.command,
+            RfCommand::Picking(PickingCommand::ClaimCluster { cluster_id: 44 })
+        );
     }
 
     #[test]

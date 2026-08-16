@@ -2,8 +2,8 @@ use eframe::egui;
 use lucide_icons::Icon;
 
 use crate::picking::{
-    PickClaim, PickControlledEvidence, PickReleaseReason, PickScanStage, PickShortageDisposition,
-    PickShortageReason,
+    PickClaim, PickControlledEvidence, PickExecutionEvidence, PickExecutionMethod,
+    PickReleaseReason, PickScanStage, PickShortageDisposition, PickShortageReason,
 };
 use crate::workflow::{Activity, Transition, WorkflowEffect};
 
@@ -58,6 +58,29 @@ impl RfApp {
             self.emit_pick(effect);
         }
 
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("CLUSTER CART").small().strong());
+        ui.horizontal(|ui| {
+            ui.label("Route");
+            ui.add(
+                egui::TextEdit::singleline(self.picking.cluster_id_draft_mut())
+                    .hint_text("Scan cluster ID"),
+            );
+        });
+        let cluster_clicked = Self::full_width_button(
+            ui,
+            can_claim,
+            egui::Button::new(egui::RichText::new("Start / continue cluster").strong())
+                .fill(Self::primary_fill(can_claim)),
+            52.0,
+        )
+        .clicked();
+        if cluster_clicked {
+            let (command_id, key) = Self::command_identity("pick-cluster-claim");
+            let effect = self.picking.begin_cluster_claim(command_id, key);
+            self.emit_pick(effect);
+        }
+
         if let Some(notice) = self.picking.notice() {
             ui.add_space(12.0);
             ui.colored_label(Self::warning(), notice);
@@ -89,6 +112,29 @@ impl RfApp {
             &format!("{}  ·  Pick {}", claim.order_key, claim.task_id),
             claim.priority,
         );
+        if claim.execution.method == PickExecutionMethod::ClusterCart {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("CLUSTER CART").small().strong());
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(
+                        claim
+                            .execution
+                            .cart_barcode
+                            .as_deref()
+                            .unwrap_or("Unknown cart"),
+                    );
+                    ui.strong(format!(
+                        "Slot {}",
+                        claim.execution.slot_code.as_deref().unwrap_or("?")
+                    ));
+                    if let (Some(sequence), Some(task_count)) =
+                        (claim.execution.sequence, claim.execution.task_count)
+                    {
+                        ui.label(format!("Stop {sequence} of {task_count}"));
+                    }
+                });
+            });
+        }
 
         let lease_actions_allowed = if self.picking.activity() == Activity::Active {
             self.heartbeat_status(ui, claim.task_id)
@@ -610,6 +656,7 @@ fn debug_pick_claim() -> PickClaim {
         destination_location_id: 9,
         destination_location_barcode: "STAGE-01".into(),
         destination_location_name: Some("Outbound stage 1".into()),
+        execution: PickExecutionEvidence::discrete(),
         pick_policy: crate::picking::PickDecisionPolicy::product_default(),
         suggested_destination_license_plate_barcode: None,
         content: PickClaimContent {

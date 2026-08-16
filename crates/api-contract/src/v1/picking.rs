@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::pick_cluster::PickExecutionResponse;
 use super::{
     AllocationPolicyResponse, ConfigurationScope, CursorPage, OpaqueCursor, OrderAllocationOutcome,
     OrderAllocationStrategy, PageLimit, Revision,
@@ -137,6 +138,7 @@ pub struct PickClaimResponse {
     pub destination_location_id: i64,
     pub destination_location_barcode: String,
     pub destination_location_name: Option<String>,
+    pub execution: PickExecutionResponse,
     pub pick_policy: PickDecisionPolicyResponse,
     pub suggested_destination_license_plate_barcode: Option<String>,
     pub content: PickClaimContent,
@@ -756,6 +758,14 @@ mod tests {
             destination_location_id: 5,
             destination_location_barcode: "PACK-01".into(),
             destination_location_name: Some("Pack lane 1".into()),
+            execution: PickExecutionResponse {
+                method: crate::v1::pick_cluster::PickExecutionMethod::Discrete,
+                cluster_id: None,
+                cart_barcode: None,
+                slot_code: None,
+                sequence: None,
+                task_count: None,
+            },
             pick_policy: PickDecisionPolicyResponse {
                 source: PickDecisionPolicySource::ProductDefault,
                 configuration_id: None,

@@ -29,6 +29,7 @@ mod labor;
 mod orders;
 mod outbound_loads;
 mod packing;
+mod pick_clusters;
 mod pick_waves;
 mod preferences;
 mod purchase_orders;

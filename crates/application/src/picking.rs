@@ -5,12 +5,13 @@ use wareboxes_domain::{
     ActualPickQuantity, AllocationExecutionStage, AllocationOutcome, AllocationQuantity,
     AllocationStrategy, FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryHoldId,
     InventoryOwnerId, ItemBatchId, LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision,
-    OrderStatus, PickClaimReleaseReason, PickConfirmationId, PickContentId, PickContentState,
-    PickQuantity, PickReversalDetails, PickReversalId, PickReversalNote, PickReversalReason,
-    PickScanValue, PickShortShipDetails, PickShortShipNote, PickShortShipReason,
-    PickShortageDetails, PickShortageDispositionId, PickShortageId, PickShortageQuantities,
-    PickShortageReallocationRunId, PickShortageResolution, PickShortageRevision,
-    PickShortageStatus, PickTaskId, ShortShipDemandQuantities, Timestamp, UserId,
+    OrderStatus, PickClaimReleaseReason, PickClusterId, PickConfirmationId, PickContentId,
+    PickContentState, PickExecutionMethod, PickQuantity, PickReversalDetails, PickReversalId,
+    PickReversalNote, PickReversalReason, PickScanValue, PickShortShipDetails, PickShortShipNote,
+    PickShortShipReason, PickShortageDetails, PickShortageDispositionId, PickShortageId,
+    PickShortageQuantities, PickShortageReallocationRunId, PickShortageResolution,
+    PickShortageRevision, PickShortageStatus, PickTaskId, ShortShipDemandQuantities, Timestamp,
+    UserId,
 };
 
 use crate::order_allocation::AllocationPolicyReadModel;
@@ -75,10 +76,34 @@ pub struct PickClaim {
     pub destination_location_id: LocationId,
     pub destination_location_barcode: PickScanValue,
     pub destination_location_name: Option<String>,
+    pub execution: PickExecutionEvidence,
     pub pick_policy: PickDecisionPolicyReadModel,
     /// Present only when the task's existing outbound container is unambiguous.
     pub suggested_destination_license_plate_barcode: Option<PickScanValue>,
     pub content: PickClaimContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickExecutionEvidence {
+    pub method: PickExecutionMethod,
+    pub cluster_id: Option<PickClusterId>,
+    pub cart_barcode: Option<String>,
+    pub slot_code: Option<String>,
+    pub sequence: Option<i64>,
+    pub task_count: Option<i64>,
+}
+
+impl PickExecutionEvidence {
+    pub const fn discrete() -> Self {
+        Self {
+            method: PickExecutionMethod::Discrete,
+            cluster_id: None,
+            cart_barcode: None,
+            slot_code: None,
+            sequence: None,
+            task_count: None,
+        }
+    }
 }
 
 /// Current-claim queries deliberately return absence instead of a synthetic task.

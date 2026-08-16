@@ -41,6 +41,7 @@ mod order_release;
 mod outbound_load;
 mod outbound_qa;
 mod packing;
+mod pick_cluster;
 mod pick_wave;
 mod picking;
 mod purchase_order;
@@ -347,6 +348,14 @@ pub use packing::{
     PackingQueuePageRequest, PackingQueueSessionResponse, RemovePackedContentRequest,
     RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse, VoidCartonRequest,
     VoidCartonResponse, WeightGrams, PRODUCT_DEFAULT_PACK_DECISION_POLICY_HASH,
+};
+pub use pick_cluster::{
+    CancelPickClusterRequest, ChangePickCartStatusRequest, ClaimNextClusterPickRequest,
+    CreatePickCartRequest, PickCartResponse, PickCartSlotResponse, PickCartStatus,
+    PickClusterCandidateResponse, PickClusterMemberResponse, PickClusterResponse,
+    PickClusterStatus, PickClusterTaskAssignmentRequest, PickClusterWorkspaceRequest,
+    PickClusterWorkspaceResponse, PickExecutionMethod, PickExecutionResponse,
+    PlanPickClusterRequest,
 };
 pub use pick_wave::{
     CancelPickWaveRequest, PickWaveCancellationReason, PickWaveOrderResponse, PickWavePage,

@@ -474,6 +474,16 @@ pub fn build_durable_request(
             serde_json::to_vec(&ClaimNextPickRequest::default())?,
             ResponseKind::PickOptionalClaim,
         ),
+        RfCommand::Picking(PickingCommand::ClaimCluster { cluster_id }) => {
+            validate_task_id(*cluster_id)?;
+            (
+                format!("{API_PREFIX}/pick-clusters/{cluster_id}/claims/next"),
+                serde_json::to_vec(
+                    &wareboxes_api_contract::v1::ClaimNextClusterPickRequest::default(),
+                )?,
+                ResponseKind::PickOptionalClaim,
+            )
+        }
         RfCommand::Picking(PickingCommand::ClaimById { task_id }) => {
             validate_task_id(*task_id)?;
             (
@@ -1617,6 +1627,44 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
         destination_location_id: response.destination_location_id,
         destination_location_barcode: response.destination_location_barcode,
         destination_location_name: response.destination_location_name,
+        execution: match response.execution.method {
+            wareboxes_api_contract::v1::PickExecutionMethod::Discrete => {
+                if response.execution.cluster_id.is_some()
+                    || response.execution.cart_barcode.is_some()
+                    || response.execution.slot_code.is_some()
+                    || response.execution.sequence.is_some()
+                    || response.execution.task_count.is_some()
+                {
+                    return Err(WireResponseError::InvalidClaim);
+                }
+                crate::picking::PickExecutionEvidence::discrete()
+            }
+            wareboxes_api_contract::v1::PickExecutionMethod::ClusterCart => {
+                let execution = response.execution;
+                if execution.cluster_id.is_none_or(|value| value <= 0)
+                    || execution
+                        .cart_barcode
+                        .as_ref()
+                        .is_none_or(|value| value.trim().is_empty())
+                    || execution
+                        .slot_code
+                        .as_ref()
+                        .is_none_or(|value| value.trim().is_empty())
+                    || execution.sequence.is_none_or(|value| value <= 0)
+                    || execution.task_count.is_none_or(|value| value < 2)
+                {
+                    return Err(WireResponseError::InvalidClaim);
+                }
+                crate::picking::PickExecutionEvidence {
+                    method: crate::picking::PickExecutionMethod::ClusterCart,
+                    cluster_id: execution.cluster_id,
+                    cart_barcode: execution.cart_barcode,
+                    slot_code: execution.slot_code,
+                    sequence: execution.sequence,
+                    task_count: execution.task_count,
+                }
+            }
+        },
         pick_policy: PickDecisionPolicy {
             source: match policy.source {
                 ApiPickDecisionPolicySource::ProductDefault => {
@@ -2824,6 +2872,13 @@ mod tests {
         assert_eq!(body(&next), json!({}));
         assert_eq!(next.response_kind, ResponseKind::PickOptionalClaim);
 
+        let cluster =
+            build_durable_request(&pick_draft(PickingCommand::ClaimCluster { cluster_id: 44 }))
+                .unwrap();
+        assert_eq!(cluster.path, "/api/v1/pick-clusters/44/claims/next");
+        assert_eq!(body(&cluster), json!({}));
+        assert_eq!(cluster.response_kind, ResponseKind::PickOptionalClaim);
+
         let confirmation = build_durable_request(&pick_draft(PickingCommand::Confirm {
             task_id: 71,
             content_id: 81,
@@ -2919,6 +2974,14 @@ mod tests {
             "destination_location_id": 10,
             "destination_location_barcode": "PACK-01",
             "destination_location_name": "Pack lane 1",
+            "execution": {
+                "method": "discrete",
+                "cluster_id": null,
+                "cart_barcode": null,
+                "slot_code": null,
+                "sequence": null,
+                "task_count": null
+            },
             "pick_policy": {
                 "source": "product_default",
                 "configuration_id": null,

@@ -255,6 +255,27 @@ async fn cancel_pending_pick_work_tx(
         }
     }
 
+    let has_active_cluster: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+          SELECT 1 FROM pick_cluster_members member
+          INNER JOIN pick_clusters cluster
+            ON cluster.tenant_id=member.tenant_id AND cluster.id=member.cluster_id
+          WHERE member.tenant_id=$1 AND member.order_id=$2
+            AND cluster.status IN('planned','in_progress')
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if has_active_cluster {
+        return Err(AppError::conflict(
+            "cancel the active pick cluster route before cancelling its order",
+        ));
+    }
+
     if matches!(order_status, OrderStatus::Open | OrderStatus::Held) {
         cancel_order_before_physical_execution(
             order_status,

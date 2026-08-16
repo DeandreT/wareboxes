@@ -1,3 +1,5 @@
+#[path = "api_v1_picking/cluster_cart.rs"]
+mod cluster_cart;
 mod common;
 #[path = "api_v1_picking/decision_policy.rs"]
 mod decision_policy;
@@ -1455,6 +1457,11 @@ async fn picking_ledgers_are_tenant_isolated_immutable_and_minimally_granted() {
         ("pick_tasks", true, false),
         ("pick_task_contents", true, false),
         ("pick_confirmations", false, false),
+        ("pick_carts", true, false),
+        ("pick_cart_slots", false, false),
+        ("pick_clusters", true, false),
+        ("pick_cluster_orders", false, false),
+        ("pick_cluster_members", false, false),
     ] {
         let privileges: (bool, bool, bool, bool) = sqlx::query_as(
             r#"
@@ -1478,6 +1485,39 @@ async fn picking_ledgers_are_tenant_isolated_immutable_and_minimally_granted() {
         assert!(forced_rls, "{table}");
     }
 
+    let second_facility = fixture
+        .facility(second_tenant, "Tenant B cluster RLS facility")
+        .await;
+    let mut second_tx = tenant_tx(&fixture.db, second_tenant).await;
+    let second_cart_id: i64 = sqlx::query_scalar(
+        r#"INSERT INTO pick_carts(
+          tenant_id,facility_id,barcode,name,status,revision,created_by_user_id,created_at)
+        VALUES($1,$2,'TENANT-B-RLS-CART','Tenant B RLS cart','active',1,$3,statement_timestamp())
+        RETURNING id"#,
+    )
+    .bind(second_tenant.get())
+    .bind(second_facility)
+    .bind(second.id)
+    .fetch_one(&mut *second_tx)
+    .await
+    .unwrap();
+    for (code, sequence) in [("A", 1_i64), ("B", 2_i64)] {
+        sqlx::query(
+            r#"INSERT INTO pick_cart_slots(
+              tenant_id,facility_id,cart_id,code,sequence,created_at)
+            VALUES($1,$2,$3,$4,$5,statement_timestamp())"#,
+        )
+        .bind(second_tenant.get())
+        .bind(second_facility)
+        .bind(second_cart_id)
+        .bind(code)
+        .bind(sequence)
+        .execute(&mut *second_tx)
+        .await
+        .unwrap();
+    }
+    second_tx.commit().await.unwrap();
+
     let app_db = app_db_for(&fixture.db).await;
     let mut first_tx = tenant_tx(&app_db, first_tenant).await;
     let cross_tenant_counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
@@ -1493,8 +1533,18 @@ async fn picking_ledgers_are_tenant_isolated_immutable_and_minimally_granted() {
     .fetch_one(&mut *first_tx)
     .await
     .unwrap();
+    let hidden_cluster_cart_counts: (i64, i64) = sqlx::query_as(
+        r#"SELECT
+          (SELECT COUNT(*) FROM pick_carts WHERE id=$1),
+          (SELECT COUNT(*) FROM pick_cart_slots WHERE cart_id=$1)"#,
+    )
+    .bind(second_cart_id)
+    .fetch_one(&mut *first_tx)
+    .await
+    .unwrap();
     first_tx.rollback().await.unwrap();
     assert_eq!(cross_tenant_counts, (0, 0, 0, 0, 0));
+    assert_eq!(hidden_cluster_cart_counts, (0, 0));
 
     app_db.close().await;
     admin.close().await;

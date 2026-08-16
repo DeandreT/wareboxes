@@ -142,7 +142,9 @@ impl From<&RfCommand> for CommandOperation {
                 Self::CycleCountConfirmation
             }
             RfCommand::CycleCount(CycleCountCommand::Release { .. }) => Self::Release,
-            RfCommand::Picking(PickingCommand::ClaimNext) => Self::ClaimNext,
+            RfCommand::Picking(PickingCommand::ClaimNext | PickingCommand::ClaimCluster { .. }) => {
+                Self::ClaimNext
+            }
             RfCommand::Picking(PickingCommand::ClaimById { .. }) => Self::ClaimById,
             RfCommand::Picking(PickingCommand::Confirm { .. }) => Self::PickConfirmation,
             RfCommand::Picking(PickingCommand::ReportShortage(_)) => Self::PickShortageReport,

@@ -37,6 +37,7 @@ mod orders;
 pub(crate) mod outbound_loads;
 mod outbound_qa;
 pub(crate) mod packing;
+mod pick_clusters;
 mod pick_shortages;
 pub(crate) mod pick_waves;
 mod picking;
@@ -897,6 +898,24 @@ pub fn router() -> Router<AppState> {
         )
         .route("/picking-claims/next", post(picking::claim_next))
         .route("/picking-claims/current", get(picking::current))
+        .route(
+            "/pick-clusters/workspace",
+            get(pick_clusters::workspace),
+        )
+        .route("/pick-carts", post(pick_clusters::create_cart))
+        .route(
+            "/pick-carts/{cart_id}/status-changes",
+            post(pick_clusters::change_cart_status),
+        )
+        .route("/pick-clusters", post(pick_clusters::plan))
+        .route(
+            "/pick-clusters/{cluster_id}/claims/next",
+            post(pick_clusters::claim_next),
+        )
+        .route(
+            "/pick-clusters/{cluster_id}/cancellations",
+            post(pick_clusters::cancel),
+        )
         .route("/picking-claims/{task_id}", post(picking::claim_by_id))
         .route(
             "/picking-claims/{task_id}/heartbeats",

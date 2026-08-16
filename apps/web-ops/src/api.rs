@@ -132,6 +132,12 @@ pub use pick_wave::{
     cancel_pick_wave, pick_wave, pick_waves, plan_pick_wave, release_pick_wave,
     resolve_pick_wave_policies,
 };
+mod pick_cluster;
+pub use pick_cluster::{
+    cancel as cancel_pick_cluster, change_cart_status as change_pick_cart_status,
+    create_cart as create_pick_cart, plan as plan_pick_cluster,
+    workspace as pick_cluster_workspace,
+};
 mod putaway;
 pub use putaway::{create_license_plate_putaway, create_putaway, putaway_candidates, putaway_work};
 mod purchase_order;

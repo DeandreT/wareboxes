@@ -391,6 +391,26 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_tasks_tenant_isolation'
                 ),
                 (
+                    'pick_carts',
+                    'pick_carts_tenant_isolation'
+                ),
+                (
+                    'pick_cart_slots',
+                    'pick_cart_slots_tenant_isolation'
+                ),
+                (
+                    'pick_clusters',
+                    'pick_clusters_tenant_isolation'
+                ),
+                (
+                    'pick_cluster_orders',
+                    'pick_cluster_orders_tenant_isolation'
+                ),
+                (
+                    'pick_cluster_members',
+                    'pick_cluster_members_tenant_isolation'
+                ),
+                (
                     'pick_task_contents',
                     'pick_task_contents_tenant_isolation'
                 ),

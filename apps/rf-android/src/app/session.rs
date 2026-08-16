@@ -73,7 +73,7 @@ enum CurrentMovementClaim {
     Putaway(Option<PutawayClaim>),
     InventoryRelocation(Option<InventoryRelocationClaim>),
     CycleCount(Option<crate::cycle_count::CycleCountClaim>),
-    Picking(Option<crate::picking::PickClaim>),
+    Picking(Box<Option<crate::picking::PickClaim>>),
     Replenishment(Option<crate::replenishment::ReplenishmentClaim>),
     CrossDock(Option<crate::cross_dock::CrossDockClaim>),
 }
@@ -95,7 +95,7 @@ impl CurrentMovementClaim {
             Self::Putaway(claim) => claim.as_ref().map(|claim| claim.details().task_id),
             Self::InventoryRelocation(claim) => claim.as_ref().map(|claim| claim.details().task_id),
             Self::CycleCount(claim) => claim.as_ref().map(|claim| claim.task_id),
-            Self::Picking(claim) => claim.as_ref().map(|claim| claim.task_id),
+            Self::Picking(claim) => claim.as_ref().as_ref().map(|claim| claim.task_id),
             Self::Replenishment(claim) => claim.as_ref().map(|claim| claim.work_id),
             Self::CrossDock(claim) => claim.as_ref().map(|claim| claim.work_id),
         }
@@ -115,7 +115,7 @@ impl CurrentMovementClaim {
                 workflow.restore_current_inventory_relocation_claim(claim)
             }
             Self::CycleCount(claim) => cycle_count.restore_current_claim(claim),
-            Self::Picking(claim) => picking.restore_current_claim(claim),
+            Self::Picking(claim) => picking.restore_current_claim(*claim),
             Self::Replenishment(claim) => replenishment.restore_current_claim(claim),
             Self::CrossDock(claim) => cross_dock.restore_current_claim(claim),
         }
@@ -731,9 +731,8 @@ impl RfApp {
                 .map(CurrentMovementClaim::InventoryRelocation),
             ClaimOperation::CycleCount => decode_cycle_count_claim_response(&response.body)
                 .map(CurrentMovementClaim::CycleCount),
-            ClaimOperation::Picking => {
-                decode_pick_claim_response(&response.body).map(CurrentMovementClaim::Picking)
-            }
+            ClaimOperation::Picking => decode_pick_claim_response(&response.body)
+                .map(|claim| CurrentMovementClaim::Picking(Box::new(claim))),
             ClaimOperation::Replenishment => decode_replenishment_claim_response(&response.body)
                 .map(CurrentMovementClaim::Replenishment),
             ClaimOperation::CrossDock => decode_cross_dock_claim_response(&response.body)

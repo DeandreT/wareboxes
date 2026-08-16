@@ -1,14 +1,15 @@
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::picking::{
-    ClaimNextPickCommand, ClaimPickByIdCommand, PickClaim, PickClaimContent,
+    ClaimNextPickCommand, ClaimPickByIdCommand, PickClaim, PickClaimContent, PickExecutionEvidence,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId,
-    LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, PickContentId,
-    PickContentState, PickQuantity, PickScanValue, PickTaskId, TenantId, Timestamp,
+    LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, PickClusterId, PickContentId,
+    PickContentState, PickExecutionMethod, PickQuantity, PickScanValue, PickTaskId, TenantId,
+    Timestamp,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -60,6 +61,14 @@ pub async fn claim_next(
         FROM pick_tasks
         WHERE tenant_id = $1 AND status = 'open'
           AND assigned_user_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM pick_cluster_members member
+            JOIN pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+              AND cluster.id=member.cluster_id
+            WHERE member.tenant_id=pick_tasks.tenant_id
+              AND member.task_id=pick_tasks.id
+              AND cluster.status IN('planned','in_progress')
+          )
           AND ($2 OR facility_id = ANY($3))
           AND ($4 OR inventory_owner_id = ANY($5))
         ORDER BY priority DESC, ship_by ASC NULLS LAST, created_at, id
@@ -131,7 +140,15 @@ pub async fn claim_by_id(
         r#"
         SELECT status, assigned_user_id,
                lease_expires_at > statement_timestamp() AS lease_is_current,
-               facility_id, inventory_owner_id
+               facility_id, inventory_owner_id,
+               EXISTS (
+                 SELECT 1 FROM pick_cluster_members member
+                 JOIN pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+                   AND cluster.id=member.cluster_id
+                 WHERE member.tenant_id=pick_tasks.tenant_id
+                   AND member.task_id=pick_tasks.id
+                   AND cluster.status IN('planned','in_progress')
+               ) AS cluster_reserved
         FROM pick_tasks
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE
@@ -160,6 +177,11 @@ pub async fn claim_by_id(
     }
     if status != "open" || assigned_user_id.is_some() {
         return Err(AppError::conflict("pick task cannot be claimed"));
+    }
+    if row.try_get::<bool, _>("cluster_reserved")? {
+        return Err(AppError::conflict(
+            "pick task is reserved for a cluster-cart route",
+        ));
     }
     if active_task_for_user_tx(&mut tx, access.tenant_id, context.actor_id.get())
         .await?
@@ -247,6 +269,9 @@ pub(super) async fn load_claim_tx(
                task.pick_inventory_owner_id,task.pick_facility_id,
                task.require_source_location_scan,task.require_item_scan,
                task.require_destination_container_scan,task.pick_policy_hash,
+               cluster.id AS cluster_id,cluster.task_count AS cluster_task_count,
+               cart.barcode AS cluster_cart_barcode,
+               slot.code AS cluster_slot_code,member.sequence AS cluster_sequence,
                ARRAY(
                    SELECT plate.barcode
                    FROM outbound_order_containers container
@@ -341,6 +366,16 @@ pub(super) async fn load_claim_tx(
          AND source_plate.inventory_owner_id = content.inventory_owner_id
          AND source_plate.facility_id = content.facility_id
          AND source_plate.id = content.source_license_plate_id
+        LEFT JOIN pick_cluster_members member
+          ON member.tenant_id=task.tenant_id AND member.task_id=task.id
+        LEFT JOIN pick_clusters cluster
+          ON cluster.tenant_id=member.tenant_id AND cluster.id=member.cluster_id
+        LEFT JOIN pick_carts cart
+          ON cart.tenant_id=cluster.tenant_id AND cart.facility_id=cluster.facility_id
+         AND cart.id=cluster.cart_id
+        LEFT JOIN pick_cart_slots slot
+          ON slot.tenant_id=member.tenant_id AND slot.facility_id=member.facility_id
+         AND slot.cart_id=member.cart_id AND slot.id=member.slot_id
         WHERE task.tenant_id = $1 AND task.id = $2
           AND task.status = 'in_progress' AND task.assigned_user_id = $3
           AND task.lease_expires_at > statement_timestamp()
@@ -370,6 +405,20 @@ pub(super) async fn load_claim_tx(
     } else {
         None
     };
+    let execution = match row.try_get::<Option<i64>, _>("cluster_id")? {
+        Some(cluster_id) => PickExecutionEvidence {
+            method: PickExecutionMethod::ClusterCart,
+            cluster_id: Some(
+                PickClusterId::new(cluster_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+            ),
+            cart_barcode: Some(row.try_get("cluster_cart_barcode")?),
+            slot_code: Some(row.try_get("cluster_slot_code")?),
+            sequence: Some(row.try_get("cluster_sequence")?),
+            task_count: Some(row.try_get("cluster_task_count")?),
+        },
+        None => PickExecutionEvidence::discrete(),
+    };
     Ok(PickClaim {
         task_id,
         order_id: OrderId::new(row.try_get("order_id")?)
@@ -391,6 +440,7 @@ pub(super) async fn load_claim_tx(
             "destination location",
         )?,
         destination_location_name: row.try_get("destination_name")?,
+        execution,
         pick_policy,
         suggested_destination_license_plate_barcode,
         content: PickClaimContent {
@@ -444,7 +494,7 @@ pub(super) async fn load_claim_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn claim_open_task_tx(
+pub(super) async fn claim_open_task_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     task_id: i64,
@@ -599,7 +649,7 @@ fn require_scope_row(row: &sqlx::postgres::PgRow, scope: &ScopeBindings) -> AppR
     Ok(())
 }
 
-async fn active_task_for_user_tx(
+pub(super) async fn active_task_for_user_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     actor_user_id: i64,
@@ -617,7 +667,7 @@ async fn active_task_for_user_tx(
     .await?)
 }
 
-async fn release_expired_claims_tx(
+pub(super) async fn release_expired_claims_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     scope: &ScopeBindings,
@@ -645,7 +695,7 @@ async fn release_expired_claims_tx(
     Ok(())
 }
 
-async fn release_inaccessible_claim_tx(
+pub(super) async fn release_inaccessible_claim_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     actor_user_id: i64,

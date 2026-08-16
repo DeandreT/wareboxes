@@ -27,6 +27,7 @@ mod order_release;
 mod outbound_load;
 mod outbound_qa;
 mod packing;
+mod pick_cluster;
 mod pick_wave;
 mod picking;
 mod purchase_order;
@@ -221,6 +222,13 @@ pub use packing::{
     PackSessionAbandonmentReason, PackSessionStatus, PackingError, PackingProgress, WeightGrams,
     MAX_CARTON_REOPEN_NOTE_LENGTH, MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH,
     MAX_PACK_SCAN_VALUE_LENGTH, MAX_PACK_SESSION_ABANDONMENT_NOTE_LENGTH,
+};
+pub use pick_cluster::{
+    validate_pick_cart_slot_count, validate_pick_cluster_plan, PickCartBarcode, PickCartName,
+    PickCartSlotCode, PickCartStatus, PickClusterError, PickClusterPlanLine, PickClusterStatus,
+    PickExecutionMethod, MAX_PICK_CART_BARCODE_LENGTH, MAX_PICK_CART_NAME_LENGTH,
+    MAX_PICK_CART_SLOTS, MAX_PICK_CART_SLOT_CODE_LENGTH, MAX_PICK_CLUSTER_CANCEL_NOTE_LENGTH,
+    MAX_PICK_CLUSTER_TASKS,
 };
 pub use pick_wave::{
     cancel_pick_wave, release_pick_wave, validate_pick_wave_plan, PickWaveCancellationNote,
@@ -453,6 +461,10 @@ positive_id!(ItemStoragePolicyId, "item storage policy ID");
 positive_id!(ItemTraceabilityPolicyId, "item traceability policy ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickWaveId, "pick wave ID");
+positive_id!(PickCartId, "pick cart ID");
+positive_id!(PickCartSlotId, "pick cart slot ID");
+positive_id!(PickClusterId, "pick cluster ID");
+positive_id!(PickClusterMemberId, "pick cluster member ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");
 positive_id!(PickConfirmationId, "pick confirmation ID");

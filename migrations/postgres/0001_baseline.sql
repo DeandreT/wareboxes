@@ -50247,6 +50247,11 @@ BEGIN
     RETURN NEW;
   END IF;
 
+  IF OLD.status='open' AND NEW.status='cancelled'
+    AND NEW.pick_policy_source IS NULL THEN
+    RETURN NEW;
+  END IF;
+
   IF OLD.status<>'open' OR NEW.status<>'in_progress' OR NEW.claimed_at IS NULL
     OR NEW.pick_policy_source IS NULL THEN
     RAISE EXCEPTION 'first Pick policy snapshot requires a claim transition'
@@ -50555,3 +50560,442 @@ EXECUTE FUNCTION public.validate_pack_carton_weight();
 REVOKE ALL ON FUNCTION public.validate_pack_policy_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_pack_policy_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_pack_carton_weight() FROM PUBLIC;
+
+-- Cluster-cart picking. Existing pick tasks remain the immutable allocation-backed
+-- execution unit; these aggregates bind a safe multi-order route to physical slots.
+CREATE TABLE public.pick_carts (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  facility_id bigint NOT NULL,
+  barcode text NOT NULL,
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'active' CHECK(status IN('active','out_of_service','retired')),
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  created_by_user_id bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  status_changed_by_user_id bigint,
+  status_changed_at timestamptz,
+  CHECK(barcode=btrim(barcode) AND barcode<>'' AND char_length(barcode)<=80),
+  CHECK(name=btrim(name) AND name<>'' AND char_length(name)<=120),
+  CHECK((revision=1 AND status_changed_by_user_id IS NULL AND status_changed_at IS NULL)
+    OR (revision>1 AND status_changed_by_user_id IS NOT NULL AND status_changed_at IS NOT NULL)),
+  UNIQUE(tenant_id,facility_id,id),
+  UNIQUE(tenant_id,facility_id,barcode),
+  FOREIGN KEY(tenant_id,facility_id) REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY(tenant_id,created_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,status_changed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.pick_cart_slots (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  facility_id bigint NOT NULL,
+  cart_id bigint NOT NULL,
+  code text NOT NULL,
+  sequence bigint NOT NULL CHECK(sequence>0),
+  created_at timestamptz NOT NULL,
+  CHECK(code=upper(btrim(code)) AND code<>'' AND char_length(code)<=40),
+  UNIQUE(tenant_id,facility_id,cart_id,id),
+  UNIQUE(tenant_id,facility_id,cart_id,code),
+  UNIQUE(tenant_id,facility_id,cart_id,sequence),
+  FOREIGN KEY(tenant_id,facility_id,cart_id)
+    REFERENCES public.pick_carts(tenant_id,facility_id,id)
+);
+
+CREATE TABLE public.pick_clusters (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  cart_id bigint NOT NULL,
+  status text NOT NULL DEFAULT 'planned'
+    CHECK(status IN('planned','in_progress','completed','cancelled')),
+  revision bigint NOT NULL DEFAULT 1 CHECK(revision>0),
+  task_count bigint NOT NULL CHECK(task_count BETWEEN 2 AND 200),
+  order_count bigint NOT NULL CHECK(order_count BETWEEN 2 AND 48),
+  assigned_user_id bigint,
+  planned_by_user_id bigint NOT NULL,
+  planned_at timestamptz NOT NULL,
+  started_at timestamptz,
+  completed_at timestamptz,
+  cancelled_by_user_id bigint,
+  cancelled_at timestamptz,
+  cancellation_note text,
+  CHECK(cancellation_note IS NULL OR
+    (cancellation_note=btrim(cancellation_note) AND cancellation_note<>''
+      AND char_length(cancellation_note)<=500)),
+  CHECK(
+    (status='planned' AND revision=1 AND assigned_user_id IS NULL
+      AND started_at IS NULL AND completed_at IS NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND cancellation_note IS NULL)
+    OR (status='in_progress' AND revision=2 AND assigned_user_id IS NOT NULL
+      AND started_at IS NOT NULL AND completed_at IS NULL
+      AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+      AND cancellation_note IS NULL)
+    OR (status='completed' AND revision=3 AND assigned_user_id IS NOT NULL
+      AND started_at IS NOT NULL AND completed_at IS NOT NULL
+      AND completed_at>=started_at AND cancelled_by_user_id IS NULL
+      AND cancelled_at IS NULL AND cancellation_note IS NULL)
+    OR (status='cancelled' AND revision IN(2,3) AND completed_at IS NULL
+      AND cancelled_at IS NOT NULL AND cancellation_note IS NOT NULL
+      AND ((revision=2 AND assigned_user_id IS NULL AND started_at IS NULL)
+        OR (revision=3 AND assigned_user_id IS NOT NULL AND started_at IS NOT NULL)))
+  ),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,cart_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id)
+    REFERENCES public.inventory_owners(tenant_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,facility_id,cart_id)
+    REFERENCES public.pick_carts(tenant_id,facility_id,id),
+  FOREIGN KEY(tenant_id,assigned_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,planned_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,cancelled_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE UNIQUE INDEX pick_clusters_one_active_cart_idx
+ON public.pick_clusters(tenant_id,facility_id,cart_id)
+WHERE status IN('planned','in_progress');
+CREATE INDEX pick_clusters_scope_status_idx
+ON public.pick_clusters(tenant_id,facility_id,inventory_owner_id,status,planned_at DESC,id DESC);
+
+CREATE TABLE public.pick_cluster_orders (
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  cluster_id bigint NOT NULL,
+  cart_id bigint NOT NULL,
+  order_id bigint NOT NULL,
+  slot_id bigint NOT NULL,
+  PRIMARY KEY(tenant_id,inventory_owner_id,facility_id,cluster_id,order_id),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,cluster_id,slot_id),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,cluster_id,order_id,slot_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,cart_id,cluster_id)
+    REFERENCES public.pick_clusters(tenant_id,inventory_owner_id,facility_id,cart_id,id),
+  FOREIGN KEY(tenant_id,facility_id,cart_id,slot_id)
+    REFERENCES public.pick_cart_slots(tenant_id,facility_id,cart_id,id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,order_id)
+    REFERENCES public.orders(tenant_id,inventory_owner_id,id)
+);
+
+CREATE TABLE public.pick_cluster_members (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  cluster_id bigint NOT NULL,
+  cart_id bigint NOT NULL,
+  order_id bigint NOT NULL,
+  slot_id bigint NOT NULL,
+  task_id bigint NOT NULL,
+  sequence bigint NOT NULL CHECK(sequence>0),
+  created_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,cluster_id,id),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,cluster_id,sequence),
+  UNIQUE(tenant_id,cluster_id,task_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,cluster_id,order_id,slot_id)
+    REFERENCES public.pick_cluster_orders(
+      tenant_id,inventory_owner_id,facility_id,cluster_id,order_id,slot_id),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,task_id)
+    REFERENCES public.pick_tasks(tenant_id,inventory_owner_id,facility_id,id)
+);
+
+CREATE INDEX pick_cluster_members_route_idx
+ON public.pick_cluster_members(tenant_id,cluster_id,sequence);
+CREATE INDEX pick_cluster_members_task_idx
+ON public.pick_cluster_members(tenant_id,task_id);
+
+CREATE FUNCTION public.guard_pick_cart_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'pick carts cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF ROW(NEW.tenant_id,NEW.facility_id,NEW.barcode,NEW.name,
+      NEW.created_by_user_id,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.tenant_id,OLD.facility_id,OLD.barcode,OLD.name,
+      OLD.created_by_user_id,OLD.created_at)
+    OR NEW.revision<>OLD.revision+1
+    OR ROW(NEW.status_changed_by_user_id,NEW.status_changed_at)
+      IS NOT DISTINCT FROM ROW(OLD.status_changed_by_user_id,OLD.status_changed_at)
+    OR NOT ((OLD.status='active' AND NEW.status IN('out_of_service','retired'))
+      OR (OLD.status='out_of_service' AND NEW.status IN('active','retired'))) THEN
+    RAISE EXCEPTION 'invalid pick cart mutation' USING ERRCODE='55000';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.pick_clusters cluster
+    WHERE cluster.tenant_id=OLD.tenant_id AND cluster.facility_id=OLD.facility_id
+      AND cluster.cart_id=OLD.id AND cluster.status IN('planned','in_progress')) THEN
+    RAISE EXCEPTION 'pick cart has an active cluster' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_pick_cart_slot_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'pick cart slots are immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.guard_pick_cluster_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'pick clusters cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF ROW(NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,NEW.cart_id,
+      NEW.task_count,NEW.order_count,NEW.planned_by_user_id,NEW.planned_at)
+    IS DISTINCT FROM ROW(OLD.tenant_id,OLD.inventory_owner_id,OLD.facility_id,OLD.cart_id,
+      OLD.task_count,OLD.order_count,OLD.planned_by_user_id,OLD.planned_at)
+    OR NOT (
+      (OLD.status='planned' AND NEW.status='in_progress' AND NEW.revision=2
+        AND NEW.assigned_user_id IS NOT NULL AND NEW.started_at IS NOT NULL)
+      OR (OLD.status='planned' AND NEW.status='cancelled' AND NEW.revision=2
+        AND NEW.assigned_user_id IS NULL AND NEW.started_at IS NULL
+        AND NEW.cancelled_at IS NOT NULL AND NEW.cancellation_note IS NOT NULL)
+      OR (OLD.status='in_progress' AND NEW.status='completed' AND NEW.revision=3
+        AND NEW.assigned_user_id=OLD.assigned_user_id
+        AND NEW.started_at=OLD.started_at AND NEW.completed_at IS NOT NULL)
+      OR (OLD.status='in_progress' AND NEW.status='cancelled' AND NEW.revision=3
+        AND NEW.assigned_user_id=OLD.assigned_user_id
+        AND NEW.started_at=OLD.started_at AND NEW.cancelled_at IS NOT NULL
+        AND NEW.cancellation_note IS NOT NULL)
+    ) THEN
+    RAISE EXCEPTION 'invalid pick cluster mutation' USING ERRCODE='55000';
+  END IF;
+  IF OLD.status='planned' AND NEW.status='in_progress' AND NOT EXISTS(
+    SELECT 1 FROM public.pick_carts cart
+    WHERE cart.tenant_id=NEW.tenant_id AND cart.facility_id=NEW.facility_id
+      AND cart.id=NEW.cart_id AND cart.status='active'
+  ) THEN
+    RAISE EXCEPTION 'pick cluster cart is not active' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_pick_cluster_child_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'pick cluster plan evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.validate_pick_cluster_member() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE task_row public.pick_tasks%ROWTYPE;
+DECLARE source_barcode text;
+BEGIN
+  SELECT * INTO task_row FROM public.pick_tasks task
+  WHERE task.tenant_id=NEW.tenant_id AND task.inventory_owner_id=NEW.inventory_owner_id
+    AND task.facility_id=NEW.facility_id AND task.id=NEW.task_id FOR SHARE;
+  IF task_row.id IS NULL OR task_row.order_id<>NEW.order_id OR task_row.status<>'open'
+    OR task_row.assigned_user_id IS NOT NULL THEN
+    RAISE EXCEPTION 'pick cluster member task is not open in the requested scope'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(
+    SELECT 1 FROM public.pick_cluster_members member
+    JOIN public.pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+      AND cluster.id=member.cluster_id
+    WHERE member.tenant_id=NEW.tenant_id AND member.task_id=NEW.task_id
+      AND cluster.status IN('planned','in_progress')
+  ) THEN
+    RAISE EXCEPTION 'pick task already belongs to an active cluster'
+      USING ERRCODE='23514';
+  END IF;
+  SELECT location.barcode INTO source_barcode
+  FROM public.pick_task_contents content
+  JOIN public.locations location ON location.tenant_id=content.tenant_id
+    AND location.facility_id=content.facility_id AND location.id=content.source_location_id
+  WHERE content.tenant_id=NEW.tenant_id AND content.task_id=NEW.task_id
+    AND content.state='pending' AND location.deleted IS NULL AND location.active
+    AND location.pickable;
+  IF source_barcode IS NULL OR btrim(source_barcode)='' THEN
+    RAISE EXCEPTION 'pick cluster member source is not executable' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_pick_cluster_complete_plan() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE cluster_row public.pick_clusters%ROWTYPE;
+DECLARE cluster_id_value bigint;
+DECLARE actual_task_count bigint;
+DECLARE actual_order_count bigint;
+DECLARE invalid_sequence boolean;
+BEGIN
+  IF TG_TABLE_NAME='pick_clusters' THEN
+    cluster_id_value:=NEW.id;
+  ELSE
+    cluster_id_value:=NEW.cluster_id;
+  END IF;
+  SELECT * INTO cluster_row FROM public.pick_clusters cluster
+  WHERE cluster.tenant_id=NEW.tenant_id AND cluster.id=cluster_id_value;
+  SELECT COUNT(*),COUNT(DISTINCT member.order_id) INTO actual_task_count,actual_order_count
+  FROM public.pick_cluster_members member
+  WHERE member.tenant_id=NEW.tenant_id AND member.cluster_id=cluster_id_value;
+  SELECT EXISTS(
+    SELECT 1 FROM (
+      SELECT member.sequence,
+        row_number() OVER(ORDER BY lower(location.barcode),member.task_id) expected_sequence
+      FROM public.pick_cluster_members member
+      JOIN public.pick_task_contents content ON content.tenant_id=member.tenant_id
+        AND content.task_id=member.task_id
+      JOIN public.locations location ON location.tenant_id=content.tenant_id
+        AND location.facility_id=content.facility_id AND location.id=content.source_location_id
+      WHERE member.tenant_id=NEW.tenant_id AND member.cluster_id=cluster_id_value
+    ) ordered WHERE ordered.sequence<>ordered.expected_sequence
+  ) INTO invalid_sequence;
+  IF cluster_row.id IS NULL OR actual_task_count<>cluster_row.task_count
+    OR actual_order_count<>cluster_row.order_count OR actual_order_count<2
+    OR invalid_sequence THEN
+    RAISE EXCEPTION 'pick cluster plan is incomplete or not in canonical route order'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.require_pick_cart_slot_set() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE cart_id_value bigint;
+DECLARE slot_count bigint;
+BEGIN
+  IF TG_TABLE_NAME='pick_carts' THEN cart_id_value:=NEW.id;
+  ELSE cart_id_value:=NEW.cart_id; END IF;
+  SELECT COUNT(*) INTO slot_count FROM public.pick_cart_slots slot
+  WHERE slot.tenant_id=NEW.tenant_id AND slot.cart_id=cart_id_value;
+  IF slot_count<2 OR slot_count>48 THEN
+    RAISE EXCEPTION 'pick cart must contain between 2 and 48 immutable slots'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.require_cluster_reservation_on_pick_claim() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF OLD.status='open' AND NEW.status='cancelled' AND EXISTS(
+    SELECT 1 FROM public.pick_cluster_members member
+    JOIN public.pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+      AND cluster.id=member.cluster_id
+    WHERE member.tenant_id=NEW.tenant_id AND member.task_id=NEW.id
+      AND cluster.status IN('planned','in_progress')
+  ) THEN
+    RAISE EXCEPTION 'active pick cluster route must be cancelled before its task'
+      USING ERRCODE='23514';
+  END IF;
+  IF OLD.status='open' AND NEW.status='in_progress' AND EXISTS(
+    SELECT 1 FROM public.pick_cluster_members member
+    JOIN public.pick_clusters cluster ON cluster.tenant_id=member.tenant_id
+      AND cluster.id=member.cluster_id
+    WHERE member.tenant_id=NEW.tenant_id AND member.task_id=NEW.id
+      AND cluster.status IN('planned','in_progress')
+      AND NOT (cluster.status='in_progress'
+        AND cluster.assigned_user_id=NEW.assigned_user_id)
+  ) THEN
+    RAISE EXCEPTION 'cluster-reserved pick task must be claimed through its route'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reconcile_pick_cluster_task() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE cluster_id_value bigint;
+BEGIN
+  IF NEW.status NOT IN('completed','shorted','cancelled')
+    OR OLD.status IN('completed','shorted','cancelled') THEN RETURN NEW; END IF;
+  SELECT member.cluster_id INTO cluster_id_value
+  FROM public.pick_cluster_members member
+  WHERE member.tenant_id=NEW.tenant_id AND member.task_id=NEW.id;
+  IF cluster_id_value IS NULL OR EXISTS(
+    SELECT 1 FROM public.pick_cluster_members member
+    JOIN public.pick_tasks task ON task.tenant_id=member.tenant_id AND task.id=member.task_id
+    WHERE member.tenant_id=NEW.tenant_id AND member.cluster_id=cluster_id_value
+      AND task.status IN('open','in_progress')) THEN RETURN NEW; END IF;
+  UPDATE public.pick_clusters SET status='completed',revision=3,
+    completed_at=NEW.completed_at
+  WHERE tenant_id=NEW.tenant_id AND id=cluster_id_value
+    AND status='in_progress';
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER pick_carts_guard BEFORE UPDATE OR DELETE ON public.pick_carts
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_cart_mutation();
+CREATE TRIGGER pick_cart_slots_guard BEFORE UPDATE OR DELETE ON public.pick_cart_slots
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_cart_slot_mutation();
+CREATE TRIGGER pick_clusters_guard BEFORE UPDATE OR DELETE ON public.pick_clusters
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_cluster_mutation();
+CREATE TRIGGER pick_cluster_orders_guard BEFORE UPDATE OR DELETE ON public.pick_cluster_orders
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_cluster_child_mutation();
+CREATE TRIGGER pick_cluster_members_guard BEFORE UPDATE OR DELETE ON public.pick_cluster_members
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_cluster_child_mutation();
+CREATE TRIGGER pick_cluster_members_validate BEFORE INSERT ON public.pick_cluster_members
+FOR EACH ROW EXECUTE FUNCTION public.validate_pick_cluster_member();
+CREATE CONSTRAINT TRIGGER pick_cluster_members_complete
+AFTER INSERT ON public.pick_cluster_members DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_cluster_complete_plan();
+CREATE CONSTRAINT TRIGGER pick_clusters_complete
+AFTER INSERT ON public.pick_clusters DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_cluster_complete_plan();
+CREATE CONSTRAINT TRIGGER pick_carts_require_slots
+AFTER INSERT ON public.pick_carts DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_cart_slot_set();
+CREATE CONSTRAINT TRIGGER pick_cart_slots_require_set
+AFTER INSERT ON public.pick_cart_slots DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_cart_slot_set();
+CREATE TRIGGER pick_tasks_require_cluster_reservation
+BEFORE UPDATE OF status,assigned_user_id ON public.pick_tasks
+FOR EACH ROW EXECUTE FUNCTION public.require_cluster_reservation_on_pick_claim();
+CREATE TRIGGER pick_tasks_reconcile_cluster AFTER UPDATE OF status ON public.pick_tasks
+FOR EACH ROW EXECUTE FUNCTION public.reconcile_pick_cluster_task();
+
+ALTER TABLE public.pick_carts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_carts FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_carts_tenant_isolation ON public.pick_carts
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.pick_cart_slots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_cart_slots FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_cart_slots_tenant_isolation ON public.pick_cart_slots
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.pick_clusters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_clusters FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_clusters_tenant_isolation ON public.pick_clusters
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.pick_cluster_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_cluster_orders FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_cluster_orders_tenant_isolation ON public.pick_cluster_orders
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.pick_cluster_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_cluster_members FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_cluster_members_tenant_isolation ON public.pick_cluster_members
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT,UPDATE ON public.pick_carts TO wareboxes_app;
+GRANT SELECT,INSERT ON public.pick_cart_slots TO wareboxes_app;
+GRANT SELECT,INSERT,UPDATE ON public.pick_clusters TO wareboxes_app;
+GRANT SELECT,INSERT ON public.pick_cluster_orders TO wareboxes_app;
+GRANT SELECT,INSERT ON public.pick_cluster_members TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_carts_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_cart_slots_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_clusters_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_cluster_members_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.guard_pick_cart_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_pick_cart_slot_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_pick_cluster_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_pick_cluster_child_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_pick_cluster_member() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_pick_cluster_complete_plan() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_pick_cart_slot_set() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_cluster_reservation_on_pick_claim() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reconcile_pick_cluster_task() FROM PUBLIC;

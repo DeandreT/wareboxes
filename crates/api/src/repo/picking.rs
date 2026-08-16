@@ -1,6 +1,7 @@
 //! Typed RF picking claims and confirmations.
 
 mod claim;
+mod cluster;
 mod confirmation;
 mod lifecycle;
 mod policy;
@@ -12,6 +13,10 @@ mod shortage_read_model;
 mod shortage_reallocation;
 
 pub use claim::{claim_by_id, claim_next, current};
+pub use cluster::{
+    cancel as cancel_cluster, change_cart_status, claim_next as claim_next_cluster, create_cart,
+    plan as plan_cluster, workspace as cluster_workspace,
+};
 pub use confirmation::confirm_content;
 pub use lifecycle::{heartbeat, release_claim};
 pub(in crate::repo) use readiness::order_pick_readiness_tx;
