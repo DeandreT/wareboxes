@@ -27221,6 +27221,14 @@ CREATE TABLE public.shipment_documents (
     accepted_short_qty bigint NOT NULL,
     accepted_substitute_qty bigint NOT NULL,
     packed_qty bigint NOT NULL,
+    policy_source text NOT NULL,
+    policy_configuration_id bigint,
+    policy_configuration_revision bigint,
+    policy_scope_level text,
+    policy_inventory_owner_id bigint,
+    policy_facility_id bigint,
+    policy_definition jsonb NOT NULL,
+    policy_hash text NOT NULL,
     content text NOT NULL,
     content_length bigint NOT NULL,
     content_sha256 bytea NOT NULL,
@@ -27228,12 +27236,57 @@ CREATE TABLE public.shipment_documents (
     generated_at timestamp with time zone NOT NULL,
     CONSTRAINT shipment_documents_type_check CHECK (
         (document_type = 'packing_slip'
-         AND carrier_manifest_id IS NULL AND carrier_code IS NULL
-         AND service_code IS NULL AND manifest_reference IS NULL)
+         AND (
+           ((policy_definition->>'require_tracking_barcode')::boolean
+             AND carrier_manifest_id IS NOT NULL AND carrier_code IS NOT NULL
+             AND manifest_reference IS NOT NULL)
+           OR
+           (NOT (policy_definition->>'require_tracking_barcode')::boolean
+             AND carrier_manifest_id IS NULL AND carrier_code IS NULL
+             AND service_code IS NULL AND manifest_reference IS NULL)))
         OR
         (document_type = 'carton_label_set'
          AND carrier_manifest_id IS NOT NULL AND carrier_code IS NOT NULL
          AND manifest_reference IS NOT NULL)),
+    CONSTRAINT shipment_documents_policy_source_check CHECK (
+        policy_source IN ('product_default','configuration')),
+    CONSTRAINT shipment_documents_policy_hash_check CHECK (
+        policy_hash~'^[0-9a-f]{64}$'),
+    CONSTRAINT shipment_documents_policy_definition_check CHECK (
+        policy_definition ?& ARRAY[
+          'kind','generate_packing_slip','generate_carton_label','require_tracking_barcode']
+        AND policy_definition-ARRAY[
+          'kind','generate_packing_slip','generate_carton_label','require_tracking_barcode']
+          ='{}'::jsonb
+        AND policy_definition->>'kind'='document'
+        AND jsonb_typeof(policy_definition->'generate_packing_slip')='boolean'
+        AND jsonb_typeof(policy_definition->'generate_carton_label')='boolean'
+        AND jsonb_typeof(policy_definition->'require_tracking_barcode')='boolean'
+        AND ((document_type='packing_slip'
+              AND (policy_definition->>'generate_packing_slip')::boolean)
+          OR (document_type='carton_label_set'
+              AND (policy_definition->>'generate_carton_label')::boolean))),
+    CONSTRAINT shipment_documents_policy_identity_check CHECK (
+        (policy_source='product_default'
+          AND policy_configuration_id IS NULL
+          AND policy_configuration_revision IS NULL
+          AND policy_scope_level IS NULL
+          AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NULL
+          AND policy_definition=jsonb_build_object(
+            'kind','document','generate_packing_slip',true,
+            'generate_carton_label',true,'require_tracking_barcode',false))
+        OR
+        (policy_source='configuration'
+          AND policy_configuration_id IS NOT NULL
+          AND policy_configuration_revision>0
+          AND ((policy_scope_level='tenant'
+                AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='inventory_owner'
+                AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NULL)
+            OR (policy_scope_level='facility'
+                AND policy_inventory_owner_id IS NULL AND policy_facility_id IS NOT NULL)
+            OR (policy_scope_level='owner_facility'
+                AND policy_inventory_owner_id IS NOT NULL AND policy_facility_id IS NOT NULL)))),
     CONSTRAINT shipment_documents_carrier_check CHECK (
         carrier_code IS NULL OR
         (carrier_code = btrim(carrier_code) AND carrier_code <> '' AND char_length(carrier_code) <= 100)),
@@ -27396,6 +27449,9 @@ ALTER TABLE public.shipment_document_cartons
 
 CREATE INDEX shipment_documents_shipment_idx
 ON public.shipment_documents (tenant_id, shipment_id, generated_at, id);
+CREATE INDEX shipment_documents_policy_idx
+ON public.shipment_documents (tenant_id, policy_configuration_id, generated_at, id)
+WHERE policy_configuration_id IS NOT NULL;
 CREATE INDEX shipment_document_lines_document_idx
 ON public.shipment_document_lines (tenant_id, shipment_document_id, sequence, id);
 CREATE INDEX shipment_document_cartons_document_idx
@@ -27417,9 +27473,73 @@ AS $$
 DECLARE
     shipment_row public.shipments%ROWTYPE;
     manifest_row public.shipment_manifests%ROWTYPE;
+    configuration_row record;
     demand_row record;
     actual_carton_count bigint;
+    resolved_configuration_id bigint;
+    calculated_hash text;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(format(
+      'configuration-kind:%s:document',NEW.tenant_id),0));
+    calculated_hash:=encode(sha256(convert_to(
+      'document-policy-v1|'||(NEW.policy_definition->>'generate_packing_slip')||'|'||
+      (NEW.policy_definition->>'generate_carton_label')||'|'||
+      (NEW.policy_definition->>'require_tracking_barcode'),'UTF8')),'hex');
+    IF NEW.policy_hash<>calculated_hash THEN
+        RAISE EXCEPTION 'shipment document policy hash does not match its snapshot'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT configuration.id INTO resolved_configuration_id
+    FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.kind='document' AND configuration.status='active'
+      AND configuration.effective_from<=NEW.generated_at
+      AND (configuration.effective_until IS NULL
+           OR configuration.effective_until>NEW.generated_at)
+      AND (configuration.inventory_owner_id IS NULL
+           OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+      AND (configuration.facility_id IS NULL
+           OR configuration.facility_id=NEW.facility_id)
+    ORDER BY CASE configuration.scope_level
+               WHEN 'owner_facility' THEN 2
+               WHEN 'inventory_owner' THEN 1
+               WHEN 'facility' THEN 1
+               ELSE 0 END DESC,
+             configuration.effective_from DESC,
+             configuration.revision DESC,configuration.id DESC
+    LIMIT 1;
+    IF NEW.policy_source='product_default' THEN
+        IF resolved_configuration_id IS NOT NULL THEN
+            RAISE EXCEPTION 'shipment document product default is not effective'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        SELECT * INTO configuration_row
+        FROM public.configuration_versions configuration
+        WHERE configuration.tenant_id=NEW.tenant_id
+          AND configuration.id=NEW.policy_configuration_id;
+        IF configuration_row.id IS NULL
+           OR configuration_row.kind<>'document'
+           OR configuration_row.status<>'active'
+           OR configuration_row.revision<>NEW.policy_configuration_revision
+           OR configuration_row.scope_level<>NEW.policy_scope_level
+           OR configuration_row.inventory_owner_id
+                IS DISTINCT FROM NEW.policy_inventory_owner_id
+           OR configuration_row.facility_id IS DISTINCT FROM NEW.policy_facility_id
+           OR configuration_row.definition<>NEW.policy_definition
+           OR configuration_row.effective_from>NEW.generated_at
+           OR (configuration_row.effective_until IS NOT NULL
+               AND configuration_row.effective_until<=NEW.generated_at)
+           OR (configuration_row.inventory_owner_id IS NOT NULL
+               AND configuration_row.inventory_owner_id<>NEW.inventory_owner_id)
+           OR (configuration_row.facility_id IS NOT NULL
+               AND configuration_row.facility_id<>NEW.facility_id)
+           OR resolved_configuration_id IS DISTINCT FROM NEW.policy_configuration_id
+        THEN
+            RAISE EXCEPTION 'shipment document policy is stale or inapplicable'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
     SELECT * INTO shipment_row
     FROM public.shipments
     WHERE tenant_id = NEW.tenant_id
@@ -27433,11 +27553,16 @@ BEGIN
     IF shipment_row.revision <> NEW.shipment_revision_at_generation THEN
         RAISE EXCEPTION 'shipment revision changed before document generation' USING ERRCODE = '55000';
     END IF;
+    IF shipment_row.state='cancelled' THEN
+        RAISE EXCEPTION 'cancelled shipments cannot generate documents' USING ERRCODE = '55000';
+    END IF;
     IF NEW.document_type = 'carton_label_set' THEN
         IF shipment_row.state <> 'manifested' THEN
             RAISE EXCEPTION 'carton labels require a manifested shipment before departure'
                 USING ERRCODE = '55000';
         END IF;
+    END IF;
+    IF NEW.carrier_manifest_id IS NOT NULL THEN
         SELECT * INTO manifest_row
         FROM public.shipment_manifests
         WHERE tenant_id = NEW.tenant_id
@@ -27446,12 +27571,13 @@ BEGIN
           AND shipment_id = NEW.shipment_id
           AND id = NEW.carrier_manifest_id;
         IF NOT FOUND
-           OR manifest_row.resulting_revision <> NEW.shipment_revision_at_generation
+           OR (NEW.document_type='carton_label_set'
+               AND manifest_row.resulting_revision <> NEW.shipment_revision_at_generation)
            OR manifest_row.carrier <> NEW.carrier_code
            OR manifest_row.service IS DISTINCT FROM NEW.service_code
            OR manifest_row.manifest_number <> NEW.manifest_reference
         THEN
-            RAISE EXCEPTION 'carton-label document manifest does not match shipment'
+            RAISE EXCEPTION 'shipment document manifest does not match shipment'
                 USING ERRCODE = '23514';
         END IF;
     END IF;
@@ -27531,8 +27657,10 @@ BEGIN
        OR NEW.width_mm IS DISTINCT FROM source_row.width_mm
        OR NEW.height_mm IS DISTINCT FROM source_row.height_mm
        OR (document_row.document_type = 'packing_slip'
+           AND NOT (document_row.policy_definition->>'require_tracking_barcode')::boolean
            AND (NEW.tracking_assignment_id IS NOT NULL OR NEW.tracking_number IS NOT NULL))
-       OR (document_row.document_type = 'carton_label_set'
+       OR ((document_row.document_type = 'carton_label_set'
+            OR (document_row.policy_definition->>'require_tracking_barcode')::boolean)
            AND (source_row.tracking_assignment_id IS NULL
                 OR NEW.tracking_assignment_id IS DISTINCT FROM source_row.tracking_assignment_id
                 OR NEW.tracking_number IS DISTINCT FROM source_row.tracking_number))
@@ -40886,6 +41014,11 @@ REVOKE ALL ON FUNCTION public.guard_configuration_version_mutation() FROM PUBLIC
 
 ALTER TABLE public.order_allocation_runs
 ADD CONSTRAINT order_allocation_runs_policy_configuration_fkey
+FOREIGN KEY (tenant_id,policy_configuration_id)
+REFERENCES public.configuration_versions(tenant_id,id);
+
+ALTER TABLE public.shipment_documents
+ADD CONSTRAINT shipment_documents_policy_configuration_fkey
 FOREIGN KEY (tenant_id,policy_configuration_id)
 REFERENCES public.configuration_versions(tenant_id,id);
 

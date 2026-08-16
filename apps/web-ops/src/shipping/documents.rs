@@ -1,7 +1,10 @@
 use leptos::prelude::*;
+#[cfg(test)]
+use wareboxes_api_contract::v1::PRODUCT_DEFAULT_DOCUMENT_POLICY_HASH;
 use wareboxes_api_contract::v1::{
-    GenerateCartonLabelSetRequest, GeneratePackingSlipRequest, Revision, ShipmentDocumentResponse,
-    ShipmentDocumentType, ShipmentStatus,
+    DocumentPolicyResponse, DocumentPolicySource, GenerateCartonLabelSetRequest,
+    GeneratePackingSlipRequest, Revision, ShipmentDocumentResponse, ShipmentDocumentType,
+    ShipmentStatus,
 };
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::{
@@ -31,24 +34,38 @@ pub(super) fn ShipmentDocumentsPanel(
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let documents = RwSignal::new(Vec::<ShipmentDocumentResponse>::new());
+    let policy = RwSignal::new(None::<DocumentPolicyResponse>);
     let loading = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let retry = RwSignal::new(None::<PendingGeneration>);
 
     #[cfg(target_arch = "wasm32")]
     Effect::new(move |_| {
-        refresh_documents(shipment_id, documents, loading, error, on_unauthorized)
+        refresh_documents(
+            shipment_id,
+            policy,
+            documents,
+            loading,
+            error,
+            on_unauthorized,
+        )
     });
 
     let generate_packing_slip = Callback::new(move |_| {
+        let Some(expected_policy) = policy.get_untracked().map(|current| current.expectation())
+        else {
+            return;
+        };
         dispatch_generation(
             shipment_id,
             PendingGeneration::PackingSlip {
                 request: GeneratePackingSlipRequest {
                     expected_shipment_revision: shipment_revision,
+                    expected_policy,
                 },
                 idempotency_key: api::new_idempotency_key(),
             },
+            policy,
             documents,
             loading,
             error,
@@ -57,14 +74,20 @@ pub(super) fn ShipmentDocumentsPanel(
         );
     });
     let generate_carton_labels = Callback::new(move |_| {
+        let Some(expected_policy) = policy.get_untracked().map(|current| current.expectation())
+        else {
+            return;
+        };
         dispatch_generation(
             shipment_id,
             PendingGeneration::CartonLabelSet {
                 request: GenerateCartonLabelSetRequest {
                     expected_shipment_revision: shipment_revision,
+                    expected_policy,
                 },
                 idempotency_key: api::new_idempotency_key(),
             },
+            policy,
             documents,
             loading,
             error,
@@ -77,6 +100,7 @@ pub(super) fn ShipmentDocumentsPanel(
             dispatch_generation(
                 shipment_id,
                 command,
+                policy,
                 documents,
                 loading,
                 error,
@@ -89,10 +113,10 @@ pub(super) fn ShipmentDocumentsPanel(
     view! {
         <div class="shipping-documents" aria-label="Shipment documents">
             <div class="shipping-documents-heading">
-                <div><h3>"Documents"</h3><span>{move || document_count_label(documents.get().len())}</span></div>
+                <div><h3>"Documents"</h3><span>{move || format!("{} · {}",document_count_label(documents.get().len()),policy.get().as_ref().map_or_else(|| "policy loading".to_owned(),policy_label))}</span></div>
                 <div class="shipping-document-actions">
                     <Show when=move || loading.get()><span class="status pending">"Working"</span></Show>
-                    <Show when=move || !has_document(documents.get(), ShipmentDocumentType::PackingSlip)>
+                    <Show when=move || policy.get().is_some_and(|current| current.generate_packing_slip) && !has_document(documents.get(), ShipmentDocumentType::PackingSlip)>
                         <button
                             type="button"
                             class="button secondary-action"
@@ -103,7 +127,7 @@ pub(super) fn ShipmentDocumentsPanel(
                             "Packing slip"
                         </button>
                     </Show>
-                    <Show when=move || matches!(shipment_status, ShipmentStatus::Manifested) && !has_document(documents.get(), ShipmentDocumentType::CartonLabelSet)>
+                    <Show when=move || policy.get().is_some_and(|current| current.generate_carton_label) && matches!(shipment_status, ShipmentStatus::Manifested) && !has_document(documents.get(), ShipmentDocumentType::CartonLabelSet)>
                         <button
                             type="button"
                             class="button secondary-action"
@@ -139,7 +163,7 @@ pub(super) fn ShipmentDocumentsPanel(
                     view! {
                         <div class="shipping-document-row">
                             <span class="shipping-document-name"><strong>{name}</strong><small>{summary}</small></span>
-                            <span class="shipping-document-meta">{generated}</span>
+                            <span class="shipping-document-meta">{format!("{} · {}",generated,policy_label(&document.policy))}</span>
                             <a
                                 class="icon-button"
                                 href=href
@@ -158,6 +182,7 @@ pub(super) fn ShipmentDocumentsPanel(
 #[cfg(target_arch = "wasm32")]
 fn refresh_documents(
     shipment_id: i64,
+    policy: RwSignal<Option<DocumentPolicyResponse>>,
     documents: RwSignal<Vec<ShipmentDocumentResponse>>,
     loading: RwSignal<bool>,
     error: RwSignal<Option<String>>,
@@ -169,6 +194,7 @@ fn refresh_documents(
             .await
         {
             Ok(result) => {
+                policy.set(Some(result.policy));
                 documents.set(result.documents);
                 error.set(None);
             }
@@ -188,6 +214,7 @@ fn refresh_documents(
 fn dispatch_generation(
     shipment_id: i64,
     command: PendingGeneration,
+    policy: RwSignal<Option<DocumentPolicyResponse>>,
     documents: RwSignal<Vec<ShipmentDocumentResponse>>,
     loading: RwSignal<bool>,
     error: RwSignal<Option<String>>,
@@ -239,7 +266,14 @@ fn dispatch_generation(
                 retry.set(api_error.ambiguous_outcome.then_some(retained));
                 error.set(Some(api_error.message));
                 if !api_error.ambiguous_outcome && !api_error.unauthorized {
-                    refresh_documents(shipment_id, documents, loading, error, on_unauthorized);
+                    refresh_documents(
+                        shipment_id,
+                        policy,
+                        documents,
+                        loading,
+                        error,
+                        on_unauthorized,
+                    );
                     return;
                 }
             }
@@ -253,6 +287,7 @@ fn dispatch_generation(
 fn dispatch_generation(
     _shipment_id: i64,
     _command: PendingGeneration,
+    _policy: RwSignal<Option<DocumentPolicyResponse>>,
     _documents: RwSignal<Vec<ShipmentDocumentResponse>>,
     _loading: RwSignal<bool>,
     _error: RwSignal<Option<String>>,
@@ -329,6 +364,36 @@ fn document_display(document: &ShipmentDocumentResponse) -> (&'static str, Strin
 }
 
 #[cfg(test)]
+fn product_default_policy() -> DocumentPolicyResponse {
+    DocumentPolicyResponse {
+        source: DocumentPolicySource::ProductDefault,
+        configuration_id: None,
+        configuration_revision: None,
+        configuration_scope: None,
+        generate_packing_slip: true,
+        generate_carton_label: true,
+        require_tracking_barcode: false,
+        policy_hash: PRODUCT_DEFAULT_DOCUMENT_POLICY_HASH.to_owned(),
+    }
+}
+
+fn policy_label(policy: &DocumentPolicyResponse) -> String {
+    let source = match policy.source {
+        DocumentPolicySource::ProductDefault => "product default".to_owned(),
+        DocumentPolicySource::Configuration => format!(
+            "configuration #{} r{}",
+            policy.configuration_id.unwrap_or_default(),
+            policy.configuration_revision.unwrap_or_default()
+        ),
+    };
+    if policy.require_tracking_barcode {
+        format!("{source} · tracking required")
+    } else {
+        source
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -350,5 +415,20 @@ mod tests {
         assert_eq!(document_count_label(0), "Not generated");
         assert_eq!(document_count_label(1), "1 retained document");
         assert_eq!(compact_generated_at("2026-08-08T22:00:00Z"), "2026-08-08");
+        let default = product_default_policy();
+        assert_eq!(policy_label(&default), "product default");
+        assert_eq!(
+            default.expectation().policy_hash,
+            PRODUCT_DEFAULT_DOCUMENT_POLICY_HASH
+        );
+        let mut configured = default;
+        configured.source = DocumentPolicySource::Configuration;
+        configured.configuration_id = Some(17);
+        configured.configuration_revision = Some(4);
+        configured.require_tracking_barcode = true;
+        assert_eq!(
+            policy_label(&configured),
+            "configuration #17 r4 · tracking required"
+        );
     }
 }

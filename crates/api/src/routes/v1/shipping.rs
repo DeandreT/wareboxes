@@ -3,29 +3,33 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, Response};
 use axum::Json;
 use wareboxes_api_contract::v1::{
-    CancelShipmentRequest, CancelShipmentResponse, ConfirmShipmentDepartureRequest,
-    ConfirmShipmentDepartureResponse, CreateShipmentRequest, CreateShipmentResponse,
-    GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse, GeneratePackingSlipRequest,
-    GeneratePackingSlipResponse, ManualCarrierManifestResponse, RecordManualManifestRequest,
-    RecordManualManifestResponse, Revision,
-    ShipmentCancellationReason as ApiShipmentCancellationReason, ShipmentCancellationResponse,
-    ShipmentCartonResponse, ShipmentCartonTrackingResponse, ShipmentDemandResponse,
-    ShipmentDepartureProgressResponse, ShipmentDocumentListResponse, ShipmentDocumentResponse,
-    ShipmentDocumentType as ApiShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse,
-    ShipmentStatus as ApiShipmentStatus,
+    CancelShipmentRequest, CancelShipmentResponse, ConfigurationScope as ApiConfigurationScope,
+    ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
+    CreateShipmentResponse, DocumentPolicyExpectation as ApiDocumentPolicyExpectation,
+    DocumentPolicyResponse as ApiDocumentPolicyResponse,
+    DocumentPolicySource as ApiDocumentPolicySource, GenerateCartonLabelSetRequest,
+    GenerateCartonLabelSetResponse, GeneratePackingSlipRequest, GeneratePackingSlipResponse,
+    ManualCarrierManifestResponse, RecordManualManifestRequest, RecordManualManifestResponse,
+    Revision, ShipmentCancellationReason as ApiShipmentCancellationReason,
+    ShipmentCancellationResponse, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
+    ShipmentDemandResponse, ShipmentDepartureProgressResponse, ShipmentDocumentListResponse,
+    ShipmentDocumentResponse, ShipmentDocumentType as ApiShipmentDocumentType, ShipmentOrderStatus,
+    ShipmentResponse, ShipmentStatus as ApiShipmentStatus,
 };
 use wareboxes_application::shipping::{
     CancelShipmentCommand, CancelShipmentResult, ConfirmShipmentDepartureCommand,
     ConfirmShipmentDepartureResult, CreateShipmentCommand, CreateShipmentResult,
+    DocumentPolicyExpectation, DocumentPolicyReadModel, DocumentPolicySource,
     GenerateCartonLabelSetCommand, GeneratePackingSlipCommand, ManualCarrierManifestReadModel,
     RecordManualManifestCommand, RecordManualManifestResult, ShipmentDocumentContentQuery,
     ShipmentDocumentListQuery, ShipmentDocumentReadModel, ShipmentQuery, ShipmentReadModel,
 };
 use wareboxes_domain::{
-    CarrierCode, CarrierServiceCode, CartonId, CartonTrackingAssignment, ManifestReference,
-    OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentCancellationDetails,
-    ShipmentCancellationNote, ShipmentCancellationReason, ShipmentDocumentId, ShipmentDocumentType,
-    ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus, TrackingNumber,
+    CarrierCode, CarrierServiceCode, CartonId, CartonTrackingAssignment, ConfigurationScope,
+    ConfigurationVersionId, ManifestReference, OrderId, OrderRevision, OrderStatus, PackSessionId,
+    ShipmentCancellationDetails, ShipmentCancellationNote, ShipmentCancellationReason,
+    ShipmentDocumentId, ShipmentDocumentType, ShipmentId, ShipmentRevision, ShipmentScanValue,
+    ShipmentStatus, TrackingNumber,
 };
 
 use super::error::{V1Error, V1Result};
@@ -175,6 +179,7 @@ pub async fn generate_packing_slip(
     let command = GeneratePackingSlipCommand {
         shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
         expected_revision: shipment_revision(body.expected_shipment_revision)?,
+        expected_policy: map_policy_expectation(body.expected_policy)?,
     };
     let context = user.command_context(&idempotency_key);
     let result =
@@ -195,6 +200,7 @@ pub async fn generate_carton_label_set(
     let command = GenerateCartonLabelSetCommand {
         shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
         expected_revision: shipment_revision(body.expected_shipment_revision)?,
+        expected_policy: map_policy_expectation(body.expected_policy)?,
     };
     let context = user.command_context(&idempotency_key);
     let result =
@@ -211,7 +217,7 @@ pub async fn list_documents(
     Path(shipment_id): Path<i64>,
 ) -> V1Result<Json<ShipmentDocumentListResponse>> {
     user.require_permission(&state.db, PERMISSION).await?;
-    let documents = repo::shipping::list_documents(
+    let result = repo::shipping::list_documents(
         &state.db,
         &user.tenant,
         ShipmentDocumentListQuery {
@@ -220,7 +226,9 @@ pub async fn list_documents(
     )
     .await?;
     Ok(Json(ShipmentDocumentListResponse {
-        documents: documents
+        policy: map_policy(result.policy),
+        documents: result
+            .documents
             .into_iter()
             .map(map_document)
             .collect::<V1Result<Vec<_>>>()?,
@@ -417,9 +425,65 @@ fn map_document(document: ShipmentDocumentReadModel) -> V1Result<ShipmentDocumen
         carton_count: document.carton_count,
         line_count: document.line_count,
         demand: map_demand(document.demand),
+        policy: map_policy(document.policy),
         generated_by: document.generated_by.get(),
         generated_at: document.generated_at.to_rfc3339(),
     })
+}
+
+fn map_policy_expectation(
+    value: ApiDocumentPolicyExpectation,
+) -> V1Result<DocumentPolicyExpectation> {
+    let expectation = DocumentPolicyExpectation {
+        source: match value.source {
+            ApiDocumentPolicySource::ProductDefault => DocumentPolicySource::ProductDefault,
+            ApiDocumentPolicySource::Configuration => DocumentPolicySource::Configuration,
+        },
+        configuration_id: value
+            .configuration_id
+            .map(|id| positive(id, ConfigurationVersionId::new, "configuration ID"))
+            .transpose()?,
+        configuration_revision: value.configuration_revision,
+        policy_hash: value.policy_hash,
+    };
+    if expectation.is_well_formed() {
+        Ok(expectation)
+    } else {
+        Err(AppError::bad_request("document policy expectation is invalid").into())
+    }
+}
+
+fn map_policy(value: DocumentPolicyReadModel) -> ApiDocumentPolicyResponse {
+    ApiDocumentPolicyResponse {
+        source: match value.source {
+            DocumentPolicySource::ProductDefault => ApiDocumentPolicySource::ProductDefault,
+            DocumentPolicySource::Configuration => ApiDocumentPolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id.map(|id| id.get()),
+        configuration_revision: value.configuration_revision,
+        configuration_scope: value.configuration_scope.map(|scope| match scope {
+            ConfigurationScope::Tenant => ApiConfigurationScope::Tenant,
+            ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                ApiConfigurationScope::InventoryOwner {
+                    inventory_owner_id: inventory_owner_id.get(),
+                }
+            }
+            ConfigurationScope::Facility { facility_id } => ApiConfigurationScope::Facility {
+                facility_id: facility_id.get(),
+            },
+            ConfigurationScope::OwnerFacility {
+                inventory_owner_id,
+                facility_id,
+            } => ApiConfigurationScope::OwnerFacility {
+                inventory_owner_id: inventory_owner_id.get(),
+                facility_id: facility_id.get(),
+            },
+        }),
+        generate_packing_slip: value.generate_packing_slip,
+        generate_carton_label: value.generate_carton_label,
+        require_tracking_barcode: value.require_tracking_barcode,
+        policy_hash: value.policy_hash,
+    }
 }
 
 const fn map_demand(demand: wareboxes_domain::ShortShipDemandQuantities) -> ShipmentDemandResponse {

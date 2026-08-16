@@ -3,6 +3,7 @@
 mod cancellation;
 mod creation;
 mod departure;
+mod document_policy;
 mod documents;
 mod manifest;
 mod queue;

@@ -423,13 +423,14 @@ pub use service_account::{
 pub use shipping::{
     CancelShipmentRequest, CancelShipmentResponse, ConfirmShipmentDepartureRequest,
     ConfirmShipmentDepartureResponse, CreateShipmentRequest, CreateShipmentResponse,
+    DocumentPolicyExpectation, DocumentPolicyResponse, DocumentPolicySource,
     GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse, GeneratePackingSlipRequest,
     GeneratePackingSlipResponse, ManualCarrierManifestResponse, ManualCartonTrackingRequest,
     RecordManualManifestRequest, RecordManualManifestResponse, ShipmentCancellationReason,
     ShipmentCancellationResponse, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
     ShipmentDemandResponse, ShipmentDepartureProgressResponse, ShipmentDocumentListResponse,
     ShipmentDocumentResponse, ShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse,
-    ShipmentStatus,
+    ShipmentStatus, PRODUCT_DEFAULT_DOCUMENT_POLICY_HASH,
 };
 pub use shipping_queue::{
     ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,

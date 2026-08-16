@@ -1,13 +1,14 @@
 //! Application contracts for parcel shipment execution.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use wareboxes_domain::{
     CarrierCode, CarrierManifestId, CarrierServiceCode, CartonId, CartonTrackingAssignment,
-    FacilityId, InventoryOwnerId, ManifestReference, OrderId, OrderLineId, OrderRevision,
-    OrderStatus, PackSessionId, ShipmentCancellationDetails, ShipmentCancellationId,
-    ShipmentDocumentId, ShipmentDocumentType, ShipmentId, ShipmentRevision, ShipmentScanValue,
-    ShipmentStatus, ShipmentTrackingAssignmentId, ShortShipDemandQuantities, Timestamp,
-    TrackingNumber, UserId,
+    ConfigurationScope, ConfigurationVersionId, FacilityId, InventoryOwnerId, ManifestReference,
+    OrderId, OrderLineId, OrderRevision, OrderStatus, PackSessionId, ShipmentCancellationDetails,
+    ShipmentCancellationId, ShipmentDocumentId, ShipmentDocumentType, ShipmentId, ShipmentRevision,
+    ShipmentScanValue, ShipmentStatus, ShipmentTrackingAssignmentId, ShortShipDemandQuantities,
+    Timestamp, TrackingNumber, UserId,
 };
 
 pub const CREATE_SHIPMENT_OPERATION: &str = "shipping.shipment.create.v1";
@@ -18,24 +19,134 @@ pub const GENERATE_PACKING_SLIP_OPERATION: &str = "shipping.document.packing_sli
 pub const GENERATE_CARTON_LABEL_SET_OPERATION: &str =
     "shipping.document.carton_label_set.generate.v1";
 
-/// Generates one immutable packing slip at the observed shipment revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentPolicyExpectation {
+    pub source: DocumentPolicySource,
+    pub configuration_id: Option<ConfigurationVersionId>,
+    pub configuration_revision: Option<i64>,
+    pub policy_hash: String,
+}
+
+impl DocumentPolicyExpectation {
+    pub fn is_well_formed(&self) -> bool {
+        let identity_is_valid = match self.source {
+            DocumentPolicySource::ProductDefault => {
+                self.configuration_id.is_none() && self.configuration_revision.is_none()
+            }
+            DocumentPolicySource::Configuration => {
+                self.configuration_id.is_some()
+                    && self
+                        .configuration_revision
+                        .is_some_and(|revision| revision > 0)
+            }
+        };
+        identity_is_valid
+            && self.policy_hash.len() == 64
+            && self
+                .policy_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentPolicyReadModel {
+    pub source: DocumentPolicySource,
+    pub configuration_id: Option<ConfigurationVersionId>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub generate_packing_slip: bool,
+    pub generate_carton_label: bool,
+    pub require_tracking_barcode: bool,
+    pub policy_hash: String,
+}
+
+impl DocumentPolicyReadModel {
+    pub fn product_default() -> Self {
+        let generate_packing_slip = true;
+        let generate_carton_label = true;
+        let require_tracking_barcode = false;
+        Self {
+            source: DocumentPolicySource::ProductDefault,
+            configuration_id: None,
+            configuration_revision: None,
+            configuration_scope: None,
+            generate_packing_slip,
+            generate_carton_label,
+            require_tracking_barcode,
+            policy_hash: document_policy_hash(
+                generate_packing_slip,
+                generate_carton_label,
+                require_tracking_barcode,
+            ),
+        }
+    }
+
+    pub fn expectation(&self) -> DocumentPolicyExpectation {
+        DocumentPolicyExpectation {
+            source: self.source,
+            configuration_id: self.configuration_id,
+            configuration_revision: self.configuration_revision,
+            policy_hash: self.policy_hash.clone(),
+        }
+    }
+
+    pub fn matches_expectation(&self, expected: &DocumentPolicyExpectation) -> bool {
+        expected.is_well_formed() && self.expectation() == *expected
+    }
+
+    pub const fn permits(&self, document_type: ShipmentDocumentType) -> bool {
+        match document_type {
+            ShipmentDocumentType::PackingSlip => self.generate_packing_slip,
+            ShipmentDocumentType::CartonLabelSet => self.generate_carton_label,
+        }
+    }
+}
+
+pub fn document_policy_hash(
+    generate_packing_slip: bool,
+    generate_carton_label: bool,
+    require_tracking_barcode: bool,
+) -> String {
+    let canonical = format!(
+        "document-policy-v1|{generate_packing_slip}|{generate_carton_label}|{require_tracking_barcode}"
+    );
+    hex::encode(Sha256::digest(canonical.as_bytes()))
+}
+
+/// Generates one immutable packing slip at the observed shipment revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratePackingSlipCommand {
     pub shipment_id: ShipmentId,
     pub expected_revision: ShipmentRevision,
+    pub expected_policy: DocumentPolicyExpectation,
 }
 
 /// Generates one immutable printable label set from a manifested shipment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerateCartonLabelSetCommand {
     pub shipment_id: ShipmentId,
     pub expected_revision: ShipmentRevision,
+    pub expected_policy: DocumentPolicyExpectation,
 }
 
 /// Lists immutable documents belonging to one visible shipment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShipmentDocumentListQuery {
     pub shipment_id: ShipmentId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipmentDocumentListReadModel {
+    pub policy: DocumentPolicyReadModel,
+    pub documents: Vec<ShipmentDocumentReadModel>,
 }
 
 /// Reads one immutable document and its retained content.
@@ -77,6 +188,7 @@ pub struct ShipmentDocumentReadModel {
     pub carton_count: i64,
     pub line_count: i64,
     pub demand: ShortShipDemandQuantities,
+    pub policy: DocumentPolicyReadModel,
     pub generated_by: UserId,
     pub generated_at: Timestamp,
 }
@@ -527,6 +639,24 @@ mod tests {
         };
         assert_eq!(cancellation.expected_shipment_revision, shipment_revision);
         assert_eq!(cancellation.expected_order_revision, order_revision);
+    }
+
+    #[test]
+    fn document_policy_default_and_hash_are_stable() {
+        let policy = DocumentPolicyReadModel::product_default();
+        assert_eq!(policy.source, DocumentPolicySource::ProductDefault);
+        assert!(policy.generate_packing_slip);
+        assert!(policy.generate_carton_label);
+        assert!(!policy.require_tracking_barcode);
+        assert_eq!(
+            policy.policy_hash,
+            "8fa715da98b8dc84175d61bdadddfd29318e7dfe43e36568bb052d0583c1df24"
+        );
+        assert!(policy.matches_expectation(&policy.expectation()));
+
+        let mut stale = policy.expectation();
+        stale.policy_hash = "0".repeat(64);
+        assert!(!policy.matches_expectation(&stale));
     }
 
     #[test]

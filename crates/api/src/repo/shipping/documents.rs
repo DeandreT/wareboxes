@@ -2,16 +2,17 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::shipping::{
-    GenerateCartonLabelSetCommand, GenerateCartonLabelSetResult, GeneratePackingSlipCommand,
-    GeneratePackingSlipResult, ShipmentDocumentContentQuery, ShipmentDocumentContentReadModel,
-    ShipmentDocumentListQuery, ShipmentDocumentReadModel, GENERATE_CARTON_LABEL_SET_OPERATION,
+    DocumentPolicyReadModel, DocumentPolicySource, GenerateCartonLabelSetCommand,
+    GenerateCartonLabelSetResult, GeneratePackingSlipCommand, GeneratePackingSlipResult,
+    ShipmentDocumentContentQuery, ShipmentDocumentContentReadModel, ShipmentDocumentListQuery,
+    ShipmentDocumentListReadModel, ShipmentDocumentReadModel, GENERATE_CARTON_LABEL_SET_OPERATION,
     GENERATE_PACKING_SLIP_OPERATION,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     ActualPickQuantity, CarrierCode, CarrierManifestId, CarrierServiceCode, CatalogItemId,
-    ManifestReference, OrderId, OrderLineId, PickQuantity, ShipmentDocumentId,
+    ConfigurationScope, ManifestReference, OrderId, OrderLineId, PickQuantity, ShipmentDocumentId,
     ShipmentDocumentType, ShipmentId, ShipmentRevision, ShipmentStatus, ShortShipDemandQuantities,
     TenantId, Timestamp, TrackingNumber, UserId,
 };
@@ -23,8 +24,13 @@ use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBin
 use crate::repo::orders::insert_order_activity_tx;
 
 use super::{
-    enqueue_order_event_tx, lock_order_tx, lock_shipment_tx, order_hint_for_shipment_tx, positive,
+    document_policy::resolve_document_policy_tx, enqueue_order_event_tx, lock_order_tx,
+    lock_shipment_tx, order_hint_for_shipment_tx, positive,
 };
+
+mod render;
+
+use render::{render_carton_label_set, render_packing_slip};
 
 const PACKING_SLIP_TYPE: ShipmentDocumentType = ShipmentDocumentType::PackingSlip;
 const CARTON_LABEL_SET_TYPE: ShipmentDocumentType = ShipmentDocumentType::CartonLabelSet;
@@ -86,6 +92,7 @@ struct DocumentManifest {
 
 struct NewDocument<'a> {
     document_type: ShipmentDocumentType,
+    policy: &'a DocumentPolicyReadModel,
     manifest: Option<&'a DocumentManifest>,
     file_name: &'a str,
     content: &'a str,
@@ -137,6 +144,18 @@ pub async fn generate_packing_slip(
             "packing slips cannot be generated for a cancelled shipment attempt",
         ));
     }
+    let generated_at = now_iso();
+    let policy = resolve_document_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.inventory_owner_id,
+        shipment.facility_id,
+        generated_at,
+        true,
+    )
+    .await?;
+    require_expected_policy(&policy, &command.expected_policy)?;
+    require_permitted_document(&policy, PACKING_SLIP_TYPE)?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "shipment-document:{}:{}:{}",
@@ -169,12 +188,29 @@ pub async fn generate_packing_slip(
         shipment.packing_session_id.get(),
     )
     .await?;
-    let cartons =
-        load_document_cartons_tx(&mut tx, access.tenant_id, command.shipment_id, None).await?;
+    let manifest = if policy.require_tracking_barcode {
+        Some(load_document_manifest_tx(&mut tx, access.tenant_id, shipment.id).await?)
+    } else {
+        None
+    };
+    let cartons = if let Some(manifest) = manifest.as_ref() {
+        load_document_cartons_tx(
+            &mut tx,
+            access.tenant_id,
+            command.shipment_id,
+            Some(manifest.manifest_id),
+        )
+        .await?
+    } else {
+        load_document_cartons_tx(&mut tx, access.tenant_id, command.shipment_id, None).await?
+    };
     if addresses.len() != 2 || lines.is_empty() || cartons.is_empty() {
         return Err(AppError::internal(
             "shipment snapshots are incomplete for packing-slip generation",
         ));
+    }
+    if policy.require_tracking_barcode {
+        require_tracking_barcodes(&cartons)?;
     }
     let content = render_packing_slip(
         shipment.id,
@@ -183,9 +219,9 @@ pub async fn generate_packing_slip(
         &lines,
         &cartons,
         shipment.demand,
-    );
+        policy.require_tracking_barcode,
+    )?;
     let file_name = format!("packing-slip-shipment-{}.html", shipment.id.get());
-    let generated_at = now_iso();
     let (document_id, content_sha256_hex, line_count) = insert_document_tx(
         &mut tx,
         access.tenant_id,
@@ -193,7 +229,8 @@ pub async fn generate_packing_slip(
         &shipment,
         NewDocument {
             document_type: PACKING_SLIP_TYPE,
-            manifest: None,
+            policy: &policy,
+            manifest: manifest.as_ref(),
             file_name: &file_name,
             content: &content,
             lines: &lines,
@@ -236,6 +273,7 @@ pub async fn generate_packing_slip(
             "accepted_short_quantity": shipment.demand.accepted_short(),
             "accepted_substitute_quantity": shipment.demand.accepted_substitute(),
             "content_sha256": content_sha256_hex,
+            "policy": policy,
             "generated_at": generated_at,
         }),
         generated_at,
@@ -293,6 +331,18 @@ pub async fn generate_carton_label_set(
             "carton labels can only be generated before a manifested shipment departs",
         ));
     }
+    let generated_at = now_iso();
+    let policy = resolve_document_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.inventory_owner_id,
+        shipment.facility_id,
+        generated_at,
+        true,
+    )
+    .await?;
+    require_expected_policy(&policy, &command.expected_policy)?;
+    require_permitted_document(&policy, CARTON_LABEL_SET_TYPE)?;
     lock_document_key_tx(
         &mut tx,
         access.tenant_id,
@@ -337,6 +387,7 @@ pub async fn generate_carton_label_set(
             "shipment snapshots are incomplete for carton-label generation",
         ));
     }
+    require_tracking_barcodes(&cartons)?;
     let content = render_carton_label_set(
         shipment.id,
         &order.order_key,
@@ -345,7 +396,6 @@ pub async fn generate_carton_label_set(
         &manifest,
     )?;
     let file_name = format!("carton-labels-shipment-{}.html", shipment.id.get());
-    let generated_at = now_iso();
     let (document_id, content_sha256_hex, line_count) = insert_document_tx(
         &mut tx,
         access.tenant_id,
@@ -353,6 +403,7 @@ pub async fn generate_carton_label_set(
         &shipment,
         NewDocument {
             document_type: CARTON_LABEL_SET_TYPE,
+            policy: &policy,
             manifest: Some(&manifest),
             file_name: &file_name,
             content: &content,
@@ -395,6 +446,7 @@ pub async fn generate_carton_label_set(
             "carton_count": shipment.carton_count,
             "line_count": line_count,
             "content_sha256": content_sha256_hex,
+            "policy": policy,
             "generated_at": generated_at,
         }),
         generated_at,
@@ -412,17 +464,16 @@ pub async fn list_documents(
     db: &Db,
     access: &TenantAccess,
     query: ShipmentDocumentListQuery,
-) -> AppResult<Vec<ShipmentDocumentReadModel>> {
+) -> AppResult<ShipmentDocumentListReadModel> {
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     require_permission_tx(&mut tx, access.tenant_id, access.user_id.get(), "wms").await?;
-    let visible = sqlx::query_scalar::<_, bool>(
-        r#"SELECT EXISTS (
-            SELECT 1 FROM shipments
+    let shipment_scope = sqlx::query(
+        r#"SELECT inventory_owner_id,facility_id FROM shipments
             WHERE tenant_id = $1 AND id = $2
               AND ($3 OR facility_id = ANY($4))
-              AND ($5 OR inventory_owner_id = ANY($6)))"#,
+              AND ($5 OR inventory_owner_id = ANY($6))"#,
     )
     .bind(access.tenant_id.get())
     .bind(query.shipment_id.get())
@@ -430,11 +481,26 @@ pub async fn list_documents(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    if !visible {
-        return Err(AppError::not_found("shipment"));
-    }
+    let shipment_scope = shipment_scope.ok_or_else(|| AppError::not_found("shipment"))?;
+    let inventory_owner_id = positive(
+        shipment_scope.try_get("inventory_owner_id")?,
+        wareboxes_domain::InventoryOwnerId::new,
+    )?;
+    let facility_id = positive(
+        shipment_scope.try_get("facility_id")?,
+        wareboxes_domain::FacilityId::new,
+    )?;
+    let policy = resolve_document_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        inventory_owner_id,
+        facility_id,
+        now_iso(),
+        false,
+    )
+    .await?;
     let rows = sqlx::query(
         "SELECT * FROM shipment_documents WHERE tenant_id = $1 AND shipment_id = $2 ORDER BY generated_at, id",
     )
@@ -447,7 +513,7 @@ pub async fn list_documents(
         .map(map_document_row)
         .collect::<AppResult<Vec<_>>>()?;
     tx.commit().await?;
-    Ok(documents)
+    Ok(ShipmentDocumentListReadModel { policy, documents })
 }
 
 pub async fn get_document_content(
@@ -511,6 +577,7 @@ async fn load_visible_document_row_tx(
 
 fn map_document_row(row: &sqlx::postgres::PgRow) -> AppResult<ShipmentDocumentReadModel> {
     let document_type_text: String = row.try_get("document_type")?;
+    let policy = map_policy_row(row)?;
     Ok(ShipmentDocumentReadModel {
         document_id: positive(row.try_get("id")?, ShipmentDocumentId::new)?,
         shipment_id: positive(row.try_get("shipment_id")?, ShipmentId::new)?,
@@ -559,9 +626,152 @@ fn map_document_row(row: &sqlx::postgres::PgRow) -> AppResult<ShipmentDocumentRe
                 .map_err(|error| AppError::internal(error.to_string()))?,
         )
         .map_err(|error| AppError::internal(error.to_string()))?,
+        policy,
         generated_by: positive(row.try_get("generated_by_user_id")?, UserId::new)?,
         generated_at: row.try_get::<Timestamp, _>("generated_at")?,
     })
+}
+
+fn map_policy_row(row: &sqlx::postgres::PgRow) -> AppResult<DocumentPolicyReadModel> {
+    let source = match row.try_get::<String, _>("policy_source")?.as_str() {
+        "product_default" => DocumentPolicySource::ProductDefault,
+        "configuration" => DocumentPolicySource::Configuration,
+        _ => {
+            return Err(AppError::internal(
+                "shipment document policy source is invalid",
+            ))
+        }
+    };
+    let configuration_id = row
+        .try_get::<Option<i64>, _>("policy_configuration_id")?
+        .map(|value| positive(value, wareboxes_domain::ConfigurationVersionId::new))
+        .transpose()?;
+    let configuration_revision = row.try_get("policy_configuration_revision")?;
+    let configuration_scope = match row.try_get::<Option<String>, _>("policy_scope_level")? {
+        None => None,
+        Some(level) => Some(match level.as_str() {
+            "tenant" => ConfigurationScope::Tenant,
+            "inventory_owner" => ConfigurationScope::InventoryOwner {
+                inventory_owner_id: positive(
+                    required_policy_scope_id(row, "policy_inventory_owner_id")?,
+                    wareboxes_domain::InventoryOwnerId::new,
+                )?,
+            },
+            "facility" => ConfigurationScope::Facility {
+                facility_id: positive(
+                    required_policy_scope_id(row, "policy_facility_id")?,
+                    wareboxes_domain::FacilityId::new,
+                )?,
+            },
+            "owner_facility" => ConfigurationScope::OwnerFacility {
+                inventory_owner_id: positive(
+                    required_policy_scope_id(row, "policy_inventory_owner_id")?,
+                    wareboxes_domain::InventoryOwnerId::new,
+                )?,
+                facility_id: positive(
+                    required_policy_scope_id(row, "policy_facility_id")?,
+                    wareboxes_domain::FacilityId::new,
+                )?,
+            },
+            _ => {
+                return Err(AppError::internal(
+                    "shipment document policy scope is invalid",
+                ))
+            }
+        }),
+    };
+    let definition = row.try_get::<serde_json::Value, _>("policy_definition")?;
+    let generate_packing_slip = definition
+        .get("generate_packing_slip")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::internal("shipment document packing-slip policy is invalid"))?;
+    let generate_carton_label = definition
+        .get("generate_carton_label")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::internal("shipment document carton-label policy is invalid"))?;
+    let require_tracking_barcode = definition
+        .get("require_tracking_barcode")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::internal("shipment document tracking policy is invalid"))?;
+    Ok(DocumentPolicyReadModel {
+        source,
+        configuration_id,
+        configuration_revision,
+        configuration_scope,
+        generate_packing_slip,
+        generate_carton_label,
+        require_tracking_barcode,
+        policy_hash: row.try_get("policy_hash")?,
+    })
+}
+
+fn required_policy_scope_id(row: &sqlx::postgres::PgRow, name: &str) -> AppResult<i64> {
+    row.try_get::<Option<i64>, _>(name)?
+        .ok_or_else(|| AppError::internal(format!("shipment document {name} is missing")))
+}
+
+fn policy_scope_values(
+    scope: Option<ConfigurationScope>,
+) -> (Option<&'static str>, Option<i64>, Option<i64>) {
+    match scope {
+        None => (None, None, None),
+        Some(ConfigurationScope::Tenant) => (Some("tenant"), None, None),
+        Some(ConfigurationScope::InventoryOwner { inventory_owner_id }) => (
+            Some("inventory_owner"),
+            Some(inventory_owner_id.get()),
+            None,
+        ),
+        Some(ConfigurationScope::Facility { facility_id }) => {
+            (Some("facility"), None, Some(facility_id.get()))
+        }
+        Some(ConfigurationScope::OwnerFacility {
+            inventory_owner_id,
+            facility_id,
+        }) => (
+            Some("owner_facility"),
+            Some(inventory_owner_id.get()),
+            Some(facility_id.get()),
+        ),
+    }
+}
+
+fn require_expected_policy(
+    actual: &DocumentPolicyReadModel,
+    expected: &wareboxes_application::shipping::DocumentPolicyExpectation,
+) -> AppResult<()> {
+    if actual.matches_expectation(expected) {
+        Ok(())
+    } else {
+        Err(AppError::conflict(
+            "document policy changed before generation",
+        ))
+    }
+}
+
+fn require_permitted_document(
+    policy: &DocumentPolicyReadModel,
+    document_type: ShipmentDocumentType,
+) -> AppResult<()> {
+    if policy.permits(document_type) {
+        Ok(())
+    } else {
+        Err(AppError::conflict(format!(
+            "the effective document policy disables {} generation",
+            document_type.as_str().replace('_', " ")
+        )))
+    }
+}
+
+fn require_tracking_barcodes(cartons: &[DocumentCarton]) -> AppResult<()> {
+    for carton in cartons {
+        let tracking = carton.tracking_number.as_ref().ok_or_else(|| {
+            AppError::conflict("the effective document policy requires carton tracking barcodes")
+        })?;
+        wareboxes_barcodes::svg("code128", tracking.as_str()).map_err(|_| {
+            AppError::conflict("a carton tracking number cannot be encoded as a Code 128 barcode")
+        })?;
+    }
+    Ok(())
 }
 
 async fn load_addresses_tx(
@@ -812,6 +1022,14 @@ async fn insert_document_tx(
     let content_sha256_hex = hex::encode(&content_sha256);
     let line_count = i64::try_from(document.lines.len())
         .map_err(|_| AppError::internal("shipment document has too many lines"))?;
+    let (policy_scope_level, policy_owner_id, policy_facility_id) =
+        policy_scope_values(document.policy.configuration_scope);
+    let policy_definition = serde_json::json!({
+        "kind": "document",
+        "generate_packing_slip": document.policy.generate_packing_slip,
+        "generate_carton_label": document.policy.generate_carton_label,
+        "require_tracking_barcode": document.policy.require_tracking_barcode,
+    });
     let document_id_raw: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO shipment_documents (
@@ -820,10 +1038,14 @@ async fn insert_document_tx(
             manifest_reference, file_name, media_type, renderer_version,
             shipment_revision_at_generation, carton_count, line_count,
             ordered_qty, accepted_short_qty, accepted_substitute_qty, packed_qty,
+            policy_source, policy_configuration_id, policy_configuration_revision,
+            policy_scope_level, policy_inventory_owner_id, policy_facility_id,
+            policy_definition, policy_hash,
             content, content_length, content_sha256, generated_by_user_id, generated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+            $25, $26, $27, $28, $29, $30, $31, $32, $33
         ) RETURNING id
         "#,
     )
@@ -855,6 +1077,17 @@ async fn insert_document_tx(
     .bind(shipment.demand.accepted_short().get())
     .bind(shipment.demand.accepted_substitute().get())
     .bind(shipment.demand.effective().get())
+    .bind(match document.policy.source {
+        DocumentPolicySource::ProductDefault => "product_default",
+        DocumentPolicySource::Configuration => "configuration",
+    })
+    .bind(document.policy.configuration_id.map(|value| value.get()))
+    .bind(document.policy.configuration_revision)
+    .bind(policy_scope_level)
+    .bind(policy_owner_id)
+    .bind(policy_facility_id)
+    .bind(policy_definition)
+    .bind(&document.policy.policy_hash)
     .bind(document.content)
     .bind(content_length)
     .bind(&content_sha256)
@@ -974,252 +1207,4 @@ async fn insert_document_cartons_tx(
         .await?;
     }
     Ok(())
-}
-
-fn render_packing_slip(
-    shipment_id: ShipmentId,
-    order_key: &str,
-    addresses: &[AddressSnapshot],
-    lines: &[DocumentLine],
-    cartons: &[DocumentCarton],
-    demand: ShortShipDemandQuantities,
-) -> String {
-    let origin = addresses.iter().find(|address| address.role == "origin");
-    let destination = addresses
-        .iter()
-        .find(|address| address.role == "destination");
-    let mut html = String::from(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Packing slip</title><style>body{font:14px system-ui,sans-serif;color:#111;margin:32px}h1{font-size:24px;margin:0 0 8px}h2{font-size:15px;margin:24px 0 8px}.meta,.addresses{display:grid;grid-template-columns:1fr 1fr;gap:24px}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #bbb;padding:7px 5px}.num{text-align:right}.summary{margin-left:auto;width:320px}.muted{color:#555}@media print{body{margin:12mm}}</style></head><body>",
-    );
-    html.push_str("<h1>Packing slip</h1><div class=\"meta\"><div><strong>Order</strong><br>");
-    escape_html_into(order_key, &mut html);
-    html.push_str("</div><div><strong>Shipment</strong><br>");
-    html.push_str(&shipment_id.get().to_string());
-    html.push_str("</div></div><div class=\"addresses\">");
-    render_address("Ship from", origin, &mut html);
-    render_address("Ship to", destination, &mut html);
-    html.push_str("</div><h2>Contents</h2><table><thead><tr><th>Line</th><th>Item</th><th>Description</th><th>UOM</th><th class=\"num\">Ordered</th><th class=\"num\">Packed</th><th class=\"num\">Short</th><th class=\"num\">Substituted</th></tr></thead><tbody>");
-    for line in lines {
-        html.push_str("<tr><td>");
-        escape_html_into(&line.line_key, &mut html);
-        html.push_str("</td><td>");
-        html.push_str(&line.item_id.get().to_string());
-        html.push_str("</td><td>");
-        escape_html_into(&line.item_description, &mut html);
-        html.push_str("</td><td>");
-        escape_html_into(&line.uom, &mut html);
-        html.push_str("</td><td class=\"num\">");
-        html.push_str(&line.ordered_quantity.to_string());
-        html.push_str("</td><td class=\"num\">");
-        html.push_str(&line.packed_quantity.to_string());
-        html.push_str("</td><td class=\"num\">");
-        html.push_str(&line.accepted_short_quantity.to_string());
-        html.push_str("</td><td class=\"num\">");
-        html.push_str(&line.accepted_substitute_quantity.to_string());
-        html.push_str("</td></tr>");
-    }
-    html.push_str("</tbody></table><h2>Cartons</h2><table><thead><tr><th>#</th><th>Carton</th><th class=\"num\">Quantity</th><th class=\"num\">Weight (g)</th></tr></thead><tbody>");
-    for carton in cartons {
-        html.push_str("<tr><td>");
-        html.push_str(&carton.sequence.to_string());
-        html.push_str("</td><td>");
-        escape_html_into(&carton.barcode, &mut html);
-        html.push_str("</td><td class=\"num\">");
-        html.push_str(&carton.packed_quantity.to_string());
-        html.push_str("</td><td class=\"num\">");
-        html.push_str(
-            &carton
-                .weight_grams
-                .map_or_else(|| "-".to_owned(), |weight| weight.to_string()),
-        );
-        html.push_str("</td></tr>");
-    }
-    html.push_str(
-        "</tbody></table><table class=\"summary\"><tbody><tr><th>Ordered</th><td class=\"num\">",
-    );
-    html.push_str(&demand.ordered().get().to_string());
-    html.push_str("</td></tr><tr><th>Packed</th><td class=\"num\">");
-    html.push_str(&demand.effective().get().to_string());
-    html.push_str("</td></tr><tr><th>Accepted short</th><td class=\"num\">");
-    html.push_str(&demand.accepted_short().get().to_string());
-    html.push_str("</td></tr><tr><th>Accepted substitution</th><td class=\"num\">");
-    html.push_str(&demand.accepted_substitute().get().to_string());
-    html.push_str("</td></tr></tbody></table></body></html>");
-    html
-}
-
-fn render_carton_label_set(
-    shipment_id: ShipmentId,
-    order_key: &str,
-    addresses: &[AddressSnapshot],
-    cartons: &[DocumentCarton],
-    manifest: &DocumentManifest,
-) -> AppResult<String> {
-    let origin = addresses
-        .iter()
-        .find(|address| address.role == "origin")
-        .ok_or_else(|| AppError::internal("shipment origin snapshot is missing"))?;
-    let destination = addresses
-        .iter()
-        .find(|address| address.role == "destination")
-        .ok_or_else(|| AppError::internal("shipment destination snapshot is missing"))?;
-    let mut html = String::from(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Carton labels</title><style>@page{size:4in 6in;margin:0}*{box-sizing:border-box}body{margin:0;color:#000;background:#fff;font:12px Arial,sans-serif}.label{width:4in;height:6in;padding:.18in;display:grid;grid-template-rows:auto auto auto 1fr auto;gap:.08in;break-after:page;border:1px solid #000}.label:last-child{break-after:auto}.top{display:flex;justify-content:space-between;align-items:start;border-bottom:2px solid #000;padding-bottom:.06in}.carrier{font-size:22px;font-weight:800}.service,.carton{font-size:13px;font-weight:700}.addresses{display:grid;grid-template-columns:1fr 1fr;gap:.1in}.address{border:1px solid #000;padding:.06in;line-height:1.25}.address strong{display:block;font-size:9px;text-transform:uppercase;margin-bottom:2px}.barcode{display:grid;place-items:center;min-height:1.05in;overflow:hidden}.barcode svg{display:block;width:100%;height:.95in}.tracking{font-size:16px;font-weight:800;text-align:center}.meta{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;border-top:1px solid #000;padding-top:.05in}.meta span{font-size:9px;text-transform:uppercase}.meta strong{display:block;font-size:11px}@media screen{body{background:#ddd}.label{margin:12px auto;background:#fff}}@media print{.label{border:0}}</style></head><body>",
-    );
-    for carton in cartons {
-        let tracking = carton
-            .tracking_number
-            .as_ref()
-            .ok_or_else(|| AppError::internal("shipment carton tracking snapshot is missing"))?;
-        let tracking_svg = wareboxes_barcodes::svg("code128", tracking.as_str()).map_err(|_| {
-            AppError::conflict("tracking number cannot be encoded as a Code 128 label")
-        })?;
-        let carton_svg = wareboxes_barcodes::svg("code128", &carton.barcode).map_err(|_| {
-            AppError::conflict("carton barcode cannot be encoded as a Code 128 label")
-        })?;
-        html.push_str(
-            "<section class=\"label\"><header class=\"top\"><div><div class=\"carrier\">",
-        );
-        escape_html_into(manifest.carrier_code.as_str(), &mut html);
-        html.push_str("</div><div class=\"service\">");
-        escape_html_into(
-            manifest
-                .service_code
-                .as_ref()
-                .map_or("STANDARD", CarrierServiceCode::as_str),
-            &mut html,
-        );
-        html.push_str("</div></div><div class=\"carton\">Carton ");
-        html.push_str(&carton.sequence.to_string());
-        html.push_str(" of ");
-        html.push_str(&cartons.len().to_string());
-        html.push_str("</div></header><div class=\"addresses\">");
-        render_label_address("Ship from", origin, &mut html);
-        render_label_address("Ship to", destination, &mut html);
-        html.push_str("</div><div><div class=\"barcode\">");
-        html.push_str(&tracking_svg);
-        html.push_str("</div><div class=\"tracking\">");
-        escape_html_into(tracking.as_str(), &mut html);
-        html.push_str("</div></div><div class=\"barcode\">");
-        html.push_str(&carton_svg);
-        html.push_str("</div><footer class=\"meta\"><div><span>Order</span><strong>");
-        escape_html_into(order_key, &mut html);
-        html.push_str("</strong></div><div><span>Shipment</span><strong>");
-        html.push_str(&shipment_id.get().to_string());
-        html.push_str("</strong></div><div><span>Manifest</span><strong>");
-        escape_html_into(manifest.manifest_reference.as_str(), &mut html);
-        html.push_str("</strong></div><div><span>Weight / dimensions</span><strong>");
-        html.push_str(&label_measurements(carton));
-        html.push_str("</strong></div></footer></section>");
-    }
-    html.push_str("</body></html>");
-    Ok(html)
-}
-
-fn render_label_address(label: &str, address: &AddressSnapshot, html: &mut String) {
-    html.push_str("<div class=\"address\"><strong>");
-    html.push_str(label);
-    html.push_str("</strong>");
-    if let Some(name) = address.name.as_deref() {
-        escape_html_into(name, html);
-        html.push_str("<br>");
-    }
-    if let Some(company) = address.company.as_deref() {
-        escape_html_into(company, html);
-        html.push_str("<br>");
-    }
-    escape_html_into(&address.line1, html);
-    if let Some(line2) = address.line2.as_deref() {
-        html.push_str("<br>");
-        escape_html_into(line2, html);
-    }
-    html.push_str("<br>");
-    escape_html_into(&address.city, html);
-    if let Some(state) = address.state.as_deref() {
-        html.push_str(", ");
-        escape_html_into(state, html);
-    }
-    html.push(' ');
-    escape_html_into(&address.postal_code, html);
-    html.push_str("<br>");
-    escape_html_into(&address.country, html);
-    html.push_str("</div>");
-}
-
-fn label_measurements(carton: &DocumentCarton) -> String {
-    let weight = carton
-        .weight_grams
-        .map_or_else(|| "-".to_owned(), |value| format!("{value} g"));
-    match (carton.length_mm, carton.width_mm, carton.height_mm) {
-        (Some(length), Some(width), Some(height)) => {
-            format!("{weight} / {length}x{width}x{height} mm")
-        }
-        _ => weight,
-    }
-}
-
-fn render_address(label: &str, address: Option<&AddressSnapshot>, html: &mut String) {
-    html.push_str("<section><h2>");
-    html.push_str(label);
-    html.push_str("</h2>");
-    if let Some(address) = address {
-        for value in [
-            address.name.as_deref(),
-            address.company.as_deref(),
-            Some(address.line1.as_str()),
-            address.line2.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            escape_html_into(value, html);
-            html.push_str("<br>");
-        }
-        escape_html_into(&address.city, html);
-        if let Some(state) = address.state.as_deref() {
-            html.push_str(", ");
-            escape_html_into(state, html);
-        }
-        html.push(' ');
-        escape_html_into(&address.postal_code, html);
-        html.push_str("<br>");
-        escape_html_into(&address.country, html);
-        if let Some(phone) = address.phone.as_deref() {
-            html.push_str("<br>");
-            escape_html_into(phone, html);
-        }
-        if let Some(email) = address.email.as_deref() {
-            html.push_str("<br>");
-            escape_html_into(email, html);
-        }
-    }
-    html.push_str("</section>");
-}
-
-fn escape_html_into(value: &str, output: &mut String) {
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
-            '\'' => output.push_str("&#39;"),
-            _ => output.push(character),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn html_escaping_prevents_snapshot_content_from_becoming_markup() {
-        let mut output = String::new();
-        escape_html_into("<script>\"x\" & 'y'</script>", &mut output);
-        assert_eq!(
-            output,
-            "&lt;script&gt;&quot;x&quot; &amp; &#39;y&#39;&lt;/script&gt;"
-        );
-    }
 }

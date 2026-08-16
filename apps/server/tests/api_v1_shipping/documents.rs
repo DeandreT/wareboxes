@@ -91,16 +91,31 @@ async fn packing_slip_is_replay_safe_immutable_scoped_and_downloadable() {
     assert_eq!(stale.status(), StatusCode::CONFLICT);
 
     let request_body = json!({"expected_shipment_revision": 1});
-    let generated = send(
-        &app,
-        &token,
-        access.tenant_id,
-        Method::POST,
-        &generate_path,
-        Some("ship-doc-generate"),
-        Some(request_body.clone()),
-    )
-    .await;
+    let (first, second) = tokio::join!(
+        send(
+            &app,
+            &token,
+            access.tenant_id,
+            Method::POST,
+            &generate_path,
+            Some("ship-doc-generate-a"),
+            Some(request_body.clone()),
+        ),
+        send(
+            &app,
+            &token,
+            access.tenant_id,
+            Method::POST,
+            &generate_path,
+            Some("ship-doc-generate-b"),
+            Some(request_body.clone()),
+        )
+    );
+    let (generated, winning_key) = match (first.status(), second.status()) {
+        (StatusCode::OK, StatusCode::CONFLICT) => (first, "ship-doc-generate-a"),
+        (StatusCode::CONFLICT, StatusCode::OK) => (second, "ship-doc-generate-b"),
+        statuses => panic!("exactly one concurrent document generation must win: {statuses:?}"),
+    };
     let generated: GeneratePackingSlipResponse =
         response_json(expect_status(generated, StatusCode::OK, "generate packing slip").await)
             .await;
@@ -124,7 +139,7 @@ async fn packing_slip_is_replay_safe_immutable_scoped_and_downloadable() {
         access.tenant_id,
         Method::POST,
         &generate_path,
-        Some("ship-doc-generate"),
+        Some(winning_key),
         Some(request_body.clone()),
     )
     .await;
@@ -141,7 +156,7 @@ async fn packing_slip_is_replay_safe_immutable_scoped_and_downloadable() {
         access.tenant_id,
         Method::POST,
         &generate_path,
-        Some("ship-doc-generate"),
+        Some(winning_key),
         Some(json!({"expected_shipment_revision": 2})),
     )
     .await;
@@ -303,7 +318,7 @@ async fn packing_slip_is_replay_safe_immutable_scoped_and_downloadable() {
             access.tenant_id,
             Method::POST,
             &generate_path,
-            Some("ship-doc-generate"),
+            Some(winning_key),
             Some(request_body),
         )
         .await,
