@@ -1,7 +1,10 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{ConfigurationScope, Revision};
+use super::{
+    AutomationCommandStatus, AutomationHealthState, ConfigurationScope, CursorPage, OpaqueCursor,
+    PageLimit, Revision,
+};
 
 pub const PRODUCT_DEFAULT_DOCUMENT_POLICY_HASH: &str =
     "8fa715da98b8dc84175d61bdadddfd29318e7dfe43e36568bb052d0583c1df24";
@@ -299,6 +302,81 @@ pub struct ShipmentDocumentListResponse {
     pub policy: DocumentPolicyResponse,
     pub documents: Vec<ShipmentDocumentResponse>,
 }
+
+/// One facility printer currently eligible for shipment-document work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentPrinterDeviceResponse {
+    pub device_id: i64,
+    pub device_key: String,
+    pub display_name: String,
+    pub health: AutomationHealthState,
+    pub last_heartbeat_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentPrinterDevicePage {
+    pub items: Vec<ShipmentPrinterDeviceResponse>,
+}
+
+/// Requests a bounded number of copies of an immutable retained document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrintShipmentDocumentRequest {
+    pub device_id: i64,
+    pub copies: u16,
+    pub expected_content_sha256: String,
+}
+
+/// Durable edge-command evidence for one shipment-document print attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentDocumentPrintJobResponse {
+    pub command_id: i64,
+    pub document_id: i64,
+    pub shipment_id: i64,
+    pub content_sha256: String,
+    pub device_id: i64,
+    pub device_key: String,
+    pub copies: u16,
+    pub status: AutomationCommandStatus,
+    pub revision: Revision,
+    pub delivery_attempts: u32,
+    pub assigned_service_account_id: Option<i64>,
+    pub agent_instance: Option<String>,
+    pub delivered_at: Option<String>,
+    pub accepted_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub spool_job_id: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub requested_by: i64,
+    pub requested_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrintShipmentDocumentResponse {
+    pub print_job: ShipmentDocumentPrintJobResponse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelShipmentDocumentPrintRequest {
+    pub expected_revision: Revision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentDocumentPrintJobPageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub limit: PageLimit,
+}
+
+pub type ShipmentDocumentPrintJobPage = CursorPage<ShipmentDocumentPrintJobResponse>;
 
 /// One carrier tracking assignment persisted for a shipment carton.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

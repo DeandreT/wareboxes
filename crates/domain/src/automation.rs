@@ -131,6 +131,7 @@ pub enum AutomationPrintFormat {
     Zpl,
     Pdf,
     Png,
+    Html,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

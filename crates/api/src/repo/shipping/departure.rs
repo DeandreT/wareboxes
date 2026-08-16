@@ -26,7 +26,7 @@ use crate::repo::orders::insert_order_activity_tx;
 
 use super::{
     enqueue_order_event_tx, lock_order_tx, lock_shipment_tx, order_hint_for_shipment_tx, positive,
-    require_replayed_shipment_id_visible_tx,
+    require_no_active_document_prints_tx, require_replayed_shipment_id_visible_tx,
 };
 
 #[derive(Debug)]
@@ -104,6 +104,7 @@ pub async fn confirm_departure(
     {
         return Err(AppError::conflict("shipment departure revision is stale"));
     }
+    require_no_active_document_prints_tx(&mut tx, access.tenant_id, shipment.id).await?;
     let remaining_cartons =
         remaining_departure_cartons_tx(&mut tx, access.tenant_id, shipment.id).await?;
     let carton_identities = remaining_cartons
@@ -424,6 +425,7 @@ pub(crate) async fn depart_for_outbound_load_tx(
 ) -> AppResult<OutboundLoadShipmentDepartureResult> {
     let order = lock_order_tx(tx, access.tenant_id, target.order_id, scope).await?;
     let shipment = lock_shipment_tx(tx, access.tenant_id, target.shipment_id, scope).await?;
+    require_no_active_document_prints_tx(tx, access.tenant_id, shipment.id).await?;
     if shipment.order_id != order.id
         || shipment.inventory_owner_id != order.inventory_owner_id
         || shipment.status != ShipmentStatus::Manifested

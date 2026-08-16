@@ -6,6 +6,7 @@ mod departure;
 mod document_policy;
 mod documents;
 mod manifest;
+mod printing;
 mod queue;
 mod read_model;
 
@@ -17,6 +18,10 @@ pub use documents::{
     generate_carton_label_set, generate_packing_slip, get_document_content, list_documents,
 };
 pub use manifest::record_manual_manifest;
+pub use printing::{
+    available_printers, cancel_print_job, print_document, print_job, print_jobs,
+    ShipmentDocumentPrintPage,
+};
 pub use queue::{
     shipping_queue, ShippingQueueCursor, ShippingQueueEntry, ShippingQueuePage,
     ShippingQueueShipment,
@@ -81,6 +86,29 @@ async fn order_hint_for_session_tx(
     .await?
     .ok_or_else(|| AppError::not_found("packing session"))?;
     positive(id, OrderId::new)
+}
+
+async fn require_no_active_document_prints_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    shipment_id: ShipmentId,
+) -> AppResult<()> {
+    let active: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM automation_commands
+           WHERE tenant_id=$1 AND shipping_shipment_id=$2
+             AND status IN ('queued','delivered','accepted','manual_review'))"#,
+    )
+    .bind(tenant_id.get())
+    .bind(shipment_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if active {
+        Err(AppError::conflict(
+            "shipment has an active or unresolved document print command",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 async fn order_hint_for_shipment_tx(

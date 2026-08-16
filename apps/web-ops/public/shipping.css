@@ -667,6 +667,72 @@
   font-size: 9px;
 }
 
+.shipment-print-controls {
+  display: grid;
+  gap: 4px;
+  padding: 5px 7px 7px;
+  border-top: 1px dashed var(--line);
+  background: var(--surface);
+}
+
+.shipment-print-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) 70px auto;
+  align-items: end;
+  gap: 5px;
+}
+
+.shipment-print-form select,
+.shipment-print-form input {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.shipment-print-form label {
+  display: grid;
+  gap: 2px;
+  color: var(--ink-soft);
+  font-size: 8px;
+}
+
+.shipment-print-form > small {
+  grid-column: 1 / -1;
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.shipment-print-history {
+  display: grid;
+  gap: 2px;
+}
+
+.shipment-print-job {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto auto;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 8px;
+}
+
+.shipment-print-job strong {
+  color: var(--ink);
+  font-size: 8px;
+}
+
+.shipment-print-job span,
+.shipment-print-job small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .shipping-document-row {
   border-top: 1px solid var(--line);
 }

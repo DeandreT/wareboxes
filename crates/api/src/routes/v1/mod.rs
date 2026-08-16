@@ -822,6 +822,22 @@ pub fn router() -> Router<AppState> {
             get(shipping::download_document),
         )
         .route(
+            "/shipment-documents/{document_id}/printers",
+            get(shipping::list_document_printers),
+        )
+        .route(
+            "/shipment-documents/{document_id}/print-jobs",
+            get(shipping::list_document_print_jobs).post(shipping::print_document),
+        )
+        .route(
+            "/shipment-documents/{document_id}/print-jobs/{command_id}",
+            get(shipping::get_document_print_job),
+        )
+        .route(
+            "/shipment-documents/{document_id}/print-jobs/{command_id}/cancellations",
+            post(shipping::cancel_document_print_job),
+        )
+        .route(
             "/shipments/{shipment_id}/manifests",
             post(shipping::record_manifest),
         )

@@ -11,7 +11,7 @@ use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     validate_automation_device, validate_automation_message, AutomationCommandId,
     AutomationControlMode, AutomationDeviceCommand, AutomationDeviceId, AutomationHealthState,
-    AutomationScaleCommand, FacilityId, TenantId,
+    AutomationPrinterCommand, AutomationScaleCommand, FacilityId, TenantId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -235,16 +235,39 @@ pub async fn enqueue_command(
         .command
         .validate()
         .map_err(|error| AppError::bad_request(error.to_string()))?;
+    if command.packing_scale_context.is_some() && command.shipping_document_print_context.is_some()
+    {
+        return Err(AppError::bad_request(
+            "automation command cannot target packing and shipping evidence together",
+        ));
+    }
+    let shipping_print = matches!(
+        command.command,
+        AutomationDeviceCommand::Printer(AutomationPrinterCommand::PrintDocument { .. })
+    ) && command.shipping_document_print_context.is_some();
+    if let Some(print_context) = command.shipping_document_print_context.as_ref() {
+        if !shipping_print
+            || print_context.content_sha256.len() != 64
+            || !print_context
+                .content_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(AppError::bad_request(
+                "shipping print context is invalid for this command",
+            ));
+        }
+    }
     let prepared = PreparedCommand::new_v1(context, ENQUEUE_AUTOMATION_COMMAND_OPERATION, command)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     bind_actor_tx(&mut tx, context.actor_id.get()).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
-    let permission = if matches!(
+    let packing_scale = matches!(
         command.command,
         AutomationDeviceCommand::Scale(AutomationScaleCommand::ReadStableWeight { .. })
-    ) && command.packing_scale_context.is_some()
-    {
+    ) && command.packing_scale_context.is_some();
+    let permission = if packing_scale || shipping_print {
         "wms"
     } else {
         SUPERVISOR_PERMISSION
@@ -335,9 +358,11 @@ pub async fn enqueue_command(
           INSERT INTO automation_commands
           (tenant_id,facility_id,device_id,device_class,correlation_id,recovery_policy,
            command_payload,packing_inventory_owner_id,packing_session_id,packing_carton_id,
-           packing_carton_reopen_count,status,revision,delivery_attempts,
-           requested_by_user_id,requested_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'queued',1,0,$12,$13)
+           packing_carton_reopen_count,shipping_inventory_owner_id,shipping_shipment_id,
+           shipping_document_id,shipping_document_content_sha256,
+           status,revision,delivery_attempts,requested_by_user_id,requested_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+            'queued',1,0,$16,$17)
           RETURNING *)
         SELECT {} FROM inserted command JOIN automation_devices device
           ON device.tenant_id=command.tenant_id AND device.id=command.device_id"#,
@@ -369,6 +394,32 @@ pub async fn enqueue_command(
         command
             .packing_scale_context
             .map(|context| context.carton_reopen_count),
+    )
+    .bind(
+        command
+            .shipping_document_print_context
+            .as_ref()
+            .map(|context| context.inventory_owner_id.get()),
+    )
+    .bind(
+        command
+            .shipping_document_print_context
+            .as_ref()
+            .map(|context| context.shipment_id.get()),
+    )
+    .bind(
+        command
+            .shipping_document_print_context
+            .as_ref()
+            .map(|context| context.document_id.get()),
+    )
+    .bind(
+        command
+            .shipping_document_print_context
+            .as_ref()
+            .map(|context| hex::decode(&context.content_sha256))
+            .transpose()
+            .map_err(|_| AppError::bad_request("shipping document hash is invalid"))?,
     )
     .bind(context.actor_id.get())
     .bind(now)
@@ -492,7 +543,7 @@ pub async fn resolve_command(
     Ok(prepared.commit(tx, result).await?)
 }
 
-pub(super) async fn bind_actor_tx(
+pub(crate) async fn bind_actor_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     actor_user_id: i64,
 ) -> AppResult<()> {

@@ -74,6 +74,7 @@ pub enum AutomationPrintFormat {
     Zpl,
     Pdf,
     Png,
+    Html,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -349,6 +350,8 @@ pub struct AutomationCommandResponse {
     pub command: AutomationDeviceCommand,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packing_scale_context: Option<PackingScaleCommandContextResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shipping_document_print_context: Option<ShippingDocumentPrintContextResponse>,
     pub status: AutomationCommandStatus,
     pub revision: Revision,
     pub delivery_attempts: u32,
@@ -375,6 +378,15 @@ pub struct PackingScaleCommandContextResponse {
     pub session_id: i64,
     pub carton_id: i64,
     pub carton_reopen_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShippingDocumentPrintContextResponse {
+    pub inventory_owner_id: i64,
+    pub shipment_id: i64,
+    pub document_id: i64,
+    pub content_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

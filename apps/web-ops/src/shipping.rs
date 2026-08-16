@@ -3,6 +3,7 @@ mod display;
 mod documents;
 mod execution;
 mod outbound_qa;
+mod printing;
 mod queue;
 mod request_state;
 

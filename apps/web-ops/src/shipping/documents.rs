@@ -14,6 +14,8 @@ use wareboxes_api_contract::v1::{
 use crate::api;
 use crate::components::{Icon, UiIcon};
 
+use super::printing::ShipmentDocumentPrintControls;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PendingGeneration {
     PackingSlip {
@@ -172,6 +174,7 @@ pub(super) fn ShipmentDocumentsPanel(
                                 aria-label=download_label
                             ><Icon icon=UiIcon::Download/></a>
                         </div>
+                        <ShipmentDocumentPrintControls document=document.clone() on_unauthorized/>
                     }
                 }
             />

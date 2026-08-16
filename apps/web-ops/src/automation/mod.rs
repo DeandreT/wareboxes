@@ -401,7 +401,7 @@ fn command_fields(class: AutomationDeviceClass, draft: RwSignal<CommandDraft>) -
         (AutomationDeviceClass::Robotics,_)=>vec![text("Mission ID",1).into_any()],
         (AutomationDeviceClass::Sortation,"divert")=>vec![text("Tracking ID",1).into_any(),text("Chute",2).into_any()],
         (AutomationDeviceClass::Sortation,_)=>vec![text("Tracking ID",1).into_any(),text("Lane",2).into_any(),text("Reason code",3).into_any()],
-        (AutomationDeviceClass::Printer,"print_document")=>vec![text("Document ID",1).into_any(),choice(draft,"Format",&[("zpl","ZPL"),("pdf","PDF base64"),("png","PNG base64")]),text("Content",2).into_any(),number("Copies").into_any()],
+        (AutomationDeviceClass::Printer,"print_document")=>vec![text("Document ID",1).into_any(),choice(draft,"Format",&[("zpl","ZPL"),("pdf","PDF base64"),("png","PNG base64"),("html","HTML")]),text("Content",2).into_any(),number("Copies").into_any()],
         (AutomationDeviceClass::Printer,_)=>vec![text("Spool job ID",1).into_any()],
         (AutomationDeviceClass::Scale,"read_weight")=>vec![choice(draft,"Unit",&[("gram","Gram"),("kilogram","Kilogram"),("pound","Pound")]),number("Timeout (ms)").into_any()],
         (AutomationDeviceClass::Scale,_)=>Vec::new(),

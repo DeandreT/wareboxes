@@ -125,6 +125,7 @@ pub async fn enqueue_command(
         recovery_policy: mapping::transcode_request(body.recovery_policy)?,
         command: mapping::transcode_request(body.command)?,
         packing_scale_context: None,
+        shipping_document_print_context: None,
     };
     let result = repo::automation::enqueue_command(
         &state.db,

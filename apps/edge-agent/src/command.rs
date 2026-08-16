@@ -148,6 +148,7 @@ pub enum PrintFormat {
     Zpl,
     Pdf,
     Png,
+    Html,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +157,7 @@ pub enum PrinterCommand {
     PrintDocument {
         document_id: String,
         format: PrintFormat,
-        /// ZPL text or base64-encoded binary content for PDF/PNG documents.
+        /// ZPL/HTML text or base64-encoded binary content for PDF/PNG documents.
         content: String,
         copies: NonZeroU16,
     },

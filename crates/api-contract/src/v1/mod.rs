@@ -454,16 +454,19 @@ pub use service_account::{
     UpdateServiceAccountAccessRequest,
 };
 pub use shipping::{
-    CancelShipmentRequest, CancelShipmentResponse, ConfirmShipmentDepartureRequest,
-    ConfirmShipmentDepartureResponse, CreateShipmentRequest, CreateShipmentResponse,
-    DocumentPolicyExpectation, DocumentPolicyResponse, DocumentPolicySource,
-    GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse, GeneratePackingSlipRequest,
-    GeneratePackingSlipResponse, ManualCarrierManifestResponse, ManualCartonTrackingRequest,
+    CancelShipmentDocumentPrintRequest, CancelShipmentRequest, CancelShipmentResponse,
+    ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
+    CreateShipmentResponse, DocumentPolicyExpectation, DocumentPolicyResponse,
+    DocumentPolicySource, GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse,
+    GeneratePackingSlipRequest, GeneratePackingSlipResponse, ManualCarrierManifestResponse,
+    ManualCartonTrackingRequest, PrintShipmentDocumentRequest, PrintShipmentDocumentResponse,
     RecordManualManifestRequest, RecordManualManifestResponse, ShipmentCancellationReason,
     ShipmentCancellationResponse, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
     ShipmentDemandResponse, ShipmentDepartureProgressResponse, ShipmentDocumentListResponse,
-    ShipmentDocumentResponse, ShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse,
-    ShipmentStatus, PRODUCT_DEFAULT_DOCUMENT_POLICY_HASH,
+    ShipmentDocumentPrintJobPage, ShipmentDocumentPrintJobPageRequest,
+    ShipmentDocumentPrintJobResponse, ShipmentDocumentResponse, ShipmentDocumentType,
+    ShipmentOrderStatus, ShipmentPrinterDevicePage, ShipmentPrinterDeviceResponse,
+    ShipmentResponse, ShipmentStatus, PRODUCT_DEFAULT_DOCUMENT_POLICY_HASH,
 };
 pub use shipping_queue::{
     ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,

@@ -5,6 +5,9 @@ use wareboxes_api_contract::v1::{
 
 use super::*;
 
+#[path = "documents/printing.rs"]
+mod printing;
+
 #[tokio::test]
 async fn packing_slip_is_replay_safe_immutable_scoped_and_downloadable() {
     let fixture = Fixture::new().await;

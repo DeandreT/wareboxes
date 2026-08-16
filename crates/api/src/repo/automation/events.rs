@@ -4,7 +4,7 @@ use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 use crate::error::AppResult;
 use crate::repo::orders::next_outbox_sequence_tx;
 
-pub(super) struct AutomationEvent<'a> {
+pub(crate) struct AutomationEvent<'a> {
     pub tenant_id: TenantId,
     pub facility_id: FacilityId,
     pub actor_user_id: i64,
@@ -16,7 +16,7 @@ pub(super) struct AutomationEvent<'a> {
     pub occurred_at: Timestamp,
 }
 
-pub(super) struct CommandHistoryEvent<'a> {
+pub(crate) struct CommandHistoryEvent<'a> {
     pub tenant_id: TenantId,
     pub command_id: AutomationCommandId,
     pub transition: &'a str,
@@ -26,7 +26,7 @@ pub(super) struct CommandHistoryEvent<'a> {
     pub evidence: serde_json::Value,
 }
 
-pub(super) async fn insert_command_history_tx(
+pub(crate) async fn insert_command_history_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event: CommandHistoryEvent<'_>,
 ) -> AppResult<()> {
@@ -47,7 +47,7 @@ pub(super) async fn insert_command_history_tx(
     Ok(())
 }
 
-pub(super) async fn insert_outbox_tx(
+pub(crate) async fn insert_outbox_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event: AutomationEvent<'_>,
 ) -> AppResult<()> {

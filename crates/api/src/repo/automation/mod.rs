@@ -3,9 +3,13 @@
 mod commands;
 mod edge;
 mod events;
+pub(crate) use events::{
+    insert_command_history_tx, insert_outbox_tx, AutomationEvent, CommandHistoryEvent,
+};
 pub(crate) mod mapping;
 mod query;
 
+pub(crate) use commands::bind_actor_tx;
 pub use commands::{change_control, enqueue_command, register_device, resolve_command};
 pub use edge::{
     acknowledge_command, assigned_devices, pull_commands, record_heartbeat, report_command,

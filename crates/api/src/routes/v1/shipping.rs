@@ -1,35 +1,43 @@
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, Response};
 use axum::Json;
 use wareboxes_api_contract::v1::{
+    AutomationCommandStatus as ApiAutomationCommandStatus,
+    AutomationHealthState as ApiAutomationHealthState, CancelShipmentDocumentPrintRequest,
     CancelShipmentRequest, CancelShipmentResponse, ConfigurationScope as ApiConfigurationScope,
     ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
-    CreateShipmentResponse, DocumentPolicyExpectation as ApiDocumentPolicyExpectation,
+    CreateShipmentResponse, CursorPage, DocumentPolicyExpectation as ApiDocumentPolicyExpectation,
     DocumentPolicyResponse as ApiDocumentPolicyResponse,
     DocumentPolicySource as ApiDocumentPolicySource, GenerateCartonLabelSetRequest,
     GenerateCartonLabelSetResponse, GeneratePackingSlipRequest, GeneratePackingSlipResponse,
-    ManualCarrierManifestResponse, RecordManualManifestRequest, RecordManualManifestResponse,
+    ManualCarrierManifestResponse, OpaqueCursor, PrintShipmentDocumentRequest,
+    PrintShipmentDocumentResponse, RecordManualManifestRequest, RecordManualManifestResponse,
     Revision, ShipmentCancellationReason as ApiShipmentCancellationReason,
     ShipmentCancellationResponse, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
     ShipmentDemandResponse, ShipmentDepartureProgressResponse, ShipmentDocumentListResponse,
-    ShipmentDocumentResponse, ShipmentDocumentType as ApiShipmentDocumentType, ShipmentOrderStatus,
-    ShipmentResponse, ShipmentStatus as ApiShipmentStatus,
+    ShipmentDocumentPrintJobPage, ShipmentDocumentPrintJobPageRequest,
+    ShipmentDocumentPrintJobResponse, ShipmentDocumentResponse,
+    ShipmentDocumentType as ApiShipmentDocumentType, ShipmentOrderStatus,
+    ShipmentPrinterDevicePage, ShipmentPrinterDeviceResponse, ShipmentResponse,
+    ShipmentStatus as ApiShipmentStatus,
 };
+use wareboxes_application::automation::{AutomationCommandReadModel, AutomationCommandStatus};
 use wareboxes_application::shipping::{
-    CancelShipmentCommand, CancelShipmentResult, ConfirmShipmentDepartureCommand,
-    ConfirmShipmentDepartureResult, CreateShipmentCommand, CreateShipmentResult,
-    DocumentPolicyExpectation, DocumentPolicyReadModel, DocumentPolicySource,
+    CancelShipmentCommand, CancelShipmentDocumentPrintCommand, CancelShipmentResult,
+    ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult, CreateShipmentCommand,
+    CreateShipmentResult, DocumentPolicyExpectation, DocumentPolicyReadModel, DocumentPolicySource,
     GenerateCartonLabelSetCommand, GeneratePackingSlipCommand, ManualCarrierManifestReadModel,
     RecordManualManifestCommand, RecordManualManifestResult, ShipmentDocumentContentQuery,
     ShipmentDocumentListQuery, ShipmentDocumentReadModel, ShipmentQuery, ShipmentReadModel,
 };
 use wareboxes_domain::{
-    CarrierCode, CarrierServiceCode, CartonId, CartonTrackingAssignment, ConfigurationScope,
-    ConfigurationVersionId, ManifestReference, OrderId, OrderRevision, OrderStatus, PackSessionId,
-    ShipmentCancellationDetails, ShipmentCancellationNote, ShipmentCancellationReason,
-    ShipmentDocumentId, ShipmentDocumentType, ShipmentId, ShipmentRevision, ShipmentScanValue,
-    ShipmentStatus, TrackingNumber,
+    AutomationCommandId, AutomationCommandResult, AutomationDeviceCommand, AutomationDeviceId,
+    AutomationHealthState, AutomationPrinterCommand, CarrierCode, CarrierServiceCode, CartonId,
+    CartonTrackingAssignment, ConfigurationScope, ConfigurationVersionId, ManifestReference,
+    OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentCancellationDetails,
+    ShipmentCancellationNote, ShipmentCancellationReason, ShipmentDocumentId, ShipmentDocumentType,
+    ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus, TrackingNumber,
 };
 
 use super::error::{V1Error, V1Result};
@@ -40,6 +48,7 @@ use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
+const PRINT_CURSOR_PREFIX: &str = "sdp1.";
 
 pub async fn create(
     State(state): State<AppState>,
@@ -269,6 +278,146 @@ pub async fn download_document(
     Ok(response)
 }
 
+pub async fn list_document_printers(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(document_id): Path<i64>,
+) -> V1Result<Json<ShipmentPrinterDevicePage>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let printers = repo::shipping::available_printers(
+        &state.db,
+        &user.tenant,
+        positive(document_id, ShipmentDocumentId::new, "shipment document ID")?,
+    )
+    .await?;
+    Ok(Json(ShipmentPrinterDevicePage {
+        items: printers
+            .into_iter()
+            .map(|printer| {
+                Ok(ShipmentPrinterDeviceResponse {
+                    device_id: printer.device_id.get(),
+                    device_key: printer.device_key,
+                    display_name: printer.display_name,
+                    health: map_automation_health(printer.health),
+                    last_heartbeat_at: printer
+                        .last_heartbeat_at
+                        .map(|time| time.to_rfc3339())
+                        .ok_or_else(|| V1Error::internal("available printer lacks heartbeat"))?,
+                })
+            })
+            .collect::<V1Result<Vec<_>>>()?,
+    }))
+}
+
+pub async fn print_document(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(document_id): Path<i64>,
+    Json(body): Json<PrintShipmentDocumentRequest>,
+) -> V1Result<Json<PrintShipmentDocumentResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let document_id = positive(document_id, ShipmentDocumentId::new, "shipment document ID")?;
+    let command = repo::shipping::print_document(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        document_id,
+        positive(body.device_id, AutomationDeviceId::new, "printer device ID")?,
+        body.copies,
+        &body.expected_content_sha256,
+    )
+    .await?;
+    Ok(Json(PrintShipmentDocumentResponse {
+        print_job: map_print_job(command, document_id)?,
+    }))
+}
+
+pub async fn list_document_print_jobs(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(document_id): Path<i64>,
+    Query(query): Query<ShipmentDocumentPrintJobPageRequest>,
+) -> V1Result<Json<ShipmentDocumentPrintJobPage>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let document_id = positive(document_id, ShipmentDocumentId::new, "shipment document ID")?;
+    let before = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_print_cursor(cursor, document_id))
+        .transpose()?;
+    let page = repo::shipping::print_jobs(
+        &state.db,
+        &user.tenant,
+        document_id,
+        before,
+        query.limit.get(),
+    )
+    .await?;
+    let items = page
+        .items
+        .into_iter()
+        .map(|command| map_print_job(command, document_id))
+        .collect::<V1Result<Vec<_>>>()?;
+    let next_cursor = page
+        .next_command_id
+        .map(|command_id| encode_print_cursor(document_id, command_id))
+        .transpose()?;
+    Ok(Json(CursorPage::new(items, next_cursor)))
+}
+
+pub async fn get_document_print_job(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path((document_id, command_id)): Path<(i64, i64)>,
+) -> V1Result<Json<ShipmentDocumentPrintJobResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let document_id = positive(document_id, ShipmentDocumentId::new, "shipment document ID")?;
+    let command = repo::shipping::print_job(
+        &state.db,
+        &user.tenant,
+        document_id,
+        positive(
+            command_id,
+            AutomationCommandId::new,
+            "automation command ID",
+        )?,
+    )
+    .await?;
+    Ok(Json(map_print_job(command, document_id)?))
+}
+
+pub async fn cancel_document_print_job(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path((document_id, command_id)): Path<(i64, i64)>,
+    Json(body): Json<CancelShipmentDocumentPrintRequest>,
+) -> V1Result<Json<PrintShipmentDocumentResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let document_id = positive(document_id, ShipmentDocumentId::new, "shipment document ID")?;
+    let command = CancelShipmentDocumentPrintCommand {
+        document_id,
+        command_id: positive(
+            command_id,
+            AutomationCommandId::new,
+            "automation command ID",
+        )?,
+        expected_revision: u32::try_from(body.expected_revision.get())
+            .map_err(|_| invalid("automation command revision is too large"))?,
+    };
+    let result = repo::shipping::cancel_print_job(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(PrintShipmentDocumentResponse {
+        print_job: map_print_job(result, document_id)?,
+    }))
+}
+
 fn map_create(result: CreateShipmentResult) -> V1Result<CreateShipmentResponse> {
     Ok(CreateShipmentResponse {
         shipment: map_shipment(result.shipment)?,
@@ -431,6 +580,62 @@ fn map_document(document: ShipmentDocumentReadModel) -> V1Result<ShipmentDocumen
     })
 }
 
+fn map_print_job(
+    command: AutomationCommandReadModel,
+    expected_document_id: ShipmentDocumentId,
+) -> V1Result<ShipmentDocumentPrintJobResponse> {
+    let context = command
+        .shipping_document_print_context
+        .ok_or_else(|| V1Error::internal("shipping print command lacks document context"))?;
+    if context.document_id != expected_document_id {
+        return Err(V1Error::internal(
+            "shipping print command targets the wrong document",
+        ));
+    }
+    let copies = match command.command {
+        AutomationDeviceCommand::Printer(AutomationPrinterCommand::PrintDocument {
+            copies,
+            ..
+        }) => copies,
+        _ => {
+            return Err(V1Error::internal(
+                "shipping print command has an invalid payload",
+            ))
+        }
+    };
+    let spool_job_id = match command.result {
+        Some(AutomationCommandResult::Printer(result)) => Some(result.spool_job_id),
+        None => None,
+        Some(_) => {
+            return Err(V1Error::internal(
+                "shipping print command has an invalid result",
+            ))
+        }
+    };
+    Ok(ShipmentDocumentPrintJobResponse {
+        command_id: command.command_id.get(),
+        document_id: context.document_id.get(),
+        shipment_id: context.shipment_id.get(),
+        content_sha256: context.content_sha256,
+        device_id: command.device_id.get(),
+        device_key: command.device_key,
+        copies,
+        status: map_automation_status(command.status),
+        revision: revision(i64::from(command.revision))?,
+        delivery_attempts: command.delivery_attempts,
+        assigned_service_account_id: command.assigned_service_account_id.map(|id| id.get()),
+        agent_instance: command.agent_instance,
+        delivered_at: command.delivered_at.map(|time| time.to_rfc3339()),
+        accepted_at: command.accepted_at.map(|time| time.to_rfc3339()),
+        completed_at: command.completed_at.map(|time| time.to_rfc3339()),
+        spool_job_id,
+        error_code: command.error_code,
+        error_message: command.error_message,
+        requested_by: command.requested_by.get(),
+        requested_at: command.requested_at.to_rfc3339(),
+    })
+}
+
 fn map_policy_expectation(
     value: ApiDocumentPolicyExpectation,
 ) -> V1Result<DocumentPolicyExpectation> {
@@ -502,6 +707,29 @@ const fn map_shipment_status(status: ShipmentStatus) -> ApiShipmentStatus {
         ShipmentStatus::PartiallyDeparted => ApiShipmentStatus::PartiallyDeparted,
         ShipmentStatus::Departed => ApiShipmentStatus::Departed,
         ShipmentStatus::Cancelled => ApiShipmentStatus::Cancelled,
+    }
+}
+
+const fn map_automation_health(value: AutomationHealthState) -> ApiAutomationHealthState {
+    match value {
+        AutomationHealthState::Unknown => ApiAutomationHealthState::Unknown,
+        AutomationHealthState::Healthy => ApiAutomationHealthState::Healthy,
+        AutomationHealthState::Degraded => ApiAutomationHealthState::Degraded,
+        AutomationHealthState::Offline => ApiAutomationHealthState::Offline,
+        AutomationHealthState::Faulted => ApiAutomationHealthState::Faulted,
+    }
+}
+
+const fn map_automation_status(value: AutomationCommandStatus) -> ApiAutomationCommandStatus {
+    match value {
+        AutomationCommandStatus::Queued => ApiAutomationCommandStatus::Queued,
+        AutomationCommandStatus::Delivered => ApiAutomationCommandStatus::Delivered,
+        AutomationCommandStatus::Accepted => ApiAutomationCommandStatus::Accepted,
+        AutomationCommandStatus::Succeeded => ApiAutomationCommandStatus::Succeeded,
+        AutomationCommandStatus::Failed => ApiAutomationCommandStatus::Failed,
+        AutomationCommandStatus::ManualReview => ApiAutomationCommandStatus::ManualReview,
+        AutomationCommandStatus::ResolvedManually => ApiAutomationCommandStatus::ResolvedManually,
+        AutomationCommandStatus::Cancelled => ApiAutomationCommandStatus::Cancelled,
     }
 }
 
@@ -582,4 +810,40 @@ fn domain_validation(error: impl std::fmt::Display) -> V1Error {
 
 fn invalid(message: impl Into<String>) -> V1Error {
     AppError::bad_request(message).into()
+}
+
+fn encode_print_cursor(
+    document_id: ShipmentDocumentId,
+    command_id: AutomationCommandId,
+) -> V1Result<OpaqueCursor> {
+    OpaqueCursor::new(format!(
+        "{PRINT_CURSOR_PREFIX}{:016x}.{:016x}",
+        document_id.get(),
+        command_id.get()
+    ))
+    .map_err(|_| V1Error::internal("generated an invalid shipment print cursor"))
+}
+
+fn decode_print_cursor(
+    cursor: &OpaqueCursor,
+    document_id: ShipmentDocumentId,
+) -> V1Result<AutomationCommandId> {
+    let value = cursor
+        .as_str()
+        .strip_prefix(PRINT_CURSOR_PREFIX)
+        .ok_or_else(|| invalid("shipment print cursor is invalid"))?;
+    let (document, command) = value
+        .split_once('.')
+        .ok_or_else(|| invalid("shipment print cursor is invalid"))?;
+    let cursor_document = i64::from_str_radix(document, 16)
+        .ok()
+        .and_then(|value| ShipmentDocumentId::new(value).ok())
+        .ok_or_else(|| invalid("shipment print cursor is invalid"))?;
+    if cursor_document != document_id {
+        return Err(invalid("shipment print cursor does not match the document"));
+    }
+    i64::from_str_radix(command, 16)
+        .ok()
+        .and_then(|value| AutomationCommandId::new(value).ok())
+        .ok_or_else(|| invalid("shipment print cursor is invalid"))
 }

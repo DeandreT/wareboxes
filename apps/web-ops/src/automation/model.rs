@@ -202,6 +202,7 @@ fn print_format(value: &str) -> Result<AutomationPrintFormat, String> {
         "zpl" => Ok(AutomationPrintFormat::Zpl),
         "pdf" => Ok(AutomationPrintFormat::Pdf),
         "png" => Ok(AutomationPrintFormat::Png),
+        "html" => Ok(AutomationPrintFormat::Html),
         _ => Err("Select a print format.".into()),
     }
 }

@@ -3,7 +3,7 @@ use serde::Serialize;
 use wareboxes_api_contract::v1::{
     AutomationCommandDeliveryResponse, AutomationCommandResponse, AutomationDeviceResponse,
     AutomationHeartbeatResponse, AutomationWorkspaceResponse, PackingScaleCommandContextResponse,
-    Revision,
+    Revision, ShippingDocumentPrintContextResponse,
 };
 use wareboxes_application::automation::{
     AutomationCommandReadModel, AutomationDeliveryReadModel, AutomationDeviceReadModel,
@@ -74,6 +74,14 @@ pub(crate) fn command(value: AutomationCommandReadModel) -> AppResult<Automation
                 session_id: context.session_id.get(),
                 carton_id: context.carton_id.get(),
                 carton_reopen_count: context.carton_reopen_count,
+            }
+        }),
+        shipping_document_print_context: value.shipping_document_print_context.map(|context| {
+            ShippingDocumentPrintContextResponse {
+                inventory_owner_id: context.inventory_owner_id.get(),
+                shipment_id: context.shipment_id.get(),
+                document_id: context.document_id.get(),
+                content_sha256: context.content_sha256,
             }
         }),
         status: transcode_response(value.status)?,

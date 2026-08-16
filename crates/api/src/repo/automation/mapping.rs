@@ -2,11 +2,13 @@ use sqlx::Row;
 use wareboxes_application::automation::{
     AutomationCommandReadModel, AutomationCommandStatus, AutomationDeviceReadModel,
     AutomationHeartbeatReadModel, AutomationManualResolution, PackingScaleCommandContext,
+    ShippingDocumentPrintContext,
 };
 use wareboxes_domain::{
     AutomationCommandId, AutomationCommandResult, AutomationControlMode, AutomationDeviceClass,
     AutomationDeviceId, AutomationHealthState, AutomationHeartbeatId, AutomationRecoveryPolicy,
-    CartonId, FacilityId, InventoryOwnerId, PackSessionId, ServiceAccountId, TenantId, UserId,
+    CartonId, FacilityId, InventoryOwnerId, PackSessionId, ServiceAccountId, ShipmentDocumentId,
+    ShipmentId, TenantId, UserId,
 };
 
 use crate::error::{AppError, AppResult};
@@ -47,6 +49,7 @@ pub(crate) fn command(row: &sqlx::postgres::PgRow) -> AppResult<AutomationComman
         command: serde_json::from_value(payload)
             .map_err(|error| AppError::internal(format!("invalid automation command: {error}")))?,
         packing_scale_context: packing_scale_context(row)?,
+        shipping_document_print_context: shipping_document_print_context(row)?,
         status: command_status(row.try_get("status")?)?,
         revision: revision(row, "revision")?,
         delivery_attempts: u32::try_from(row.try_get::<i32, _>("delivery_attempts")?)
@@ -104,6 +107,34 @@ fn packing_scale_context(
         }
         _ => Err(AppError::internal(
             "automation command has incomplete packing scale context",
+        )),
+    }
+}
+
+fn shipping_document_print_context(
+    row: &sqlx::postgres::PgRow,
+) -> AppResult<Option<ShippingDocumentPrintContext>> {
+    let owner_id = row.try_get::<Option<i64>, _>("shipping_inventory_owner_id")?;
+    let shipment_id = row.try_get::<Option<i64>, _>("shipping_shipment_id")?;
+    let document_id = row.try_get::<Option<i64>, _>("shipping_document_id")?;
+    let content_sha256 = row.try_get::<Option<Vec<u8>>, _>("shipping_document_content_sha256")?;
+    match (owner_id, shipment_id, document_id, content_sha256) {
+        (None, None, None, None) => Ok(None),
+        (Some(owner_id), Some(shipment_id), Some(document_id), Some(content_sha256))
+            if content_sha256.len() == 32 =>
+        {
+            Ok(Some(ShippingDocumentPrintContext {
+                inventory_owner_id: InventoryOwnerId::new(owner_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                shipment_id: ShipmentId::new(shipment_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                document_id: ShipmentDocumentId::new(document_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                content_sha256: hex::encode(content_sha256),
+            }))
+        }
+        _ => Err(AppError::internal(
+            "automation command has incomplete shipping print context",
         )),
     }
 }
@@ -217,6 +248,8 @@ command.id,command.tenant_id,command.facility_id,command.device_id,device.device
 command.device_class,command.correlation_id,command.recovery_policy,command.command_payload,
 command.packing_inventory_owner_id,command.packing_session_id,command.packing_carton_id,
 command.packing_carton_reopen_count,
+command.shipping_inventory_owner_id,command.shipping_shipment_id,command.shipping_document_id,
+command.shipping_document_content_sha256,
 command.status,command.revision,command.delivery_attempts,command.assigned_service_account_id,
 command.agent_instance,command.delivered_at,command.accepted_at,command.completed_at,
 command.result_payload,command.error_code,command.error_message,command.resolved_by_user_id,

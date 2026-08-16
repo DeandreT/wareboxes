@@ -52862,7 +52862,7 @@ BEGIN
     WHEN 'printer' THEN CASE operation
       WHEN 'print_document' THEN public.automation_json_object_size(command)=5
         AND public.automation_json_text_valid(command,'document_id',128)
-        AND command->>'format' IN ('zpl','pdf','png')
+        AND command->>'format' IN ('zpl','pdf','png','html')
         AND jsonb_typeof(command->'content')='string'
         AND octet_length(command->>'content') BETWEEN 1 AND 10485760
         AND jsonb_typeof(command->'copies')='number'
@@ -52940,6 +52940,10 @@ CREATE TABLE public.automation_commands (
   packing_session_id bigint,
   packing_carton_id bigint,
   packing_carton_reopen_count bigint,
+  shipping_inventory_owner_id bigint,
+  shipping_shipment_id bigint,
+  shipping_document_id bigint,
+  shipping_document_content_sha256 bytea,
   status text NOT NULL,
   revision integer NOT NULL,
   delivery_attempts integer NOT NULL,
@@ -52974,6 +52978,17 @@ CREATE TABLE public.automation_commands (
       AND packing_carton_id IS NOT NULL AND packing_carton_reopen_count>=0
       AND device_class='scale'
       AND command_payload->'command'->>'operation'='read_stable_weight')),
+  CHECK((shipping_inventory_owner_id IS NULL AND shipping_shipment_id IS NULL
+      AND shipping_document_id IS NULL AND shipping_document_content_sha256 IS NULL)
+    OR (shipping_inventory_owner_id IS NOT NULL AND shipping_shipment_id IS NOT NULL
+      AND shipping_document_id IS NOT NULL
+      AND octet_length(shipping_document_content_sha256)=32
+      AND device_class='printer'
+      AND command_payload->'command'->>'operation'='print_document'
+      AND command_payload->'command'->>'format'='html'
+      AND command_payload->'command'->>'document_id'=shipping_document_id::text
+      AND (command_payload->'command'->>'copies')::numeric BETWEEN 1 AND 100)),
+  CHECK(packing_session_id IS NULL OR shipping_document_id IS NULL),
   CHECK(status IN
     ('queued','delivered','accepted','succeeded','failed','manual_review',
       'resolved_manually','cancelled')),
@@ -53036,6 +53051,10 @@ CREATE TABLE public.automation_commands (
       packing_session_id,packing_carton_id)
     REFERENCES public.cartons(
       tenant_id,inventory_owner_id,facility_id,packing_session_id,id),
+  FOREIGN KEY(tenant_id,shipping_inventory_owner_id,facility_id,
+      shipping_shipment_id,shipping_document_id)
+    REFERENCES public.shipment_documents(
+      tenant_id,inventory_owner_id,facility_id,shipment_id,id),
   FOREIGN KEY(tenant_id,assigned_service_account_id)
     REFERENCES public.service_accounts(tenant_id,id),
   FOREIGN KEY(tenant_id,requested_by_user_id)
@@ -53047,6 +53066,9 @@ CREATE INDEX automation_commands_delivery_idx
 ON public.automation_commands(tenant_id,facility_id,status,requested_at,id);
 CREATE INDEX automation_commands_device_history_idx
 ON public.automation_commands(tenant_id,device_id,requested_at DESC,id DESC);
+CREATE INDEX automation_commands_shipping_document_history_idx
+ON public.automation_commands(tenant_id,shipping_document_id,id DESC)
+WHERE shipping_document_id IS NOT NULL;
 
 CREATE TABLE public.automation_command_events (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -53266,6 +53288,10 @@ BEGIN
         OR (NEW.device_class='scale'
           AND NEW.command_payload->'command'->>'operation'='read_stable_weight'
           AND NEW.packing_session_id IS NOT NULL
+          AND public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms'))
+        OR (NEW.device_class='printer'
+          AND NEW.command_payload->'command'->>'operation'='print_document'
+          AND NEW.shipping_document_id IS NOT NULL
           AND public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms')))
       OR NOT public.automation_interactive_user_scoped(
         NEW.tenant_id,actor_id,NEW.facility_id)
@@ -53292,7 +53318,37 @@ BEGIN
           AND carton.packing_session_id=NEW.packing_session_id
           AND carton.id=NEW.packing_carton_id
           AND carton.reopen_count=NEW.packing_carton_reopen_count
-          AND carton.state='open' AND session.state='open')) THEN
+          AND carton.state='open' AND session.state='open'))
+      OR (NEW.shipping_document_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM public.shipment_documents document
+        JOIN public.shipments shipment
+          ON shipment.tenant_id=document.tenant_id
+         AND shipment.inventory_owner_id=document.inventory_owner_id
+         AND shipment.facility_id=document.facility_id
+         AND shipment.id=document.shipment_id
+        JOIN public.tenant_memberships membership
+          ON membership.tenant_id=document.tenant_id
+         AND membership.user_id=actor_id AND membership.deleted IS NULL
+        WHERE document.tenant_id=NEW.tenant_id
+          AND document.inventory_owner_id=NEW.shipping_inventory_owner_id
+          AND document.facility_id=NEW.facility_id
+          AND document.shipment_id=NEW.shipping_shipment_id
+          AND document.id=NEW.shipping_document_id
+          AND shipment.state IN ('awaiting manifest','manifested')
+          AND (document.document_type='packing_slip'
+            OR shipment.state='manifested')
+          AND document.content_sha256=NEW.shipping_document_content_sha256
+          AND document.content=NEW.command_payload->'command'->>'content'
+          AND encode(sha256(convert_to(
+            NEW.command_payload->'command'->>'content','UTF8')),'hex')=
+              encode(document.content_sha256,'hex')
+          AND (membership.all_inventory_owners OR EXISTS(
+            SELECT 1 FROM public.user_inventory_owners assignment
+            WHERE assignment.tenant_id=membership.tenant_id
+              AND assignment.user_id=membership.user_id
+              AND assignment.inventory_owner_id=document.inventory_owner_id
+              AND assignment.deleted IS NULL))
+        FOR SHARE OF shipment)) THEN
       RAISE EXCEPTION 'invalid automation command enqueue' USING ERRCODE='23514';
     END IF;
     RETURN NEW;
@@ -53301,11 +53357,15 @@ BEGIN
       NEW.correlation_id,NEW.recovery_policy,NEW.command_payload,
       NEW.packing_inventory_owner_id,NEW.packing_session_id,
       NEW.packing_carton_id,NEW.packing_carton_reopen_count,
+      NEW.shipping_inventory_owner_id,NEW.shipping_shipment_id,
+      NEW.shipping_document_id,NEW.shipping_document_content_sha256,
       NEW.requested_by_user_id,NEW.requested_at) IS DISTINCT FROM
     ROW(OLD.id,OLD.tenant_id,OLD.facility_id,OLD.device_id,OLD.device_class,
       OLD.correlation_id,OLD.recovery_policy,OLD.command_payload,
       OLD.packing_inventory_owner_id,OLD.packing_session_id,
       OLD.packing_carton_id,OLD.packing_carton_reopen_count,
+      OLD.shipping_inventory_owner_id,OLD.shipping_shipment_id,
+      OLD.shipping_document_id,OLD.shipping_document_content_sha256,
       OLD.requested_by_user_id,OLD.requested_at) THEN
     RAISE EXCEPTION 'automation command envelope is immutable' USING ERRCODE='55000';
   END IF;
@@ -53327,6 +53387,38 @@ BEGIN
       OR NOT public.automation_interactive_user_scoped(
         NEW.tenant_id,actor_id,NEW.facility_id) THEN
       RAISE EXCEPTION 'invalid automation manual resolution' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.status='queued' AND NEW.status='cancelled'
+    AND OLD.shipping_document_id IS NOT NULL THEN
+    IF NEW.revision<>OLD.revision+1
+      OR NEW.completed_at NOT BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+        AND CURRENT_TIMESTAMP+INTERVAL '1 minute'
+      OR ROW(NEW.delivery_attempts,NEW.assigned_service_account_id,
+          NEW.agent_instance,NEW.delivery_token,NEW.delivered_at,
+          NEW.delivery_expires_at,NEW.accepted_at,NEW.result_payload,
+          NEW.error_code,NEW.error_message,NEW.resolved_by_user_id,
+          NEW.resolution_outcome,NEW.resolution_reason,NEW.resolved_at)
+        IS DISTINCT FROM
+        ROW(OLD.delivery_attempts,OLD.assigned_service_account_id,
+          OLD.agent_instance,OLD.delivery_token,OLD.delivered_at,
+          OLD.delivery_expires_at,OLD.accepted_at,OLD.result_payload,
+          OLD.error_code,OLD.error_message,OLD.resolved_by_user_id,
+          OLD.resolution_outcome,OLD.resolution_reason,OLD.resolved_at)
+      OR NOT public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms')
+      OR NOT public.automation_interactive_user_scoped(
+        NEW.tenant_id,actor_id,NEW.facility_id)
+      OR NOT EXISTS(SELECT 1 FROM public.tenant_memberships membership
+        WHERE membership.tenant_id=NEW.tenant_id AND membership.user_id=actor_id
+          AND membership.deleted IS NULL
+          AND (membership.all_inventory_owners OR EXISTS(
+            SELECT 1 FROM public.user_inventory_owners assignment
+            WHERE assignment.tenant_id=membership.tenant_id
+              AND assignment.user_id=membership.user_id
+              AND assignment.inventory_owner_id=NEW.shipping_inventory_owner_id
+              AND assignment.deleted IS NULL))) THEN
+      RAISE EXCEPTION 'invalid shipping print cancellation' USING ERRCODE='23514';
     END IF;
     RETURN NEW;
   END IF;
@@ -53396,6 +53488,13 @@ BEGIN
       OR NOT public.automation_interactive_user_scoped(
         NEW.tenant_id,actor_id,command.facility_id) THEN
       RAISE EXCEPTION 'invalid automation command resolution event' USING ERRCODE='23514';
+    END IF;
+  ELSIF NEW.transition='cancelled' AND command.shipping_document_id IS NOT NULL THEN
+    IF NEW.service_account_id IS NOT NULL
+      OR NOT public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms')
+      OR NOT public.automation_interactive_user_scoped(
+        NEW.tenant_id,actor_id,command.facility_id) THEN
+      RAISE EXCEPTION 'invalid shipping print cancellation event' USING ERRCODE='23514';
     END IF;
   ELSIF command.assigned_service_account_id IS DISTINCT FROM NEW.service_account_id
     OR public.automation_edge_service_account(
@@ -53492,6 +53591,29 @@ REVOKE ALL ON FUNCTION public.validate_automation_device() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_automation_command() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_automation_command_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_automation_heartbeat() FROM PUBLIC;
+
+-- A shipment cannot depart or be cancelled while a physical label command may
+-- still execute. Enqueue locks the shipment FOR SHARE; this transition holds
+-- the row UPDATE lock, so concurrent dispatch and departure serialize safely.
+CREATE FUNCTION public.guard_shipment_active_prints() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.state IS DISTINCT FROM OLD.state
+    AND NEW.state IN ('partially departed','departed','cancelled')
+    AND EXISTS(SELECT 1 FROM public.automation_commands command
+      WHERE command.tenant_id=OLD.tenant_id
+        AND command.shipping_shipment_id=OLD.id
+        AND command.status IN ('queued','delivered','accepted','manual_review')) THEN
+    RAISE EXCEPTION 'shipment has an active or unresolved document print command'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER shipments_guard_active_prints
+BEFORE UPDATE ON public.shipments
+FOR EACH ROW EXECUTE FUNCTION public.guard_shipment_active_prints();
+REVOKE ALL ON FUNCTION public.guard_shipment_active_prints() FROM PUBLIC;
 
 -- Carton weights retain append-only provenance across reopen/repack cycles. A
 -- completed scale reading is consumable once; manual entry remains an explicit

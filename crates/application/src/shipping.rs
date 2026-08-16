@@ -18,6 +18,7 @@ pub const CANCEL_SHIPMENT_OPERATION: &str = "shipping.shipment.cancel.v1";
 pub const GENERATE_PACKING_SLIP_OPERATION: &str = "shipping.document.packing_slip.generate.v1";
 pub const GENERATE_CARTON_LABEL_SET_OPERATION: &str =
     "shipping.document.carton_label_set.generate.v1";
+pub const CANCEL_SHIPMENT_DOCUMENT_PRINT_OPERATION: &str = "shipping.document.print.cancel.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,6 +136,13 @@ pub struct GenerateCartonLabelSetCommand {
     pub shipment_id: ShipmentId,
     pub expected_revision: ShipmentRevision,
     pub expected_policy: DocumentPolicyExpectation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelShipmentDocumentPrintCommand {
+    pub document_id: ShipmentDocumentId,
+    pub command_id: wareboxes_domain::AutomationCommandId,
+    pub expected_revision: u32,
 }
 
 /// Lists immutable documents belonging to one visible shipment.

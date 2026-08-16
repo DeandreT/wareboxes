@@ -5,7 +5,7 @@ use wareboxes_domain::{
     AutomationCommandId, AutomationCommandResult, AutomationControlMode, AutomationDeviceClass,
     AutomationDeviceCommand, AutomationDeviceId, AutomationHealthState, AutomationHeartbeatId,
     AutomationRecoveryPolicy, CartonId, FacilityId, InventoryOwnerId, PackSessionId,
-    ServiceAccountId, TenantId, Timestamp, UserId,
+    ServiceAccountId, ShipmentDocumentId, ShipmentId, TenantId, Timestamp, UserId,
 };
 
 pub const REGISTER_AUTOMATION_DEVICE_OPERATION: &str = "automation.device.register.v1";
@@ -97,12 +97,21 @@ pub struct PackingScaleCommandContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShippingDocumentPrintContext {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub shipment_id: ShipmentId,
+    pub document_id: ShipmentDocumentId,
+    pub content_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnqueueAutomationCommand {
     pub device_id: AutomationDeviceId,
     pub correlation_id: String,
     pub recovery_policy: AutomationRecoveryPolicy,
     pub command: AutomationDeviceCommand,
     pub packing_scale_context: Option<PackingScaleCommandContext>,
+    pub shipping_document_print_context: Option<ShippingDocumentPrintContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +191,7 @@ pub struct AutomationCommandReadModel {
     pub recovery_policy: AutomationRecoveryPolicy,
     pub command: AutomationDeviceCommand,
     pub packing_scale_context: Option<PackingScaleCommandContext>,
+    pub shipping_document_print_context: Option<ShippingDocumentPrintContext>,
     pub status: AutomationCommandStatus,
     pub revision: u32,
     pub delivery_attempts: u32,

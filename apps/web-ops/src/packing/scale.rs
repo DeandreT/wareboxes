@@ -311,6 +311,7 @@ mod tests {
                     carton_reopen_count: 0,
                 },
             ),
+            shipping_document_print_context: None,
             status: AutomationCommandStatus::Succeeded,
             revision: Revision::new(4).unwrap(),
             delivery_attempts: 1,

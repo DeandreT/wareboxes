@@ -83,6 +83,7 @@ pub async fn request_packing_scale_weight(
             timeout_ms: body.timeout_ms,
         }),
         packing_scale_context: Some(packing_scale_context),
+        shipping_document_print_context: None,
     };
     let result = repo::automation::enqueue_command(
         &state.db,

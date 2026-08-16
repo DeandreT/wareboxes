@@ -18,7 +18,7 @@ use crate::repo::orders::insert_order_activity_tx;
 use super::read_model::load_shipment_tx;
 use super::{
     enqueue_order_event_tx, lock_order_tx, lock_shipment_tx, order_hint_for_shipment_tx, positive,
-    require_replayed_shipment_id_visible_tx,
+    require_no_active_document_prints_tx, require_replayed_shipment_id_visible_tx,
 };
 
 pub async fn cancel_shipment(
@@ -89,6 +89,7 @@ pub async fn cancel_shipment(
     }
     let status = validate_cancellation(shipment.status)
         .map_err(|error| AppError::conflict(error.to_string()))?;
+    require_no_active_document_prints_tx(&mut tx, access.tenant_id, shipment.id).await?;
     let active_load_exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (

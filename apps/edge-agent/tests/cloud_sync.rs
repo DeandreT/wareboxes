@@ -317,6 +317,7 @@ fn fake_cloud() -> FakeCloud {
         recovery_policy: AutomationRecoveryPolicy::ManualReview,
         command: AutomationDeviceCommand::Scale(AutomationScaleCommand::Tare),
         packing_scale_context: None,
+        shipping_document_print_context: None,
         status: AutomationCommandStatus::Delivered,
         revision: Revision::new(2).unwrap(),
         delivery_attempts: 1,

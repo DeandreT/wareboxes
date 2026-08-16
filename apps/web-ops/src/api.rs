@@ -42,9 +42,14 @@ pub use automation::{
     register_automation_device, resolve_automation_command,
 };
 mod packing_scale;
+mod shipping_printing;
 pub use backorder::{configure_backorder_policy, split_order_backorder};
 pub use packing_scale::{
     packing_scale_devices, packing_scale_reading, request_packing_scale_weight,
+};
+pub use shipping_printing::{
+    cancel_shipment_document_print, print_shipment_document, shipment_document_print_job,
+    shipment_document_print_jobs, shipment_document_printers,
 };
 mod billing;
 pub use billing::{
