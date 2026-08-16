@@ -388,7 +388,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .await
     .unwrap();
-    let owner_wide_task = repo::tasks::create_location_cycle_count_task(
+    let facility_shared_task = repo::tasks::create_location_cycle_count_task(
         &fixture.db,
         tenant_id,
         administrator.id,
@@ -397,7 +397,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         None,
         None,
         None,
-        Some("all-owner task".to_owned()),
+        Some("facility-shared task".to_owned()),
     )
     .await
     .unwrap();
@@ -489,7 +489,9 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     assert!(visible_tasks
         .iter()
         .any(|task| task.id == allowed_owner_task));
-    assert!(visible_tasks.iter().all(|task| task.id != owner_wide_task));
+    assert!(visible_tasks
+        .iter()
+        .any(|task| task.id == facility_shared_task));
     assert!(visible_tasks.iter().all(|task| {
         task.facility_id != Some(denied_facility) && task.inventory_owner_id != Some(denied_owner)
     }));
@@ -626,6 +628,30 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/tasks/start-next",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed = response_json::<Option<WorkTask>>(response).await.unwrap();
+    assert_eq!(claimed.id, facility_shared_task);
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/tasks/cancel",
+        Some(json!({"task_id": facility_shared_task})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response_json::<bool>(response).await);
 
     let response = send_api(
         &app,
