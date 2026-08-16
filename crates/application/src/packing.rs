@@ -9,6 +9,8 @@ use wareboxes_domain::{
     PackSessionId, PackSessionStatus, PackingProgress, Timestamp, UserId,
 };
 
+use crate::packing_decision_policy::PackDecisionPolicyReadModel;
+
 pub const OPEN_PACK_SESSION_OPERATION: &str = "packing.session.open.v1";
 pub const CREATE_CARTON_OPERATION: &str = "packing.carton.create.v1";
 pub const PACK_PICKED_ALLOCATION_OPERATION: &str = "packing.content.confirm.v1";
@@ -19,11 +21,12 @@ pub const ABANDON_PACK_SESSION_OPERATION: &str = "packing.session.abandon.v1";
 pub const REOPEN_CARTON_OPERATION: &str = "packing.carton.reopen.v1";
 
 /// Starts packing one picked order at a scoped physical station.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenPackSessionCommand {
     pub order_id: OrderId,
     pub facility_id: FacilityId,
     pub station_location_id: LocationId,
+    pub station_location_barcode: Option<PackScanValue>,
     pub expected_revision: OrderRevision,
 }
 
@@ -141,6 +144,8 @@ pub struct PackSessionReadModel {
     pub station_location_id: LocationId,
     pub station_location_barcode: PackScanValue,
     pub station_location_name: Option<String>,
+    pub pack_policy: PackDecisionPolicyReadModel,
+    pub station_scan_verified: bool,
     pub order_key: String,
     pub revision: OrderRevision,
     pub status: PackSessionStatus,
@@ -282,6 +287,7 @@ pub struct CloseCartonResult {
     pub carton_id: CartonId,
     pub order_id: OrderId,
     pub lifecycle: PackCartonLifecycle,
+    pub pack_policy: PackDecisionPolicyReadModel,
     pub order_status: OrderStatus,
     pub revision: OrderRevision,
     pub progress: PackingProgress,
@@ -429,6 +435,7 @@ mod tests {
                 closed_by: UserId::new(4).unwrap(),
                 closed_at: "2026-08-08T20:00:00Z".parse().unwrap(),
             },
+            pack_policy: PackDecisionPolicyReadModel::product_default(),
             order_status: OrderStatus::AwaitingShipment,
             revision: OrderRevision::new(8).unwrap(),
             progress: PackingProgress::new(2, 2, 8, 8, 0, 1).unwrap(),

@@ -1,5 +1,6 @@
 mod common;
 mod api_v1_packing {
+    mod decision_policy;
     mod removal;
     mod reopening;
 }
@@ -15,9 +16,10 @@ use wareboxes_api::request_context::{IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER};
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CloseCartonResponse, CreateCartonResponse, ErrorReason, ErrorResponse, OpenPackSessionResponse,
-    PackCartonLifecycleResponse, PackPickedAllocationResponse, PackSessionResponse,
-    PackSessionStatus, PackingOrderStatus, PackingQueuePage, PickClaimResponse,
-    PickContentConfirmationResponse, PickOrderStatus, VoidCartonResponse,
+    PackCartonLifecycleResponse, PackDecisionPolicySource, PackPickedAllocationResponse,
+    PackSessionResponse, PackSessionStatus, PackingOrderStatus, PackingQueuePage,
+    PickClaimResponse, PickContentConfirmationResponse, PickOrderStatus, VoidCartonResponse,
+    PRODUCT_DEFAULT_PACK_DECISION_POLICY_HASH,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -675,6 +677,15 @@ async fn packing_is_exact_revisioned_replay_safe_and_conserves_reserved_inventor
     assert_eq!(opened.session.progress.status, PackSessionStatus::Open);
     assert_eq!(opened.session.progress.expected_allocation_count, 2);
     assert_eq!(opened.session.progress.expected_quantity, 5);
+    assert_eq!(
+        opened.session.pack_policy.source,
+        PackDecisionPolicySource::ProductDefault
+    );
+    assert_eq!(
+        opened.session.pack_policy.policy_hash,
+        PRODUCT_DEFAULT_PACK_DECISION_POLICY_HASH
+    );
+    assert!(!opened.session.station_scan_verified);
     assert_eq!(opened.session.allocations.len(), 2);
     assert!(opened
         .session
@@ -1019,6 +1030,7 @@ async fn packing_is_exact_revisioned_replay_safe_and_conserves_reserved_inventor
         PackingOrderStatus::AwaitingShipment
     );
     assert!(final_close.ready_to_manifest);
+    assert_eq!(final_close.pack_policy, opened.session.pack_policy);
     assert_eq!(final_close.revision.get(), 11);
     assert_eq!(
         final_close.progress.status,

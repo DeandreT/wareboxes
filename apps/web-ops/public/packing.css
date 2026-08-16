@@ -120,6 +120,26 @@
   margin-top: 4px;
 }
 
+.packing-station-scan {
+  display: grid;
+  max-width: 420px;
+  gap: 3px;
+  color: var(--label-ink);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.packing-station-scan input {
+  height: var(--control-height);
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 10px;
+}
+
 .packing-order-scan label,
 .packing-scan-field {
   position: relative;

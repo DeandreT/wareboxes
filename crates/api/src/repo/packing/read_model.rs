@@ -16,6 +16,8 @@ use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{current_scope_tx, ScopeBindings};
 
+use super::policy::decision_policy_from_session_row;
+
 pub async fn packing_session(
     db: &Db,
     access: &TenantAccess,
@@ -89,6 +91,12 @@ pub(super) async fn load_session_tx(
                session.started_at, session.state, session.abandonment_reason,
                session.abandonment_note, session.abandoned_by_user_id,
                session.abandoned_at, orders.order_key,
+               session.pack_policy_source, session.pack_configuration_id,
+               session.pack_configuration_revision, session.pack_scope_level,
+               session.pack_inventory_owner_id, session.pack_facility_id,
+               session.require_station_scan, session.require_weight,
+               session.allow_mixed_orders, session.pack_policy_hash,
+               session.station_scan_verified,
                location.barcode AS station_location_barcode,
                location.name AS station_location_name
         FROM packing_sessions session
@@ -129,6 +137,7 @@ pub(super) async fn load_session_tx(
     let cartons = load_cartons_tx(tx, tenant_id, session_id).await?;
     let allocations = load_allocations_tx(tx, tenant_id, session_id).await?;
     let (status, abandonment) = map_session_lifecycle(&row)?;
+    let pack_policy = decision_policy_from_session_row(&row)?;
     Ok(PackSessionReadModel {
         session_id,
         order_id: positive(row.try_get("order_id")?, OrderId::new)?,
@@ -137,6 +146,8 @@ pub(super) async fn load_session_tx(
         station_location_id: positive(row.try_get("packing_location_id")?, LocationId::new)?,
         station_location_barcode: scan(row.try_get("station_location_barcode")?)?,
         station_location_name: row.try_get("station_location_name")?,
+        pack_policy,
+        station_scan_verified: row.try_get("station_scan_verified")?,
         order_key: row.try_get("order_key")?,
         revision: positive(row.try_get("revision")?, OrderRevision::new)?,
         status,

@@ -1,11 +1,10 @@
 use leptos::html;
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    AbandonPackSessionRequest, CartonDimensions, CartonMeasurements, CloseCartonRequest,
-    CreateCartonRequest, DimensionMillimeters, OpaqueCursor, OpenPackSessionRequest,
-    PackAllocationDispositionResponse, PackCartonLifecycleResponse, PackPickedAllocationRequest,
-    PackSessionResponse, PackingQueueEntryResponse, PackingQueuePage, RemovePackedContentRequest,
-    VoidCartonRequest, WeightGrams,
+    AbandonPackSessionRequest, CloseCartonRequest, CreateCartonRequest, OpaqueCursor,
+    OpenPackSessionRequest, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
+    PackPickedAllocationRequest, PackSessionResponse, PackingQueueEntryResponse, PackingQueuePage,
+    RemovePackedContentRequest, VoidCartonRequest,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::Location;
@@ -18,6 +17,7 @@ use crate::view_model::format_quantity;
 mod abandonment;
 mod commands;
 mod identity;
+mod measurements;
 mod removal;
 mod reopening;
 mod view;
@@ -25,6 +25,7 @@ mod view;
 use self::abandonment::PackingAbandonmentDialog;
 use self::commands::{execute_command, PackingCommandResult, PendingPackingCommand};
 use self::identity::{advance_item_identity, matching_item_candidates, start_item_identity};
+use self::measurements::{parse_measurements, CartonMeasurementSignals};
 use self::removal::{PackingRemovalDialog, PendingContentRemoval};
 use self::reopening::{reopening_callbacks, PackingReopeningDialog, PendingCartonReopening};
 use self::view::{
@@ -83,6 +84,7 @@ impl PackingSignals {
 struct PackingLocation {
     id: i64,
     facility_id: i64,
+    barcode: String,
     label: String,
 }
 
@@ -157,6 +159,7 @@ pub(crate) fn PackingWorkspace(
     let retry = RwSignal::new(None::<PendingPackingCommand>);
     let refresh_order_id = RwSignal::new(None::<i64>);
     let scan = RwSignal::new(String::new());
+    let station_scan = RwSignal::new(String::new());
     let source_plate = RwSignal::new(None::<String>);
     let item_identity = RwSignal::new(None::<PendingItemIdentity>);
     let removal = RwSignal::new(None::<PendingContentRemoval>);
@@ -249,8 +252,15 @@ pub(crate) fn PackingWorkspace(
             );
             return;
         }
+        let scanned_station = match station_scan_value(&location, &station_scan.get_untracked()) {
+            Ok(value) => value,
+            Err(message) => {
+                set_error(signals, message);
+                return;
+            }
+        };
         invalidate_packing_queue_request(queue);
-        begin_or_resume_order(order, location, signals);
+        begin_or_resume_order(order, location, scanned_station, signals);
     });
 
     let submit_idle = move |event: leptos::ev::SubmitEvent| {
@@ -392,7 +402,10 @@ pub(crate) fn PackingWorkspace(
                     <select
                         prop:value=move || selected_location_id.get()
                         disabled=move || session.get().is_some() || signals.blocked()
-                        on:change=move |event| selected_location_id.set(event_target_value(&event))
+                        on:change=move |event| {
+                            selected_location_id.set(event_target_value(&event));
+                            station_scan.set(String::new());
+                        }
                     >
                         {station_locations
                             .get_value()
@@ -420,6 +433,7 @@ pub(crate) fn PackingWorkspace(
                         queue
                         scan
                         scan_input
+                        station_scan
                         selected_location_id
                         station_locations
                         signals
@@ -588,26 +602,10 @@ fn install_packing_queue_poll(queue: PackingQueueSignals, signals: PackingSignal
     on_cleanup(move || handle.clear());
 }
 
-#[derive(Clone, Copy)]
-struct CartonMeasurementSignals {
-    weight: RwSignal<String>,
-    length: RwSignal<String>,
-    width: RwSignal<String>,
-    height: RwSignal<String>,
-}
-
-impl CartonMeasurementSignals {
-    fn clear(self) {
-        self.weight.set(String::new());
-        self.length.set(String::new());
-        self.width.set(String::new());
-        self.height.set(String::new());
-    }
-}
-
 fn begin_or_resume_order(
     order: PackingQueueEntryResponse,
     location: PackingLocation,
+    station_scan: Option<String>,
     signals: PackingSignals,
 ) {
     signals.item_identity.set(None);
@@ -633,6 +631,7 @@ fn begin_or_resume_order(
                         request: OpenPackSessionRequest {
                             facility_id: location.facility_id,
                             station_location_id: location.id,
+                            station_location_barcode: station_scan,
                             expected_revision: order.revision,
                         },
                         idempotency_key: api::new_idempotency_key(),
@@ -823,6 +822,13 @@ fn close_current_carton(signals: PackingSignals) {
             return;
         }
     };
+    if current.pack_policy.require_weight && measurements.weight_grams.is_none() {
+        set_error(
+            signals,
+            "The effective Pack policy requires a carton weight.",
+        );
+        return;
+    }
     dispatch_command(
         PendingPackingCommand::CloseCarton {
             session_id: current.session_id,
@@ -1138,68 +1144,37 @@ fn set_error(signals: PackingSignals, message: impl Into<String>) {
     signals.refocus();
 }
 
-fn parse_measurements(signals: CartonMeasurementSignals) -> Result<CartonMeasurements, String> {
-    let weight = optional_positive(&signals.weight.get_untracked(), "weight")?
-        .map(WeightGrams::new)
-        .transpose()
-        .map_err(|error| error.to_string())?;
-    let dimensions = [
-        signals.length.get_untracked(),
-        signals.width.get_untracked(),
-        signals.height.get_untracked(),
-    ];
-    let populated = dimensions
-        .iter()
-        .filter(|value| !value.trim().is_empty())
-        .count();
-    let dimensions = if populated == 0 {
-        None
-    } else if populated != 3 {
-        return Err("Enter all three carton dimensions or leave all three blank.".to_owned());
-    } else {
-        let length_mm = DimensionMillimeters::new(required_positive(&dimensions[0], "length")?)
-            .map_err(|error| error.to_string())?;
-        let width_mm = DimensionMillimeters::new(required_positive(&dimensions[1], "width")?)
-            .map_err(|error| error.to_string())?;
-        let height_mm = DimensionMillimeters::new(required_positive(&dimensions[2], "height")?)
-            .map_err(|error| error.to_string())?;
-        Some(CartonDimensions {
-            length_mm,
-            width_mm,
-            height_mm,
-        })
-    };
-    Ok(CartonMeasurements {
-        weight_grams: weight,
-        dimensions,
-    })
-}
-
-fn optional_positive(value: &str, label: &str) -> Result<Option<i64>, String> {
-    if value.trim().is_empty() {
+fn station_scan_value(
+    location: &PackingLocation,
+    scanned: &str,
+) -> Result<Option<String>, &'static str> {
+    let scanned = scanned.trim();
+    if scanned.is_empty() {
         Ok(None)
+    } else if scanned == location.barcode {
+        Ok(Some(scanned.to_owned()))
     } else {
-        required_positive(value, label).map(Some)
+        Err("The scanned station does not match the selected packing location.")
     }
-}
-
-fn required_positive(value: &str, label: &str) -> Result<i64, String> {
-    value
-        .trim()
-        .parse::<i64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or_else(|| format!("Enter a positive whole-number {label}."))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::required_positive;
+    use super::{station_scan_value, PackingLocation};
 
     #[test]
-    fn measurements_accept_only_positive_whole_numbers() {
-        assert_eq!(required_positive(" 1250 ", "weight"), Ok(1250));
-        assert!(required_positive("0", "weight").is_err());
-        assert!(required_positive("1.5", "weight").is_err());
+    fn station_scan_is_optional_but_must_match_exactly_when_present() {
+        let location = PackingLocation {
+            id: 1,
+            facility_id: 2,
+            barcode: "PACK-01".into(),
+            label: "Pack 01".into(),
+        };
+        assert_eq!(station_scan_value(&location, "  "), Ok(None));
+        assert_eq!(
+            station_scan_value(&location, " PACK-01 "),
+            Ok(Some("PACK-01".into()))
+        );
+        assert!(station_scan_value(&location, "PACK-02").is_err());
     }
 }

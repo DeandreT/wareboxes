@@ -3,6 +3,7 @@
 mod abandonment;
 mod carton;
 mod content;
+mod policy;
 mod queue;
 mod read_model;
 mod removal;
@@ -53,6 +54,7 @@ pub(super) struct LockedSession {
     pub packed_qty: i64,
     pub open_carton_count: i64,
     pub closed_carton_count: i64,
+    pub pack_policy: wareboxes_application::packing_decision_policy::PackDecisionPolicyReadModel,
 }
 
 pub(super) async fn lock_order_tx(
@@ -99,7 +101,11 @@ pub(super) async fn lock_session_tx(
         SELECT id, order_id, inventory_owner_id, facility_id, order_release_id,
                packing_location_id, state, revision,
                expected_allocation_count, packed_allocation_count,
-               expected_qty, packed_qty, open_carton_count, closed_carton_count
+               expected_qty, packed_qty, open_carton_count, closed_carton_count,
+               pack_policy_source, pack_configuration_id, pack_configuration_revision,
+               pack_scope_level, pack_inventory_owner_id, pack_facility_id,
+               require_station_scan, require_weight, allow_mixed_orders,
+               pack_policy_hash
         FROM packing_sessions
         WHERE tenant_id = $1 AND id = $2
           AND ($3 OR facility_id = ANY($4))
@@ -116,6 +122,7 @@ pub(super) async fn lock_session_tx(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::not_found("packing session"))?;
+    let pack_policy = policy::decision_policy_from_session_row(&row)?;
     Ok(LockedSession {
         id: PackSessionId::new(row.try_get("id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -135,6 +142,7 @@ pub(super) async fn lock_session_tx(
         packed_qty: row.try_get("packed_qty")?,
         open_carton_count: row.try_get("open_carton_count")?,
         closed_carton_count: row.try_get("closed_carton_count")?,
+        pack_policy,
     })
 }
 

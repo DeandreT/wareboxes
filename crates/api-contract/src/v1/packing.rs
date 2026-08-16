@@ -3,7 +3,32 @@ use std::fmt;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
+use super::{ConfigurationScope, CursorPage, OpaqueCursor, PageLimit, Revision};
+
+pub const PRODUCT_DEFAULT_PACK_DECISION_POLICY_HASH: &str =
+    "a5fc7b3c670e596ce983c7ff342c1351cd95be99c889e0d12a8b26abbaa4ac57";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackDecisionPolicySource {
+    ProductDefault,
+    Configuration,
+}
+
+/// Immutable policy evidence selected when a packing session opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackDecisionPolicyResponse {
+    pub source: PackDecisionPolicySource,
+    pub configuration_id: Option<i64>,
+    pub configuration_revision: Option<i64>,
+    pub configuration_scope: Option<ConfigurationScope>,
+    pub require_station_scan: bool,
+    pub require_weight: bool,
+    /// Whether distinct orders may have concurrent sessions at one station.
+    pub allow_mixed_orders: bool,
+    pub policy_hash: String,
+}
 
 /// Pack-session state derived from allocation and carton conservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,11 +231,13 @@ pub struct PackingProgressResponse {
 }
 
 /// Starts a station session for an order at its observed revision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenPackSessionRequest {
     pub facility_id: i64,
     pub station_location_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub station_location_barcode: Option<String>,
     pub expected_revision: Revision,
 }
 
@@ -405,6 +432,8 @@ pub struct PackSessionResponse {
     pub station_location_id: i64,
     pub station_location_barcode: String,
     pub station_location_name: Option<String>,
+    pub pack_policy: PackDecisionPolicyResponse,
+    pub station_scan_verified: bool,
     pub order_key: String,
     pub revision: Revision,
     pub status: PackSessionStatus,
@@ -506,6 +535,7 @@ pub struct CloseCartonResponse {
     pub carton_id: i64,
     pub order_id: i64,
     pub lifecycle: PackCartonLifecycleResponse,
+    pub pack_policy: PackDecisionPolicyResponse,
     pub order_status: PackingOrderStatus,
     pub revision: Revision,
     pub progress: PackingProgressResponse,

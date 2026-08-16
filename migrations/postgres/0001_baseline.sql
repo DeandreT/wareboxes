@@ -50364,3 +50364,194 @@ BEFORE INSERT ON public.pick_confirmations FOR EACH ROW
 EXECUTE FUNCTION public.validate_pick_confirmation_policy_evidence();
 REVOKE ALL ON FUNCTION public.validate_pick_task_policy_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_pick_confirmation_policy_evidence() FROM PUBLIC;
+
+-- Pack policy is selected once when the order enters a physical station. The
+-- snapshot governs station admission and carton measurement for the session's
+-- complete lifetime; mixed orders means concurrent order sessions at a station,
+-- never mixed ownership inside a carton.
+ALTER TABLE public.packing_sessions
+  ADD COLUMN pack_policy_source text NOT NULL,
+  ADD COLUMN pack_configuration_id bigint,
+  ADD COLUMN pack_configuration_revision bigint,
+  ADD COLUMN pack_scope_level text,
+  ADD COLUMN pack_inventory_owner_id bigint,
+  ADD COLUMN pack_facility_id bigint,
+  ADD COLUMN require_station_scan boolean NOT NULL,
+  ADD COLUMN require_weight boolean NOT NULL,
+  ADD COLUMN allow_mixed_orders boolean NOT NULL,
+  ADD COLUMN pack_policy_hash text NOT NULL,
+  ADD COLUMN station_scan_value text,
+  ADD COLUMN station_scan_verified boolean NOT NULL,
+  ADD CONSTRAINT packing_sessions_pack_policy_identity_check CHECK (
+    pack_policy_source IN ('product_default','configuration')
+    AND pack_policy_hash~'^[0-9a-f]{64}$'
+    AND ((pack_policy_source='product_default'
+      AND pack_configuration_id IS NULL AND pack_configuration_revision IS NULL
+      AND pack_scope_level IS NULL AND pack_inventory_owner_id IS NULL
+      AND pack_facility_id IS NULL AND NOT require_station_scan
+      AND NOT require_weight AND allow_mixed_orders)
+    OR (pack_policy_source='configuration'
+      AND pack_configuration_id IS NOT NULL AND pack_configuration_revision>0
+      AND ((pack_scope_level='tenant' AND pack_inventory_owner_id IS NULL
+            AND pack_facility_id IS NULL)
+        OR (pack_scope_level='inventory_owner' AND pack_inventory_owner_id IS NOT NULL
+            AND pack_facility_id IS NULL)
+        OR (pack_scope_level='facility' AND pack_inventory_owner_id IS NULL
+            AND pack_facility_id IS NOT NULL)
+        OR (pack_scope_level='owner_facility' AND pack_inventory_owner_id IS NOT NULL
+            AND pack_facility_id IS NOT NULL))))),
+  ADD CONSTRAINT packing_sessions_station_scan_evidence_check CHECK (
+    (station_scan_verified AND station_scan_value IS NOT NULL)
+    OR (NOT station_scan_verified AND station_scan_value IS NULL)),
+  ADD CONSTRAINT packing_sessions_required_station_scan_check CHECK (
+    NOT require_station_scan OR station_scan_verified),
+  ADD CONSTRAINT packing_sessions_station_scan_value_check CHECK (
+    station_scan_value IS NULL OR
+    (station_scan_value=btrim(station_scan_value) AND station_scan_value<>''
+      AND char_length(station_scan_value)<=200));
+ALTER TABLE public.packing_sessions
+  ADD CONSTRAINT packing_sessions_pack_configuration_fkey
+  FOREIGN KEY (tenant_id,pack_configuration_id)
+  REFERENCES public.configuration_versions(tenant_id,id);
+CREATE INDEX packing_sessions_pack_configuration_idx
+ON public.packing_sessions(tenant_id,pack_configuration_id)
+WHERE pack_configuration_id IS NOT NULL;
+
+CREATE FUNCTION public.validate_pack_policy_snapshot() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE configuration_row public.configuration_versions%ROWTYPE;
+DECLARE resolved_configuration_id bigint;
+DECLARE scope_component text;
+DECLARE calculated_hash text;
+DECLARE station_barcode text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'configuration-kind:%s:pack',NEW.tenant_id),0));
+  SELECT configuration.id INTO resolved_configuration_id
+  FROM public.configuration_versions configuration
+  WHERE configuration.tenant_id=NEW.tenant_id AND configuration.kind='pack'
+    AND configuration.status='active' AND configuration.activated_at<=NEW.started_at
+    AND configuration.effective_from<=NEW.started_at
+    AND (configuration.effective_until IS NULL OR configuration.effective_until>NEW.started_at)
+    AND (configuration.inventory_owner_id IS NULL
+      OR configuration.inventory_owner_id=NEW.inventory_owner_id)
+    AND (configuration.facility_id IS NULL OR configuration.facility_id=NEW.facility_id)
+  ORDER BY CASE configuration.scope_level
+    WHEN 'owner_facility' THEN 2 WHEN 'inventory_owner' THEN 1
+    WHEN 'facility' THEN 1 ELSE 0 END DESC,
+    configuration.effective_from DESC,configuration.revision DESC,configuration.id DESC
+  LIMIT 1;
+
+  IF NEW.pack_policy_source='product_default' THEN
+    IF resolved_configuration_id IS NOT NULL OR NEW.require_station_scan
+      OR NEW.require_weight OR NOT NEW.allow_mixed_orders THEN
+      RAISE EXCEPTION 'Pack product default is not effective' USING ERRCODE='23514';
+    END IF;
+    scope_component:='-';
+  ELSIF NEW.pack_policy_source='configuration' THEN
+    SELECT * INTO configuration_row FROM public.configuration_versions configuration
+    WHERE configuration.tenant_id=NEW.tenant_id
+      AND configuration.id=NEW.pack_configuration_id;
+    IF configuration_row.id IS NULL
+      OR resolved_configuration_id IS DISTINCT FROM configuration_row.id
+      OR configuration_row.kind<>'pack' OR configuration_row.status<>'active'
+      OR configuration_row.revision<>NEW.pack_configuration_revision
+      OR configuration_row.scope_level<>NEW.pack_scope_level
+      OR configuration_row.inventory_owner_id IS DISTINCT FROM NEW.pack_inventory_owner_id
+      OR configuration_row.facility_id IS DISTINCT FROM NEW.pack_facility_id
+      OR configuration_row.definition<>jsonb_build_object(
+        'kind','pack','require_station_scan',NEW.require_station_scan,
+        'require_weight',NEW.require_weight,
+        'allow_mixed_orders',NEW.allow_mixed_orders) THEN
+      RAISE EXCEPTION 'Pack configuration snapshot is stale or inapplicable'
+        USING ERRCODE='23514';
+    END IF;
+    scope_component:=CASE NEW.pack_scope_level
+      WHEN 'tenant' THEN 'tenant'
+      WHEN 'inventory_owner' THEN 'inventory_owner:'||NEW.pack_inventory_owner_id::text
+      WHEN 'facility' THEN 'facility:'||NEW.pack_facility_id::text
+      WHEN 'owner_facility' THEN 'owner_facility:'||NEW.pack_inventory_owner_id::text
+        ||':'||NEW.pack_facility_id::text ELSE NULL END;
+  ELSE
+    RAISE EXCEPTION 'Pack policy source is invalid' USING ERRCODE='23514';
+  END IF;
+  calculated_hash:=encode(sha256(convert_to(
+    'pack-decision-policy-v1|'||NEW.pack_policy_source||'|'
+    ||COALESCE(NEW.pack_configuration_id::text,'-')||'|'
+    ||COALESCE(NEW.pack_configuration_revision::text,'-')||'|'
+    ||scope_component||'|'||NEW.require_station_scan::text||'|'
+    ||NEW.require_weight::text||'|'||NEW.allow_mixed_orders::text,
+    'UTF8')),'hex');
+  IF calculated_hash IS DISTINCT FROM NEW.pack_policy_hash THEN
+    RAISE EXCEPTION 'Pack policy hash does not match its evidence' USING ERRCODE='23514';
+  END IF;
+
+  SELECT location.barcode INTO station_barcode FROM public.locations location
+  WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+    AND location.id=NEW.packing_location_id AND location.deleted IS NULL
+    AND location.active AND NOT location.pickable AND lower(location.type)='packing'
+    AND location.barcode IS NOT NULL AND btrim(location.barcode)<>''
+  FOR SHARE;
+  IF NEW.station_scan_verified
+    AND NEW.station_scan_value IS DISTINCT FROM station_barcode THEN
+    RAISE EXCEPTION 'Pack station scan does not match its location' USING ERRCODE='23514';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(format(
+    'packing-station:%s:%s:%s',NEW.tenant_id,NEW.facility_id,NEW.packing_location_id),0));
+  IF EXISTS (
+    SELECT 1 FROM public.packing_sessions session
+    WHERE session.tenant_id=NEW.tenant_id AND session.facility_id=NEW.facility_id
+      AND session.packing_location_id=NEW.packing_location_id AND session.state='open'
+      AND (NOT NEW.allow_mixed_orders OR NOT session.allow_mixed_orders)
+  ) THEN
+    RAISE EXCEPTION 'Pack policy reserves this station for one order'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_pack_policy_snapshot() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.pack_policy_source,NEW.pack_configuration_id,
+    NEW.pack_configuration_revision,NEW.pack_scope_level,
+    NEW.pack_inventory_owner_id,NEW.pack_facility_id,
+    NEW.require_station_scan,NEW.require_weight,NEW.allow_mixed_orders,
+    NEW.pack_policy_hash,NEW.station_scan_value,NEW.station_scan_verified)
+    IS DISTINCT FROM
+    ROW(OLD.pack_policy_source,OLD.pack_configuration_id,
+    OLD.pack_configuration_revision,OLD.pack_scope_level,
+    OLD.pack_inventory_owner_id,OLD.pack_facility_id,
+    OLD.require_station_scan,OLD.require_weight,OLD.allow_mixed_orders,
+    OLD.pack_policy_hash,OLD.station_scan_value,OLD.station_scan_verified) THEN
+    RAISE EXCEPTION 'frozen Pack policy evidence is immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_pack_carton_weight() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.state='closed' AND OLD.state<>'closed' AND EXISTS (
+    SELECT 1 FROM public.packing_sessions session
+    WHERE session.tenant_id=NEW.tenant_id AND session.id=NEW.packing_session_id
+      AND session.require_weight AND NEW.weight_g IS NULL
+  ) THEN
+    RAISE EXCEPTION 'effective Pack policy requires carton weight' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER packing_sessions_pack_policy_validate
+BEFORE INSERT ON public.packing_sessions FOR EACH ROW
+EXECUTE FUNCTION public.validate_pack_policy_snapshot();
+CREATE TRIGGER packing_sessions_pack_policy_guard
+BEFORE UPDATE ON public.packing_sessions FOR EACH ROW
+EXECUTE FUNCTION public.guard_pack_policy_snapshot();
+CREATE TRIGGER cartons_pack_weight_validate
+BEFORE UPDATE ON public.cartons FOR EACH ROW
+EXECUTE FUNCTION public.validate_pack_carton_weight();
+REVOKE ALL ON FUNCTION public.validate_pack_policy_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_pack_policy_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_pack_carton_weight() FROM PUBLIC;

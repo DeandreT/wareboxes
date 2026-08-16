@@ -10,11 +10,11 @@ use wareboxes_core::models::Location;
 use crate::components::{Icon, UiIcon};
 use crate::view_model::format_quantity;
 
+use super::measurements::CartonMeasurementSignals;
 use super::removal::PendingContentRemoval;
 use super::reopening::PendingCartonReopening;
 use super::{
-    CartonMeasurementSignals, IdentityScanStage, PackingLocation, PackingQueueSignals,
-    PackingSignals, PendingItemIdentity,
+    IdentityScanStage, PackingLocation, PackingQueueSignals, PackingSignals, PendingItemIdentity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +31,7 @@ pub(super) fn PackingIdle(
     queue: PackingQueueSignals,
     scan: RwSignal<String>,
     scan_input: NodeRef<html::Input>,
+    station_scan: RwSignal<String>,
     selected_location_id: RwSignal<String>,
     station_locations: StoredValue<Vec<PackingLocation>>,
     signals: PackingSignals,
@@ -78,6 +79,16 @@ pub(super) fn PackingIdle(
                         {move || if signals.pending.get() { "Opening" } else { "Open order" }}
                     </button>
                 </div>
+                <label class="packing-station-scan">
+                    <span>"Station scan (when policy requires)"</span>
+                    <input
+                        autocomplete="off"
+                        placeholder="SCAN PACKING STATION"
+                        prop:value=move || station_scan.get()
+                        disabled=move || signals.blocked()
+                        on:input=move |event| station_scan.set(event_target_value(&event))
+                    />
+                </label>
                 <CommandStatus signals idle=true/>
                 <Show when=move || signals.retry.get().is_some() || signals.refresh_order_id.get().is_some()>
                     <button
@@ -227,6 +238,32 @@ pub(super) fn PackingActive(
     let has_active_carton = active_carton_for_form.get_value().is_some();
     let active_carton_for_summary = open_carton.clone();
     let can_reopen_carton = open_carton.is_none();
+    let pack_policy = current.pack_policy.clone();
+    let policy_source = match pack_policy.source {
+        wareboxes_api_contract::v1::PackDecisionPolicySource::ProductDefault => "Product default",
+        wareboxes_api_contract::v1::PackDecisionPolicySource::Configuration => "Configured",
+    };
+    let policy_summary = format!(
+        "{} · station scan {} · weight {} · shared station {}",
+        policy_source,
+        if pack_policy.require_station_scan {
+            "required"
+        } else {
+            "optional"
+        },
+        if pack_policy.require_weight {
+            "required"
+        } else {
+            "optional"
+        },
+        if pack_policy.allow_mixed_orders {
+            "allowed"
+        } else {
+            "blocked"
+        },
+    );
+    let policy_hash = pack_policy.policy_hash.clone();
+    let require_weight = pack_policy.require_weight;
 
     view! {
         <div class="packing-active">
@@ -279,6 +316,7 @@ pub(super) fn PackingActive(
                         <div><dt>"Revision"</dt><dd>{current.revision.get()}</dd></div>
                         <div><dt>"Station"</dt><dd title=station_title>{station_name}</dd></div>
                         <div><dt>"Progress"</dt><dd>{format!("{packed_count}/{expected_count}")}</dd></div>
+                        <div class="wide"><dt>"Pack policy"</dt><dd title=policy_hash>{policy_summary}</dd></div>
                     </dl>
                     <header class="packing-panel-header">
                         <h2>"Source totes"</h2>
@@ -421,7 +459,13 @@ pub(super) fn PackingActive(
                         }
                     >
                         {move || active_carton_for_form.get_value().map(|carton| view! {
-                            <CloseCartonPanel carton on_close on_void signals/>
+                            <CloseCartonPanel
+                                carton
+                                require_weight
+                                on_close
+                                on_void
+                                signals
+                            />
                         })}
                     </Show>
                     <div class="packing-carton-list">
@@ -539,6 +583,7 @@ fn CommandStatus(signals: PackingSignals, idle: bool) -> impl IntoView {
 #[component]
 fn CloseCartonPanel(
     carton: wareboxes_api_contract::v1::PackCartonResponse,
+    require_weight: bool,
     on_close: Callback<()>,
     on_void: Callback<()>,
     signals: PackingSignals,
@@ -555,7 +600,7 @@ fn CloseCartonPanel(
             <strong>{carton.carton_barcode}</strong>
             <Show when=move || !empty>
                 <div class="packing-measurement-grid">
-                    <label class="wide"><span>"Weight (g)"</span><input inputmode="numeric" prop:value=move || weight.get() on:input=move |event| weight.set(event_target_value(&event))/></label>
+                    <label class="wide"><span>{if require_weight { "Weight (g) · required" } else { "Weight (g)" }}</span><input required=require_weight inputmode="numeric" prop:value=move || weight.get() on:input=move |event| weight.set(event_target_value(&event))/></label>
                     <label><span>"Length (mm)"</span><input inputmode="numeric" prop:value=move || length.get() on:input=move |event| length.set(event_target_value(&event))/></label>
                     <label><span>"Width (mm)"</span><input inputmode="numeric" prop:value=move || width.get() on:input=move |event| width.set(event_target_value(&event))/></label>
                     <label><span>"Height (mm)"</span><input inputmode="numeric" prop:value=move || height.get() on:input=move |event| height.set(event_target_value(&event))/></label>
@@ -612,6 +657,7 @@ pub(super) fn packing_locations(locations: Vec<Location>) -> Vec<PackingLocation
             Some(PackingLocation {
                 id: location.id,
                 facility_id: location.facility_id,
+                barcode,
                 label,
             })
         })

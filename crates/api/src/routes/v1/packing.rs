@@ -6,8 +6,9 @@ use wareboxes_api_contract::v1::{
     DimensionMillimeters as ApiDimensionMillimeters, OpaqueCursor, OpenPackSessionRequest,
     OpenPackSessionResponse, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
     PackCartonResponse, PackContentRemovalReason as ApiPackContentRemovalReason,
-    PackPickedAllocationRequest, PackPickedAllocationResponse,
-    PackSessionAbandonmentReason as ApiPackSessionAbandonmentReason,
+    PackDecisionPolicyResponse as ApiPackDecisionPolicyResponse,
+    PackDecisionPolicySource as ApiPackDecisionPolicySource, PackPickedAllocationRequest,
+    PackPickedAllocationResponse, PackSessionAbandonmentReason as ApiPackSessionAbandonmentReason,
     PackSessionAbandonmentResponse, PackSessionResponse, PackSessionStatus as ApiSessionStatus,
     PackableAllocationResponse, PackingOrderStatus, PackingProgressResponse,
     PackingQueueEntryResponse, PackingQueueOrderStatus, PackingQueuePage as ApiPackingQueuePage,
@@ -22,13 +23,16 @@ use wareboxes_application::packing::{
     PackSessionReadModel, PackableAllocation, RemovePackedContentCommand,
     RemovePackedContentResult, VoidCartonCommand, VoidCartonResult,
 };
+use wareboxes_application::packing_decision_policy::{
+    PackDecisionPolicyReadModel, PackDecisionPolicySource,
+};
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    CartonContentId, CartonDimensions, CartonId, CartonMeasurements, DimensionMillimeters,
-    FacilityId, InventoryAllocationId, LocationId, OrderId, OrderRevision, OrderStatus,
-    PackContentRemovalDetails, PackContentRemovalNote, PackContentRemovalReason, PackScanValue,
-    PackSessionAbandonmentReason, PackSessionId, PackSessionStatus, PackingProgress, WeightGrams,
-    MAX_PACK_SCAN_VALUE_LENGTH,
+    CartonContentId, CartonDimensions, CartonId, CartonMeasurements, ConfigurationScope,
+    DimensionMillimeters, FacilityId, InventoryAllocationId, LocationId, OrderId, OrderRevision,
+    OrderStatus, PackContentRemovalDetails, PackContentRemovalNote, PackContentRemovalReason,
+    PackScanValue, PackSessionAbandonmentReason, PackSessionId, PackSessionStatus, PackingProgress,
+    WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
 };
 
 use super::error::{V1Error, V1Result};
@@ -213,6 +217,10 @@ fn open_command(order_id: i64, body: OpenPackSessionRequest) -> V1Result<OpenPac
         facility_id: FacilityId::new(body.facility_id).map_err(domain_validation)?,
         station_location_id: LocationId::new(body.station_location_id)
             .map_err(domain_validation)?,
+        station_location_barcode: body
+            .station_location_barcode
+            .map(|value| scan(value, "station location barcode"))
+            .transpose()?,
         expected_revision: order_revision(body.expected_revision)?,
     })
 }
@@ -475,6 +483,8 @@ fn map_session(session: PackSessionReadModel) -> V1Result<PackSessionResponse> {
         station_location_id: session.station_location_id.get(),
         station_location_barcode: session.station_location_barcode.into_inner(),
         station_location_name: session.station_location_name,
+        pack_policy: map_pack_policy(session.pack_policy),
+        station_scan_verified: session.station_scan_verified,
         order_key: session.order_key,
         revision: revision(session.revision)?,
         status,
@@ -594,6 +604,7 @@ fn map_removed_content(result: RemovePackedContentResult) -> V1Result<RemovePack
 }
 
 fn map_closed_carton(result: CloseCartonResult) -> V1Result<CloseCartonResponse> {
+    let ready_to_manifest = result.ready_to_manifest();
     let order_status = match result.order_status {
         OrderStatus::Packing => PackingOrderStatus::Packing,
         OrderStatus::AwaitingShipment => PackingOrderStatus::AwaitingShipment,
@@ -608,11 +619,47 @@ fn map_closed_carton(result: CloseCartonResult) -> V1Result<CloseCartonResponse>
         carton_id: result.carton_id.get(),
         order_id: result.order_id.get(),
         lifecycle: map_carton_lifecycle(result.lifecycle)?,
+        pack_policy: map_pack_policy(result.pack_policy),
         order_status,
         revision: revision(result.revision)?,
         progress: map_progress(result.progress),
-        ready_to_manifest: result.ready_to_manifest(),
+        ready_to_manifest,
     })
+}
+
+fn map_pack_policy(value: PackDecisionPolicyReadModel) -> ApiPackDecisionPolicyResponse {
+    ApiPackDecisionPolicyResponse {
+        source: match value.source {
+            PackDecisionPolicySource::ProductDefault => ApiPackDecisionPolicySource::ProductDefault,
+            PackDecisionPolicySource::Configuration => ApiPackDecisionPolicySource::Configuration,
+        },
+        configuration_id: value.configuration_id.map(|id| id.get()),
+        configuration_revision: value.configuration_revision,
+        configuration_scope: value.configuration_scope.map(|scope| match scope {
+            ConfigurationScope::Tenant => wareboxes_api_contract::v1::ConfigurationScope::Tenant,
+            ConfigurationScope::InventoryOwner { inventory_owner_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::InventoryOwner {
+                    inventory_owner_id: inventory_owner_id.get(),
+                }
+            }
+            ConfigurationScope::Facility { facility_id } => {
+                wareboxes_api_contract::v1::ConfigurationScope::Facility {
+                    facility_id: facility_id.get(),
+                }
+            }
+            ConfigurationScope::OwnerFacility {
+                inventory_owner_id,
+                facility_id,
+            } => wareboxes_api_contract::v1::ConfigurationScope::OwnerFacility {
+                inventory_owner_id: inventory_owner_id.get(),
+                facility_id: facility_id.get(),
+            },
+        }),
+        require_station_scan: value.require_station_scan,
+        require_weight: value.require_weight,
+        allow_mixed_orders: value.allow_mixed_orders,
+        policy_hash: value.policy_hash,
+    }
 }
 
 fn map_voided_carton(result: VoidCartonResult) -> V1Result<VoidCartonResponse> {
@@ -857,6 +904,7 @@ mod tests {
             OpenPackSessionRequest {
                 facility_id: 8,
                 station_location_id: 9,
+                station_location_barcode: Some("PACK-09".into()),
                 expected_revision: revision_value(3),
             },
         )
@@ -864,6 +912,13 @@ mod tests {
         assert_eq!(command.order_id.get(), 7);
         assert_eq!(command.facility_id.get(), 8);
         assert_eq!(command.station_location_id.get(), 9);
+        assert_eq!(
+            command
+                .station_location_barcode
+                .as_ref()
+                .map(|value| value.as_str()),
+            Some("PACK-09")
+        );
         assert_eq!(command.expected_revision.get(), 3);
 
         assert!(open_command(
@@ -871,6 +926,7 @@ mod tests {
             OpenPackSessionRequest {
                 facility_id: 8,
                 station_location_id: 9,
+                station_location_barcode: None,
                 expected_revision: revision_value(3),
             }
         )

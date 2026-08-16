@@ -234,6 +234,11 @@ pub async fn close_carton(
         return Err(AppError::conflict("packing session is not open"));
     }
     let revision = require_revision(&order, Some(&session), command.expected_revision)?;
+    if session.pack_policy.require_weight && command.measurements.weight_grams().is_none() {
+        return Err(AppError::bad_request(
+            "the effective Pack policy requires carton weight",
+        ));
+    }
     let carton = lock_carton_tx(&mut tx, access.tenant_id, &session, command.carton_id).await?;
     inventory_locking::lock_license_plate(&mut tx, access.tenant_id, Some(carton.license_plate_id))
         .await?;
@@ -328,6 +333,7 @@ pub async fn close_carton(
         carton_id: command.carton_id,
         order_id,
         lifecycle,
+        pack_policy: session.pack_policy.clone(),
         order_status: next_order_status,
         revision,
         progress: next_progress,
@@ -365,6 +371,7 @@ pub async fn close_carton(
             "order_status": next_order_status,
             "revision": revision,
             "ready_to_manifest": ready,
+            "pack_policy": session.pack_policy,
             "closed_at": closed_at,
         }),
         closed_at,

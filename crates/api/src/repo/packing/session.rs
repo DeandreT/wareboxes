@@ -17,6 +17,7 @@ use crate::repo::inventory_locking;
 use crate::repo::orders::insert_order_activity_tx;
 use crate::repo::picking::order_pick_readiness_tx;
 
+use super::policy::{policy_bindings, resolve_decision_policy_tx};
 use super::read_model::load_session_tx;
 use super::{enqueue_order_event_tx, lock_order_tx, require_replayed_session_visible_tx};
 
@@ -73,11 +74,42 @@ pub async fn open_session(
         command.facility_id.get(),
     )
     .await?;
-    require_packing_location_tx(
+    let station_barcode = require_packing_location_tx(
         &mut tx,
         access.tenant_id,
         command.facility_id.get(),
         command.station_location_id.get(),
+    )
+    .await?;
+    let started_at = now_iso();
+    let pack_policy = resolve_decision_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        command.facility_id,
+        started_at,
+    )
+    .await?;
+    let station_scan_verified = match command.station_location_barcode.as_ref() {
+        Some(scanned) if scanned.as_str() == station_barcode => true,
+        Some(_) => {
+            return Err(AppError::bad_request(
+                "scanned station does not match the selected packing location",
+            ))
+        }
+        None if pack_policy.require_station_scan => {
+            return Err(AppError::bad_request(
+                "the effective Pack policy requires a station scan",
+            ))
+        }
+        None => false,
+    };
+    lock_station_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        command.facility_id.get(),
+        command.station_location_id.get(),
+        pack_policy.allow_mixed_orders,
     )
     .await?;
     let existing: bool = sqlx::query_scalar(
@@ -132,7 +164,6 @@ pub async fn open_session(
         .revision
         .checked_next()
         .ok_or_else(|| AppError::internal("order revision overflow"))?;
-    let started_at = now_iso();
     let session_id = insert_session_tx(
         &mut tx,
         access.tenant_id,
@@ -144,6 +175,8 @@ pub async fn open_session(
         expected_count,
         expected_qty,
         started_at,
+        &pack_policy,
+        station_scan_verified,
     )
     .await?;
     insert_snapshots_tx(
@@ -199,6 +232,8 @@ pub async fn open_session(
             "revision": revision,
             "expected_allocation_count": expected_count,
             "expected_quantity": expected_qty,
+            "pack_policy": pack_policy,
+            "station_scan_verified": station_scan_verified,
             "started_at": started_at,
         }),
         started_at,
@@ -249,7 +284,7 @@ async fn require_packing_location_tx(
     tenant_id: TenantId,
     facility_id: i64,
     location_id: i64,
-) -> AppResult<()> {
+) -> AppResult<String> {
     let row = sqlx::query(
         r#"
         SELECT active, pickable, type, barcode
@@ -264,20 +299,57 @@ async fn require_packing_location_tx(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::not_found("packing location"))?;
+    let barcode: Option<String> = row.try_get("barcode")?;
     if !row.try_get::<bool, _>("active")?
         || row.try_get::<bool, _>("pickable")?
         || !row
             .try_get::<String, _>("type")?
             .eq_ignore_ascii_case("packing")
-        || row
-            .try_get::<Option<String>, _>("barcode")?
+        || barcode
+            .as_deref()
             .is_none_or(|value| value.trim().is_empty())
     {
         return Err(AppError::conflict(
             "packing station must be an active, scannable packing location",
         ));
     }
-    Ok(())
+    barcode.ok_or_else(|| AppError::internal("packing station barcode is missing"))
+}
+
+async fn lock_station_policy_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    facility_id: i64,
+    station_location_id: i64,
+    allow_mixed_orders: bool,
+) -> AppResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!(
+            "packing-station:{}:{facility_id}:{station_location_id}",
+            tenant_id.get()
+        ))
+        .execute(&mut **tx)
+        .await?;
+    let conflict: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM packing_sessions
+            WHERE tenant_id=$1 AND facility_id=$2 AND packing_location_id=$3
+              AND state='open' AND (NOT $4 OR NOT allow_mixed_orders)
+        )"#,
+    )
+    .bind(tenant_id.get())
+    .bind(facility_id)
+    .bind(station_location_id)
+    .bind(allow_mixed_orders)
+    .fetch_one(&mut **tx)
+    .await?;
+    if conflict {
+        Err(AppError::conflict(
+            "the effective Pack policy reserves this station for one order",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 async fn require_fresh_pick_execution_tx(
@@ -488,7 +560,10 @@ async fn insert_session_tx(
     expected_count: i64,
     expected_qty: i64,
     started_at: Timestamp,
+    pack_policy: &wareboxes_application::packing_decision_policy::PackDecisionPolicyReadModel,
+    station_scan_verified: bool,
 ) -> AppResult<PackSessionId> {
+    let policy = policy_bindings(pack_policy);
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO packing_sessions (
@@ -496,8 +571,15 @@ async fn insert_session_tx(
             order_id, packing_location_id, state, revision,
             expected_allocation_count, expected_qty, packed_allocation_count,
             packed_qty, open_carton_count, closed_carton_count,
-            started_by_user_id, started_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8, $9, 0, 0, 0, 0, $10, $11)
+            started_by_user_id, started_at, pack_policy_source,
+            pack_configuration_id, pack_configuration_revision, pack_scope_level,
+            pack_inventory_owner_id, pack_facility_id, require_station_scan,
+            require_weight, allow_mixed_orders, pack_policy_hash,
+            station_scan_value, station_scan_verified
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, 'open', $7, $8, $9, 0, 0, 0, 0, $10, $11,
+            $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+        )
         RETURNING id
         "#,
     )
@@ -512,6 +594,23 @@ async fn insert_session_tx(
     .bind(expected_qty)
     .bind(actor_user_id)
     .bind(started_at)
+    .bind(policy.source)
+    .bind(policy.configuration_id)
+    .bind(policy.configuration_revision)
+    .bind(policy.scope_level)
+    .bind(policy.inventory_owner_id)
+    .bind(policy.facility_id)
+    .bind(policy.require_station_scan)
+    .bind(policy.require_weight)
+    .bind(policy.allow_mixed_orders)
+    .bind(policy.policy_hash)
+    .bind(
+        command
+            .station_location_barcode
+            .as_ref()
+            .map(|value| value.as_str()),
+    )
+    .bind(station_scan_verified)
     .fetch_one(&mut **tx)
     .await?;
     PackSessionId::new(id).map_err(|error| AppError::internal(error.to_string()))

@@ -37,6 +37,7 @@ pub mod outbound_load;
 pub mod outbound_qa;
 pub mod outbox;
 pub mod packing;
+pub mod packing_decision_policy;
 pub mod pick_wave;
 pub mod picking;
 pub mod picking_decision_policy;
