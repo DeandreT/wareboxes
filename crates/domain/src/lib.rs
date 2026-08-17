@@ -4,6 +4,7 @@ mod allocation;
 mod automation;
 mod backorder;
 mod billing;
+mod carrier;
 mod configuration;
 mod cross_dock;
 mod customer_return;
@@ -64,6 +65,7 @@ pub use billing::{
     CurrencyCode, MAX_BILLING_CONTRACT_NUMBER_LENGTH, MAX_BILLING_DESCRIPTION_LENGTH,
     MAX_BILLING_QUANTITY, MAX_BILLING_RATE_MINOR, MAX_BILLING_SOURCE_TYPE_LENGTH,
 };
+pub use carrier::*;
 pub use configuration::{
     resolve_effective_rule, rollback_as_draft, BillableEventType, BillingUnit,
     ConfigurationEffectiveWindow, ConfigurationError, ConfigurationScope, ConfigurationStatus,
@@ -595,6 +597,8 @@ positive_id!(PackedCartonPositionId, "packed carton position ID");
 positive_id!(PackedCartonMovementId, "packed carton movement ID");
 positive_id!(OutboundLoadCancellationId, "outbound load cancellation ID");
 positive_id!(CarrierManifestId, "carrier manifest ID");
+positive_id!(CarrierAccountId, "carrier account ID");
+positive_id!(CarrierManifestJobId, "carrier manifest job ID");
 positive_id!(
     ShipmentTrackingAssignmentId,
     "shipment tracking assignment ID"

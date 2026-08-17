@@ -35,6 +35,8 @@ wareboxes-api-contract = { workspace = true }
 wareboxes-application = { workspace = true }
 wareboxes-core = { workspace = true }
 wareboxes-domain = { workspace = true }
+wareboxes-worker = { workspace = true }
+async-trait = "0.1"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

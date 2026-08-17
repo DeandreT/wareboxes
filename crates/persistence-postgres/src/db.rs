@@ -603,6 +603,26 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'shipment_document_cartons_tenant_isolation'
                 ),
                 (
+                    'carrier_accounts',
+                    'carrier_accounts_tenant_isolation'
+                ),
+                (
+                    'carrier_account_versions',
+                    'carrier_account_versions_tenant_isolation'
+                ),
+                (
+                    'carrier_manifest_jobs',
+                    'carrier_manifest_jobs_tenant_isolation'
+                ),
+                (
+                    'carrier_manifest_attempts',
+                    'carrier_manifest_attempts_tenant_isolation'
+                ),
+                (
+                    'carrier_manifest_attempt_results',
+                    'carrier_manifest_attempt_results_tenant_isolation'
+                ),
+                (
                     'outbound_loads',
                     'outbound_loads_tenant_isolation'
                 ),

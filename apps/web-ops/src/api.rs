@@ -52,11 +52,17 @@ pub use shipping_printing::{
     shipment_document_print_jobs, shipment_document_printers,
 };
 mod billing;
+mod carrier;
 pub use billing::{
     activate_billing_contract, billing_workspace, capture_billable_event,
     capture_billing_storage_snapshot, close_billing_contract, configure_billing_rate,
     create_billing_contract, export_billing_run, generate_billing_run, review_billing_run,
     BillingFilters,
+};
+pub use carrier::{
+    cancel_carrier_manifest_job, carrier_accounts, carrier_manifest_jobs,
+    change_carrier_account_status, create_carrier_account, queue_carrier_manifest,
+    reconfigure_carrier_account, retry_carrier_manifest_job,
 };
 mod cycle_count;
 pub use cycle_count::{

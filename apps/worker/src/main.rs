@@ -1,3 +1,4 @@
+mod carrier_gateway;
 mod config;
 mod publisher;
 mod reconciliation_store;
@@ -6,6 +7,7 @@ mod store;
 use std::sync::Arc;
 
 use anyhow::Context;
+use carrier_gateway::HttpCarrierGateway;
 use chrono::{Timelike, Utc};
 use config::{Config, PublisherConfig};
 use publisher::ConfiguredPublisher;
@@ -13,8 +15,9 @@ use reconciliation_store::PostgresInventoryReconciliationStore;
 use store::PostgresOutboxStore;
 use tokio::time::MissedTickBehavior;
 use tracing_subscriber::EnvFilter;
+use wareboxes_persistence_postgres::carrier_manifest::PostgresCarrierManifestStore;
 use wareboxes_persistence_postgres::db;
-use wareboxes_worker::{InventoryReconciliationWorker, Worker};
+use wareboxes_worker::{CarrierManifestWorker, InventoryReconciliationWorker, Worker};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -59,18 +62,39 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let reconciliation_worker = InventoryReconciliationWorker::new(
         Arc::new(PostgresInventoryReconciliationStore::new(pool.clone())),
-        config.worker_id,
+        config.worker_id.clone(),
         config.reconciliation,
     )?;
+    let carrier_worker = config
+        .carrier_gateway
+        .map(|gateway| {
+            let gateway = HttpCarrierGateway::new(
+                gateway.endpoint,
+                gateway.bearer_token,
+                gateway.signing_secret,
+            )?;
+            CarrierManifestWorker::new(
+                Arc::new(PostgresCarrierManifestStore::new(pool.clone())),
+                Arc::new(gateway),
+                format!("{}-carrier", config.worker_id),
+                config.carrier_worker.clone(),
+            )
+        })
+        .transpose()?;
     let mut interval = tokio::time::interval(config.poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut reconciliation_interval = tokio::time::interval(config.reconciliation_poll_interval);
     reconciliation_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut carrier_interval = tokio::time::interval(config.carrier_poll_interval);
+    carrier_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
     tracing::info!(
         publisher = worker.publisher_name(),
+        carrier_gateway = carrier_worker
+            .as_ref()
+            .map_or("disabled", CarrierManifestWorker::gateway_name),
         "starting outbox worker"
     );
     loop {
@@ -118,6 +142,23 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                     Err(error) => tracing::error!(%error, "inventory reconciliation cycle failed"),
+                }
+            }
+            _ = carrier_interval.tick(), if carrier_worker.is_some() => {
+                let Some(carrier_worker) = carrier_worker.as_ref() else {
+                    continue;
+                };
+                match carrier_worker.run_discovered_cycle().await {
+                    Ok(summary) if summary.claimed > 0 => tracing::info!(
+                        claimed = summary.claimed,
+                        succeeded = summary.succeeded,
+                        retry_scheduled = summary.retry_scheduled,
+                        failed = summary.failed,
+                        lost_claims = summary.lost_claims,
+                        "completed carrier manifest cycle"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => tracing::error!(%error, "carrier manifest cycle failed"),
                 }
             }
         }

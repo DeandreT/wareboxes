@@ -53764,3 +53764,662 @@ GRANT SELECT,INSERT ON public.carton_weight_evidence TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.carton_weight_evidence_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_carton_weight_evidence() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_carton_weight_evidence_consistency() FROM PUBLIC;
+
+-- Carrier gateway accounts retain no provider secret. account_key is a
+-- non-secret identity resolved by the deployment gateway, whose credentials
+-- live outside PostgreSQL and the operator surface.
+CREATE TABLE public.carrier_accounts (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  display_name text NOT NULL,
+  carrier_code text NOT NULL,
+  account_key text NOT NULL,
+  status text NOT NULL,
+  revision integer NOT NULL,
+  configured_by_user_id bigint NOT NULL,
+  configured_at timestamptz NOT NULL,
+  updated_by_user_id bigint NOT NULL,
+  updated_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,carrier_code),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,id),
+  CHECK(display_name=btrim(display_name) AND display_name<>''
+    AND char_length(display_name)<=200 AND display_name!~'[[:cntrl:]]'),
+  CHECK(carrier_code=btrim(carrier_code) AND carrier_code<>''
+    AND char_length(carrier_code)<=100 AND carrier_code!~'[[:cntrl:]]'),
+  CHECK(account_key=btrim(account_key) AND account_key<>''
+    AND char_length(account_key)<=200 AND account_key!~'[[:cntrl:]]'),
+  CHECK(status IN ('active','disabled')),
+  CHECK(revision>0),
+  CHECK(updated_at>=configured_at),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY(tenant_id,configured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY(tenant_id,updated_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.carrier_account_versions (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  carrier_account_id bigint NOT NULL,
+  revision integer NOT NULL,
+  display_name text NOT NULL,
+  carrier_code text NOT NULL,
+  account_key text NOT NULL,
+  status text NOT NULL,
+  changed_by_user_id bigint NOT NULL,
+  changed_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,carrier_account_id,revision),
+  CHECK(revision>0),
+  CHECK(display_name=btrim(display_name) AND display_name<>''
+    AND char_length(display_name)<=200 AND display_name!~'[[:cntrl:]]'),
+  CHECK(carrier_code=btrim(carrier_code) AND carrier_code<>''
+    AND char_length(carrier_code)<=100 AND carrier_code!~'[[:cntrl:]]'),
+  CHECK(account_key=btrim(account_key) AND account_key<>''
+    AND char_length(account_key)<=200 AND account_key!~'[[:cntrl:]]'),
+  CHECK(status IN ('active','disabled')),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,carrier_account_id)
+    REFERENCES public.carrier_accounts(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY(tenant_id,changed_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.carrier_manifest_jobs (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  shipment_id bigint NOT NULL,
+  carrier_account_id bigint NOT NULL,
+  carrier_account_revision integer NOT NULL,
+  account_key text NOT NULL,
+  carrier_code text NOT NULL,
+  service_code text,
+  expected_shipment_revision bigint NOT NULL,
+  request_key text NOT NULL,
+  request_payload jsonb NOT NULL,
+  request_sha256 bytea NOT NULL,
+  status text NOT NULL,
+  revision integer NOT NULL,
+  attempt_count integer NOT NULL,
+  claimed_by text,
+  claimed_at timestamptz,
+  lease_expires_at timestamptz,
+  next_attempt_at timestamptz,
+  last_error_code text,
+  last_error_message text,
+  response_payload jsonb,
+  response_sha256 bytea,
+  carrier_manifest_id bigint,
+  manifest_reference text,
+  requested_by_user_id bigint NOT NULL,
+  requested_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,request_key),
+  UNIQUE(tenant_id,inventory_owner_id,facility_id,shipment_id,id),
+  CHECK(carrier_account_revision>0 AND expected_shipment_revision>0),
+  CHECK(account_key=btrim(account_key) AND account_key<>''
+    AND char_length(account_key)<=200 AND account_key!~'[[:cntrl:]]'),
+  CHECK(carrier_code=btrim(carrier_code) AND carrier_code<>''
+    AND char_length(carrier_code)<=100 AND carrier_code!~'[[:cntrl:]]'),
+  CHECK(service_code IS NULL OR (service_code=btrim(service_code) AND service_code<>''
+    AND char_length(service_code)<=100 AND service_code!~'[[:cntrl:]]')),
+  CHECK(request_key~'^[0-9a-f]{64}$' AND octet_length(request_sha256)=32),
+  CHECK(status IN ('queued','processing','retry_scheduled','succeeded','failed','cancelled')),
+  CHECK(revision>0 AND attempt_count>=0),
+  CHECK(claimed_by IS NULL OR (claimed_by=btrim(claimed_by) AND claimed_by<>''
+    AND char_length(claimed_by)<=200 AND claimed_by!~'[[:cntrl:]]')),
+  CHECK(last_error_code IS NULL OR (last_error_code=btrim(last_error_code)
+    AND last_error_code<>'' AND char_length(last_error_code)<=100
+    AND last_error_code!~'[[:cntrl:]]')),
+  CHECK(last_error_message IS NULL OR (last_error_message=btrim(last_error_message)
+    AND last_error_message<>'' AND char_length(last_error_message)<=1000
+    AND last_error_message!~'[[:cntrl:]]')),
+  CHECK(response_sha256 IS NULL OR octet_length(response_sha256)=32),
+  CHECK(manifest_reference IS NULL OR (manifest_reference=btrim(manifest_reference)
+    AND manifest_reference<>'' AND char_length(manifest_reference)<=200
+    AND manifest_reference!~'[[:cntrl:]]')),
+  CHECK(
+    (status='queued' AND revision=1 AND attempt_count=0
+      AND claimed_by IS NULL AND claimed_at IS NULL AND lease_expires_at IS NULL
+      AND next_attempt_at IS NULL AND last_error_code IS NULL
+      AND last_error_message IS NULL AND response_payload IS NULL
+      AND response_sha256 IS NULL AND carrier_manifest_id IS NULL
+      AND manifest_reference IS NULL AND completed_at IS NULL)
+    OR (status='processing' AND attempt_count>0 AND claimed_by IS NOT NULL
+      AND claimed_at IS NOT NULL AND lease_expires_at>claimed_at
+      AND next_attempt_at IS NULL AND response_payload IS NULL
+      AND response_sha256 IS NULL AND carrier_manifest_id IS NULL
+      AND manifest_reference IS NULL AND completed_at IS NULL)
+    OR (status='retry_scheduled' AND attempt_count>0 AND claimed_by IS NULL
+      AND claimed_at IS NULL AND lease_expires_at IS NULL
+      AND next_attempt_at IS NOT NULL AND last_error_code IS NOT NULL
+      AND last_error_message IS NOT NULL AND response_payload IS NULL
+      AND response_sha256 IS NULL AND carrier_manifest_id IS NULL
+      AND manifest_reference IS NULL AND completed_at IS NULL)
+    OR (status='failed' AND attempt_count>0 AND claimed_by IS NULL
+      AND claimed_at IS NULL AND lease_expires_at IS NULL
+      AND next_attempt_at IS NULL AND last_error_code IS NOT NULL
+      AND last_error_message IS NOT NULL AND response_payload IS NULL
+      AND response_sha256 IS NULL AND carrier_manifest_id IS NULL
+      AND manifest_reference IS NULL AND completed_at IS NOT NULL)
+    OR (status='succeeded' AND attempt_count>0 AND claimed_by IS NULL
+      AND claimed_at IS NULL AND lease_expires_at IS NULL
+      AND next_attempt_at IS NULL AND last_error_code IS NULL
+      AND last_error_message IS NULL AND response_payload IS NOT NULL
+      AND response_sha256 IS NOT NULL AND carrier_manifest_id IS NOT NULL
+      AND manifest_reference IS NOT NULL AND completed_at IS NOT NULL)
+    OR (status='cancelled' AND claimed_by IS NULL AND claimed_at IS NULL
+      AND lease_expires_at IS NULL AND next_attempt_at IS NULL
+      AND response_payload IS NULL AND response_sha256 IS NULL
+      AND carrier_manifest_id IS NULL AND manifest_reference IS NULL
+      AND completed_at IS NOT NULL)),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,shipment_id)
+    REFERENCES public.shipments(tenant_id,inventory_owner_id,facility_id,id),
+  FOREIGN KEY(tenant_id,carrier_account_id,carrier_account_revision)
+    REFERENCES public.carrier_account_versions(tenant_id,carrier_account_id,revision),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,shipment_id,carrier_manifest_id)
+    REFERENCES public.shipment_manifests(
+      tenant_id,inventory_owner_id,facility_id,shipment_id,id),
+  FOREIGN KEY(tenant_id,requested_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE UNIQUE INDEX carrier_manifest_jobs_one_active_shipment
+ON public.carrier_manifest_jobs(tenant_id,shipment_id)
+WHERE status IN ('queued','processing','retry_scheduled');
+CREATE INDEX carrier_manifest_jobs_ready_idx
+ON public.carrier_manifest_jobs(tenant_id,next_attempt_at,id)
+WHERE status IN ('queued','retry_scheduled');
+CREATE INDEX carrier_manifest_jobs_expired_lease_idx
+ON public.carrier_manifest_jobs(tenant_id,lease_expires_at,id)
+WHERE status='processing';
+CREATE INDEX carrier_manifest_jobs_history_idx
+ON public.carrier_manifest_jobs(tenant_id,shipment_id,id DESC);
+
+CREATE TABLE public.carrier_manifest_attempts (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  shipment_id bigint NOT NULL,
+  carrier_manifest_job_id bigint NOT NULL,
+  attempt_number integer NOT NULL,
+  claim_version integer NOT NULL,
+  worker_id text NOT NULL,
+  request_sha256 bytea NOT NULL,
+  claimed_at timestamptz NOT NULL,
+  lease_expires_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,carrier_manifest_job_id,attempt_number),
+  UNIQUE(tenant_id,carrier_manifest_job_id,claim_version),
+  CHECK(attempt_number>0 AND claim_version>0),
+  CHECK(worker_id=btrim(worker_id) AND worker_id<>'' AND char_length(worker_id)<=200
+    AND worker_id!~'[[:cntrl:]]'),
+  CHECK(octet_length(request_sha256)=32 AND lease_expires_at>claimed_at),
+  FOREIGN KEY(tenant_id,inventory_owner_id,facility_id,shipment_id,carrier_manifest_job_id)
+    REFERENCES public.carrier_manifest_jobs(
+      tenant_id,inventory_owner_id,facility_id,shipment_id,id)
+);
+
+CREATE TABLE public.carrier_manifest_attempt_results (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  carrier_manifest_job_id bigint NOT NULL,
+  attempt_number integer NOT NULL,
+  claim_version integer NOT NULL,
+  outcome text NOT NULL,
+  response_sha256 bytea,
+  error_code text,
+  error_message text,
+  retry_after_seconds bigint,
+  recorded_by_worker_id text NOT NULL,
+  completed_at timestamptz NOT NULL,
+  UNIQUE(tenant_id,id),
+  UNIQUE(tenant_id,carrier_manifest_job_id,attempt_number),
+  FOREIGN KEY(tenant_id,carrier_manifest_job_id,attempt_number)
+    REFERENCES public.carrier_manifest_attempts(
+      tenant_id,carrier_manifest_job_id,attempt_number),
+  FOREIGN KEY(tenant_id,carrier_manifest_job_id,claim_version)
+    REFERENCES public.carrier_manifest_attempts(
+      tenant_id,carrier_manifest_job_id,claim_version),
+  CHECK(attempt_number>0 AND claim_version>0),
+  CHECK(outcome IN ('succeeded','retry_scheduled','failed','claim_lost')),
+  CHECK(response_sha256 IS NULL OR octet_length(response_sha256)=32),
+  CHECK(error_code IS NULL OR (error_code=btrim(error_code) AND error_code<>''
+    AND char_length(error_code)<=100 AND error_code!~'[[:cntrl:]]')),
+  CHECK(error_message IS NULL OR (error_message=btrim(error_message) AND error_message<>''
+    AND char_length(error_message)<=1000 AND error_message!~'[[:cntrl:]]')),
+  CHECK(retry_after_seconds IS NULL OR retry_after_seconds>=0),
+  CHECK(recorded_by_worker_id=btrim(recorded_by_worker_id)
+    AND recorded_by_worker_id<>'' AND char_length(recorded_by_worker_id)<=200
+    AND recorded_by_worker_id!~'[[:cntrl:]]'),
+  CHECK((outcome='succeeded' AND response_sha256 IS NOT NULL
+      AND error_code IS NULL AND error_message IS NULL AND retry_after_seconds IS NULL)
+    OR (outcome='retry_scheduled' AND response_sha256 IS NULL
+      AND error_code IS NOT NULL AND error_message IS NOT NULL
+      AND retry_after_seconds IS NOT NULL)
+    OR (outcome='failed' AND response_sha256 IS NULL
+      AND error_code IS NOT NULL AND error_message IS NOT NULL
+      AND retry_after_seconds IS NULL)
+    OR (outcome='claim_lost' AND response_sha256 IS NULL
+      AND error_code IS NOT NULL AND error_message IS NOT NULL
+      AND retry_after_seconds IS NULL))
+);
+
+CREATE FUNCTION public.carrier_user_scoped(
+  checked_tenant_id bigint,checked_user_id bigint,checked_owner_id bigint,
+  checked_facility_id bigint) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  SELECT public.automation_interactive_user_scoped(
+      checked_tenant_id,checked_user_id,checked_facility_id)
+    AND EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=checked_tenant_id
+        AND membership.user_id=checked_user_id AND membership.deleted IS NULL
+        AND (membership.all_inventory_owners OR EXISTS(
+          SELECT 1 FROM public.user_inventory_owners assignment
+          WHERE assignment.tenant_id=membership.tenant_id
+            AND assignment.user_id=membership.user_id
+            AND assignment.inventory_owner_id=checked_owner_id
+            AND assignment.deleted IS NULL)))
+$$;
+
+CREATE FUNCTION public.validate_carrier_account() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'carrier accounts cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF actor_id IS NULL
+    OR NOT public.automation_user_has_permission(NEW.tenant_id,actor_id,'admin')
+    OR NOT public.carrier_user_scoped(
+      NEW.tenant_id,actor_id,NEW.inventory_owner_id,NEW.facility_id) THEN
+    RAISE EXCEPTION 'invalid carrier account actor or scope' USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF NEW.revision<>1 OR NEW.status<>'active'
+      OR NEW.configured_by_user_id IS DISTINCT FROM actor_id
+      OR NEW.updated_by_user_id IS DISTINCT FROM actor_id
+      OR NEW.updated_at IS DISTINCT FROM NEW.configured_at
+      OR NEW.configured_at NOT BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+        AND CURRENT_TIMESTAMP+INTERVAL '1 minute' THEN
+      RAISE EXCEPTION 'invalid carrier account creation' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,
+      NEW.carrier_code,NEW.configured_by_user_id,NEW.configured_at) IS DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.inventory_owner_id,OLD.facility_id,
+      OLD.carrier_code,OLD.configured_by_user_id,OLD.configured_at)
+    OR NEW.revision<>OLD.revision+1
+    OR NEW.updated_by_user_id IS DISTINCT FROM actor_id
+    OR NEW.updated_at NOT BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+      AND CURRENT_TIMESTAMP+INTERVAL '1 minute'
+    OR ((NEW.status IS DISTINCT FROM OLD.status) =
+        (ROW(NEW.display_name,NEW.account_key) IS DISTINCT FROM
+         ROW(OLD.display_name,OLD.account_key)))
+    OR EXISTS(SELECT 1 FROM public.carrier_manifest_jobs job
+      WHERE job.tenant_id=OLD.tenant_id AND job.carrier_account_id=OLD.id
+        AND job.status IN ('queued','processing','retry_scheduled')) THEN
+    RAISE EXCEPTION 'invalid carrier account revision or active dependency'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_carrier_account_version() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'carrier account versions are immutable' USING ERRCODE='55000';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.carrier_accounts account
+    WHERE account.tenant_id=NEW.tenant_id AND account.id=NEW.carrier_account_id
+      AND account.inventory_owner_id=NEW.inventory_owner_id
+      AND account.facility_id=NEW.facility_id AND account.revision=NEW.revision
+      AND account.display_name=NEW.display_name AND account.carrier_code=NEW.carrier_code
+      AND account.account_key=NEW.account_key AND account.status=NEW.status
+      AND account.updated_by_user_id=NEW.changed_by_user_id
+      AND account.updated_at=NEW.changed_at) THEN
+    RAISE EXCEPTION 'carrier account version must snapshot the current revision'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_carrier_account_version() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM public.carrier_account_versions version
+    WHERE version.tenant_id=NEW.tenant_id AND version.carrier_account_id=NEW.id
+      AND version.revision=NEW.revision AND version.display_name=NEW.display_name
+      AND version.carrier_code=NEW.carrier_code AND version.account_key=NEW.account_key
+      AND version.status=NEW.status AND version.changed_by_user_id=NEW.updated_by_user_id
+      AND version.changed_at=NEW.updated_at) THEN
+    RAISE EXCEPTION 'carrier account revision lacks immutable version evidence'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_carrier_manifest_job() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+DECLARE worker_id text:=NULLIF(current_setting('wareboxes.carrier_worker_id',true),'');
+DECLARE expected_request jsonb;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'carrier manifest jobs cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    SELECT jsonb_build_object(
+      'schema_version',1,'request_key',NEW.request_key,'tenant_id',NEW.tenant_id,
+      'account_key',NEW.account_key,'carrier_code',NEW.carrier_code,
+      'service_code',NEW.service_code,'shipment_id',NEW.shipment_id,
+      'origin',(SELECT jsonb_build_object(
+        'name',address.name,'company',address.company,'line1',address.line1,
+        'line2',address.line2,'postal_code',address.postal_code,'country',address.country,
+        'phone',address.phone,'email',address.email,'state',address.state,
+        'county',address.county,'city',address.city,'territory',address.territory,
+        'district',address.district)
+        FROM public.shipment_address_snapshots address
+        WHERE address.tenant_id=NEW.tenant_id AND address.shipment_id=NEW.shipment_id
+          AND address.address_role='origin'),
+      'destination',(SELECT jsonb_build_object(
+        'name',address.name,'company',address.company,'line1',address.line1,
+        'line2',address.line2,'postal_code',address.postal_code,'country',address.country,
+        'phone',address.phone,'email',address.email,'state',address.state,
+        'county',address.county,'city',address.city,'territory',address.territory,
+        'district',address.district)
+        FROM public.shipment_address_snapshots address
+        WHERE address.tenant_id=NEW.tenant_id AND address.shipment_id=NEW.shipment_id
+          AND address.address_role='destination'),
+      'packages',(SELECT jsonb_agg(jsonb_build_object(
+        'carton_id',carton.carton_id,'carton_barcode',carton.carton_barcode,
+        'weight_grams',carton.weight_g,'length_millimeters',carton.length_mm,
+        'width_millimeters',carton.width_mm,'height_millimeters',carton.height_mm)
+        ORDER BY carton.carton_id)
+        FROM public.shipment_cartons carton
+        WHERE carton.tenant_id=NEW.tenant_id AND carton.shipment_id=NEW.shipment_id)
+    ) INTO expected_request;
+    IF actor_id IS DISTINCT FROM NEW.requested_by_user_id
+      OR NOT public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms')
+      OR NOT public.carrier_user_scoped(
+        NEW.tenant_id,actor_id,NEW.inventory_owner_id,NEW.facility_id)
+      OR NEW.status<>'queued' OR NEW.revision<>1 OR NEW.attempt_count<>0
+      OR NEW.requested_at NOT BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+        AND CURRENT_TIMESTAMP+INTERVAL '1 minute'
+      OR NEW.request_payload IS DISTINCT FROM expected_request
+      OR NEW.request_sha256 IS DISTINCT FROM
+        sha256(convert_to(NEW.request_payload::text,'UTF8'))
+      OR NOT EXISTS(SELECT 1 FROM public.carrier_accounts account
+        WHERE account.tenant_id=NEW.tenant_id AND account.id=NEW.carrier_account_id
+          AND account.inventory_owner_id=NEW.inventory_owner_id
+          AND account.facility_id=NEW.facility_id AND account.status='active'
+          AND account.revision=NEW.carrier_account_revision
+          AND account.account_key=NEW.account_key AND account.carrier_code=NEW.carrier_code)
+      OR NOT EXISTS(SELECT 1 FROM public.shipments shipment
+        WHERE shipment.tenant_id=NEW.tenant_id AND shipment.id=NEW.shipment_id
+          AND shipment.inventory_owner_id=NEW.inventory_owner_id
+          AND shipment.facility_id=NEW.facility_id AND shipment.state='awaiting manifest'
+          AND shipment.revision=NEW.expected_shipment_revision
+          AND shipment.carton_count=jsonb_array_length(NEW.request_payload->'packages')
+          AND NOT EXISTS(SELECT 1 FROM public.shipment_cartons carton
+            WHERE carton.tenant_id=shipment.tenant_id AND carton.shipment_id=shipment.id
+              AND carton.weight_g IS NULL)
+        FOR SHARE) THEN
+      RAISE EXCEPTION 'invalid carrier manifest request snapshot or scope'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,NEW.shipment_id,
+      NEW.carrier_account_id,NEW.carrier_account_revision,NEW.account_key,NEW.carrier_code,
+      NEW.service_code,NEW.expected_shipment_revision,NEW.request_key,NEW.request_payload,
+      NEW.request_sha256,NEW.requested_by_user_id,NEW.requested_at) IS DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.inventory_owner_id,OLD.facility_id,OLD.shipment_id,
+      OLD.carrier_account_id,OLD.carrier_account_revision,OLD.account_key,OLD.carrier_code,
+      OLD.service_code,OLD.expected_shipment_revision,OLD.request_key,OLD.request_payload,
+      OLD.request_sha256,OLD.requested_by_user_id,OLD.requested_at)
+    OR NEW.revision<>OLD.revision+1 THEN
+    RAISE EXCEPTION 'carrier manifest request envelope is immutable' USING ERRCODE='55000';
+  END IF;
+  IF NEW.status='processing' AND OLD.status IN ('queued','retry_scheduled','processing')
+    AND worker_id IS NOT NULL AND NEW.claimed_by=worker_id
+    AND NEW.attempt_count=OLD.attempt_count+1 AND NEW.claimed_at IS NOT NULL
+    AND NEW.lease_expires_at>NEW.claimed_at AND NEW.next_attempt_at IS NULL
+    AND NEW.claimed_at BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+      AND CURRENT_TIMESTAMP+INTERVAL '1 minute'
+    AND NEW.lease_expires_at<=NEW.claimed_at+INTERVAL '1 hour'
+    AND NEW.response_payload IS NULL AND NEW.response_sha256 IS NULL
+    AND NEW.carrier_manifest_id IS NULL AND NEW.manifest_reference IS NULL
+    AND NEW.completed_at IS NULL
+    AND (OLD.status<>'processing' OR OLD.lease_expires_at<CURRENT_TIMESTAMP) THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.status='processing' AND OLD.claimed_by=worker_id
+    AND NEW.status IN ('retry_scheduled','failed','succeeded')
+    AND NEW.attempt_count=OLD.attempt_count AND NEW.claimed_by IS NULL
+    AND NEW.claimed_at IS NULL AND NEW.lease_expires_at IS NULL
+    AND OLD.lease_expires_at>=CURRENT_TIMESTAMP THEN
+    IF NEW.status='succeeded' AND (
+      NEW.response_sha256 IS DISTINCT FROM
+        sha256(convert_to(NEW.response_payload::text,'UTF8'))
+      OR NEW.response_payload IS DISTINCT FROM (
+        SELECT jsonb_build_object(
+          'schema_version',1,'request_key',NEW.request_key,
+          'manifest_reference',manifest.manifest_number,
+          'packages',jsonb_agg(jsonb_build_object(
+            'carton_id',package.carton_id,
+            'tracking_number',package.tracking_number)
+            ORDER BY package.carton_id))
+        FROM public.shipment_manifests manifest
+        JOIN public.shipment_manifest_packages package
+          ON package.tenant_id=manifest.tenant_id
+         AND package.inventory_owner_id=manifest.inventory_owner_id
+         AND package.facility_id=manifest.facility_id
+         AND package.shipment_id=manifest.shipment_id
+         AND package.manifest_id=manifest.id
+        WHERE manifest.tenant_id=NEW.tenant_id
+          AND manifest.inventory_owner_id=NEW.inventory_owner_id
+          AND manifest.facility_id=NEW.facility_id
+          AND manifest.shipment_id=NEW.shipment_id
+          AND manifest.id=NEW.carrier_manifest_id
+          AND manifest.carrier=NEW.carrier_code
+          AND manifest.service IS NOT DISTINCT FROM NEW.service_code
+          AND manifest.manifest_number=NEW.manifest_reference
+        GROUP BY manifest.manifest_number)) THEN
+      RAISE EXCEPTION 'carrier response does not match the committed manifest'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.status IN ('queued','retry_scheduled') AND NEW.status='cancelled'
+    AND actor_id IS NOT NULL AND NEW.attempt_count=OLD.attempt_count
+    AND NEW.completed_at IS NOT NULL
+    AND public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms')
+    AND public.carrier_user_scoped(
+      NEW.tenant_id,actor_id,NEW.inventory_owner_id,NEW.facility_id) THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.status='failed' AND NEW.status='retry_scheduled'
+    AND actor_id IS NOT NULL AND NEW.attempt_count=OLD.attempt_count
+    AND NEW.next_attempt_at IS NOT NULL AND NEW.completed_at IS NULL
+    AND public.automation_user_has_permission(NEW.tenant_id,actor_id,'wms_supervisor')
+    AND public.carrier_user_scoped(
+      NEW.tenant_id,actor_id,NEW.inventory_owner_id,NEW.facility_id) THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'invalid carrier manifest job transition' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.validate_carrier_manifest_attempt() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE worker_id text:=NULLIF(current_setting('wareboxes.carrier_worker_id',true),'');
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION '% is append only',TG_TABLE_NAME USING ERRCODE='55000';
+  END IF;
+  IF worker_id IS DISTINCT FROM NEW.worker_id OR NOT EXISTS(
+    SELECT 1 FROM public.carrier_manifest_jobs job
+    WHERE job.tenant_id=NEW.tenant_id AND job.id=NEW.carrier_manifest_job_id
+      AND job.inventory_owner_id=NEW.inventory_owner_id
+      AND job.facility_id=NEW.facility_id AND job.shipment_id=NEW.shipment_id
+      AND job.status='processing' AND job.revision=NEW.claim_version
+      AND job.attempt_count=NEW.attempt_number AND job.claimed_by=NEW.worker_id
+      AND job.request_sha256=NEW.request_sha256 AND job.claimed_at=NEW.claimed_at
+      AND job.lease_expires_at=NEW.lease_expires_at) THEN
+    RAISE EXCEPTION 'carrier attempt does not match its active claim'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_carrier_manifest_attempt_result() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE session_worker_id text:=NULLIF(
+  current_setting('wareboxes.carrier_worker_id',true),'');
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION '% is append only',TG_TABLE_NAME USING ERRCODE='55000';
+  END IF;
+  IF NEW.completed_at NOT BETWEEN CURRENT_TIMESTAMP-INTERVAL '1 minute'
+      AND CURRENT_TIMESTAMP+INTERVAL '1 minute'
+    OR NEW.recorded_by_worker_id IS DISTINCT FROM session_worker_id
+    OR NOT EXISTS(SELECT 1 FROM public.carrier_manifest_attempts attempt
+      JOIN public.carrier_manifest_jobs job
+        ON job.tenant_id=attempt.tenant_id
+       AND job.id=attempt.carrier_manifest_job_id
+      WHERE attempt.tenant_id=NEW.tenant_id
+        AND attempt.carrier_manifest_job_id=NEW.carrier_manifest_job_id
+        AND attempt.attempt_number=NEW.attempt_number
+        AND attempt.claim_version=NEW.claim_version
+        AND (((NEW.outcome='succeeded' AND attempt.worker_id=session_worker_id
+              AND job.status='succeeded' AND job.response_sha256=NEW.response_sha256
+              AND job.completed_at=NEW.completed_at)
+          OR (NEW.outcome='retry_scheduled' AND attempt.worker_id=session_worker_id
+              AND job.status='retry_scheduled'
+              AND job.last_error_code=NEW.error_code
+              AND job.last_error_message=NEW.error_message
+              AND job.next_attempt_at=NEW.completed_at
+                +make_interval(secs=>NEW.retry_after_seconds))
+          OR (NEW.outcome='failed' AND attempt.worker_id=session_worker_id
+              AND job.status='failed'
+              AND job.last_error_code=NEW.error_code
+              AND job.last_error_message=NEW.error_message
+              AND job.completed_at=NEW.completed_at))
+          OR (NEW.outcome='claim_lost' AND (job.revision<>NEW.claim_version
+              OR attempt.lease_expires_at<CURRENT_TIMESTAMP)))) THEN
+    RAISE EXCEPTION 'carrier attempt result does not match its claim outcome'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_shipment_active_carrier_job() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE worker_job_id bigint:=NULLIF(
+  current_setting('wareboxes.carrier_manifest_job_id',true),'')::bigint;
+BEGIN
+  IF NEW.state IS DISTINCT FROM OLD.state AND OLD.state='awaiting manifest'
+    AND EXISTS(SELECT 1 FROM public.carrier_manifest_jobs job
+      WHERE job.tenant_id=OLD.tenant_id AND job.shipment_id=OLD.id
+        AND job.status IN ('queued','processing','retry_scheduled')
+        AND NOT (NEW.state='manifested' AND job.status='processing'
+          AND job.id=worker_job_id)) THEN
+    RAISE EXCEPTION 'shipment has an active carrier manifest job' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_shipment_cancellation_carrier_job() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF EXISTS(SELECT 1 FROM public.carrier_manifest_jobs job
+    WHERE job.tenant_id=NEW.tenant_id AND job.shipment_id=NEW.shipment_id
+      AND job.status IN ('queued','processing','retry_scheduled')) THEN
+    RAISE EXCEPTION 'shipment has an active carrier manifest job' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER carrier_accounts_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.carrier_accounts
+FOR EACH ROW EXECUTE FUNCTION public.validate_carrier_account();
+CREATE CONSTRAINT TRIGGER carrier_accounts_require_version
+AFTER INSERT OR UPDATE ON public.carrier_accounts DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_carrier_account_version();
+CREATE TRIGGER carrier_account_versions_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.carrier_account_versions
+FOR EACH ROW EXECUTE FUNCTION public.validate_carrier_account_version();
+CREATE TRIGGER carrier_manifest_jobs_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.carrier_manifest_jobs
+FOR EACH ROW EXECUTE FUNCTION public.validate_carrier_manifest_job();
+CREATE TRIGGER carrier_manifest_attempts_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.carrier_manifest_attempts
+FOR EACH ROW EXECUTE FUNCTION public.validate_carrier_manifest_attempt();
+CREATE TRIGGER carrier_manifest_attempt_results_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.carrier_manifest_attempt_results
+FOR EACH ROW EXECUTE FUNCTION public.validate_carrier_manifest_attempt_result();
+CREATE TRIGGER shipments_guard_active_carrier_job
+BEFORE UPDATE ON public.shipments
+FOR EACH ROW EXECUTE FUNCTION public.guard_shipment_active_carrier_job();
+CREATE TRIGGER shipment_cancellations_guard_active_carrier_job
+BEFORE INSERT ON public.shipment_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.guard_shipment_cancellation_carrier_job();
+
+ALTER TABLE public.carrier_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.carrier_accounts FORCE ROW LEVEL SECURITY;
+CREATE POLICY carrier_accounts_tenant_isolation ON public.carrier_accounts
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.carrier_account_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.carrier_account_versions FORCE ROW LEVEL SECURITY;
+CREATE POLICY carrier_account_versions_tenant_isolation ON public.carrier_account_versions
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.carrier_manifest_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.carrier_manifest_jobs FORCE ROW LEVEL SECURITY;
+CREATE POLICY carrier_manifest_jobs_tenant_isolation ON public.carrier_manifest_jobs
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.carrier_manifest_attempts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.carrier_manifest_attempts FORCE ROW LEVEL SECURITY;
+CREATE POLICY carrier_manifest_attempts_tenant_isolation ON public.carrier_manifest_attempts
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.carrier_manifest_attempt_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.carrier_manifest_attempt_results FORCE ROW LEVEL SECURITY;
+CREATE POLICY carrier_manifest_attempt_results_tenant_isolation
+ON public.carrier_manifest_attempt_results
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT,UPDATE ON public.carrier_accounts TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carrier_accounts_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.carrier_account_versions TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carrier_account_versions_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT,UPDATE ON public.carrier_manifest_jobs TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carrier_manifest_jobs_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.carrier_manifest_attempts TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carrier_manifest_attempts_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.carrier_manifest_attempt_results TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carrier_manifest_attempt_results_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.carrier_user_scoped(bigint,bigint,bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_carrier_account() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_carrier_account_version() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_carrier_account_version() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_carrier_manifest_job() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_carrier_manifest_attempt() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_carrier_manifest_attempt_result() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_shipment_active_carrier_job() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_shipment_cancellation_carrier_job() FROM PUBLIC;

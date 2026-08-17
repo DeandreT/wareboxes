@@ -1,4 +1,5 @@
 mod cancellation;
+mod carrier;
 mod display;
 mod documents;
 mod execution;
@@ -113,6 +114,7 @@ pub(crate) fn ShippingWorkspace(
     access: AccessScopeWorkspace,
     can_configure_origins: bool,
     can_configure_qa: bool,
+    can_manage_carriers: bool,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let facilities = StoredValue::new(access.facilities);
@@ -369,6 +371,7 @@ pub(crate) fn ShippingWorkspace(
                     scan_input
                     can_configure_origins
                     can_configure_qa
+                    can_manage_carriers
                     on_clear=clear_selection
                     on_create=create
                     on_manifest=manifest
@@ -403,6 +406,7 @@ fn ShippingDetail(
     scan_input: NodeRef<html::Input>,
     can_configure_origins: bool,
     can_configure_qa: bool,
+    can_manage_carriers: bool,
     on_clear: Callback<()>,
     on_create: Callback<()>,
     on_manifest: Callback<()>,
@@ -485,6 +489,13 @@ fn ShippingDetail(
                                 on_scan
                                 on_depart
                                 can_cancel=can_configure_qa
+                                can_manage_carriers
+                                can_retry_carriers=can_configure_qa
+                                on_carrier_manifested=Callback::new(move |(order_id, shipment_id)| {
+                                    signals.toasts.success("Carrier manifest completed.");
+                                    load_shipment(order_id, shipment_id, signals);
+                                    refresh_shipping_queue(queue, signals);
+                                })
                             />
                         })}
                     </Show>

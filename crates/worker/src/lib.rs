@@ -1,8 +1,14 @@
+pub mod carrier;
 pub mod publisher;
 pub mod reconciliation;
 pub mod runner;
 pub mod store;
 
+pub use carrier::{
+    CarrierFailureClass, CarrierFailureDisposition, CarrierGateway, CarrierGatewayError,
+    CarrierManifestRunSummary, CarrierManifestStore, CarrierManifestWorker,
+    CarrierManifestWorkerConfig,
+};
 pub use publisher::{FailureClass, PublishError, Publisher};
 pub use reconciliation::{
     InventoryReconciliationConfig, InventoryReconciliationFailure, InventoryReconciliationStore,

@@ -1,0 +1,35 @@
+.carrier-manifest-panel,
+.shipping-manual-fallback {
+  border: 1px solid var(--line, #d8dfdc);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+}
+
+.carrier-manifest-panel { padding: 14px; display: grid; gap: 12px; }
+.carrier-manifest-panel > header,
+.carrier-account-list > div,
+.carrier-job { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.carrier-manifest-panel h3 { margin: 0; font-size: 15px; }
+.carrier-manifest-panel header span,
+.carrier-job span,
+.carrier-job small,
+.carrier-account-list small { display: block; color: var(--text-muted, #66736e); font-size: 11px; }
+.carrier-queue-form,
+.carrier-account-form { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 8px; }
+.carrier-queue-form label,
+.carrier-account-form label { display: grid; gap: 4px; font-size: 11px; font-weight: 700; }
+.carrier-queue-form .primary-action { grid-column: 1 / -1; }
+.carrier-error { display: grid; gap: 8px; padding: 10px; color: #8d241c; background: #fff2ef; border-radius: 8px; }
+.carrier-job-history,
+.carrier-account-list { display: grid; gap: 6px; }
+.carrier-job { flex-wrap: wrap; padding: 9px; border: 1px solid var(--line, #d8dfdc); border-radius: 8px; }
+.carrier-job code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
+.carrier-account-manager { border-top: 1px solid var(--line, #d8dfdc); padding-top: 10px; }
+.carrier-account-manager summary,
+.shipping-manual-fallback summary { cursor: pointer; font-size: 12px; font-weight: 800; }
+.carrier-account-list { margin: 10px 0; }
+.carrier-account-list > div { padding: 7px 0; border-bottom: 1px solid var(--line, #d8dfdc); }
+.carrier-empty,
+.shipping-manual-fallback > p { margin: 0; color: var(--text-muted, #66736e); font-size: 11px; line-height: 1.45; }
+.shipping-manual-fallback { padding: 12px; }
+.shipping-manual-fallback .shipping-manifest { margin-top: 10px; }

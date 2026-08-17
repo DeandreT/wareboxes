@@ -22,7 +22,7 @@ use crate::repo::orders::insert_order_activity_tx;
 use super::read_model::load_shipment_tx;
 use super::{
     enqueue_order_event_tx, lock_order_tx, lock_shipment_tx, order_hint_for_shipment_tx, positive,
-    require_replayed_shipment_id_visible_tx,
+    require_no_active_carrier_manifest_jobs_tx, require_replayed_shipment_id_visible_tx,
 };
 
 #[derive(Debug)]
@@ -81,6 +81,7 @@ pub async fn record_manual_manifest(
     if shipment.revision != command.expected_revision {
         return Err(AppError::conflict("shipment manifest revision is stale"));
     }
+    require_no_active_carrier_manifest_jobs_tx(&mut tx, access.tenant_id, shipment.id).await?;
     let cartons = lock_manifest_cartons_tx(&mut tx, access.tenant_id, command.shipment_id).await?;
     let identities = cartons
         .iter()

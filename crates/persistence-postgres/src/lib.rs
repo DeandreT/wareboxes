@@ -1,6 +1,7 @@
 //! PostgreSQL infrastructure shared by Wareboxes process composition roots.
 
 pub mod authorization;
+pub mod carrier_manifest;
 pub mod db;
 pub mod facilities;
 pub mod idempotency;

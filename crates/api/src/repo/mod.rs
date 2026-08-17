@@ -8,6 +8,7 @@ pub mod audits;
 pub mod automation;
 pub mod backorder;
 pub mod billing;
+pub mod carrier;
 pub mod configuration;
 pub mod cross_dock;
 pub mod customer_portal;

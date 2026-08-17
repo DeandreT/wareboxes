@@ -3,6 +3,7 @@
 pub(crate) mod automation;
 mod backorders;
 mod billing;
+mod carrier;
 mod configurations;
 pub(crate) mod cross_dock;
 pub(crate) mod customer_portal;
@@ -836,6 +837,34 @@ pub fn router() -> Router<AppState> {
         .route(
             "/shipment-documents/{document_id}/print-jobs/{command_id}/cancellations",
             post(shipping::cancel_document_print_job),
+        )
+        .route(
+            "/carrier-accounts",
+            get(carrier::list_accounts).post(carrier::create_account),
+        )
+        .route(
+            "/carrier-accounts/{account_id}/reconfigurations",
+            post(carrier::reconfigure_account),
+        )
+        .route(
+            "/carrier-accounts/{account_id}/status-changes",
+            post(carrier::change_account_status),
+        )
+        .route(
+            "/shipments/{shipment_id}/carrier-manifest-jobs",
+            get(carrier::list_manifest_jobs).post(carrier::queue_manifest),
+        )
+        .route(
+            "/shipments/{shipment_id}/carrier-manifest-jobs/{job_id}",
+            get(carrier::get_manifest_job),
+        )
+        .route(
+            "/shipments/{shipment_id}/carrier-manifest-jobs/{job_id}/cancellations",
+            post(carrier::cancel_manifest_job),
+        )
+        .route(
+            "/shipments/{shipment_id}/carrier-manifest-jobs/{job_id}/retries",
+            post(carrier::retry_manifest_job),
         )
         .route(
             "/shipments/{shipment_id}/manifests",

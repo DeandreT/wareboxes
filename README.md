@@ -69,6 +69,11 @@ set `OUTBOX_PUBLISHER=http`, `OUTBOX_PUBLISH_URL`, and
 [integration delivery runbook](docs/operations/integration-delivery.md) for webhook
 verification and strict SFTP configuration.
 
+Carrier manifesting is disabled unless the worker has a deployment carrier gateway.
+Set `CARRIER_GATEWAY_URL`, `CARRIER_GATEWAY_BEARER_TOKEN`, and a 32-byte-or-longer
+`CARRIER_GATEWAY_SIGNING_SECRET`; keep provider credentials in the gateway rather
+than Wareboxes. See the [carrier gateway runbook](docs/operations/carrier-gateway.md).
+
 ## Android RF
 
 The Rust Android app owns scanner-driven warehouse execution. Install `cargo-apk`

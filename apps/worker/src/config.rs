@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use reqwest::Url;
-use wareboxes_worker::{InventoryReconciliationConfig, WorkerConfig};
+use wareboxes_worker::{CarrierManifestWorkerConfig, InventoryReconciliationConfig, WorkerConfig};
 
 const DEFAULT_DATABASE_URL: &str =
     "postgres://wareboxes_app:wareboxes_app@127.0.0.1:5433/wareboxes";
@@ -15,8 +15,17 @@ pub struct Config {
     pub poll_interval: Duration,
     pub reconciliation_poll_interval: Duration,
     pub reconciliation: InventoryReconciliationConfig,
+    pub carrier_poll_interval: Duration,
+    pub carrier_worker: CarrierManifestWorkerConfig,
+    pub carrier_gateway: Option<CarrierGatewayConfig>,
     pub worker: WorkerConfig,
     pub publisher: PublisherConfig,
+}
+
+pub struct CarrierGatewayConfig {
+    pub endpoint: Url,
+    pub bearer_token: String,
+    pub signing_secret: String,
 }
 
 pub enum PublisherConfig {
@@ -87,6 +96,23 @@ impl Config {
             )?,
         };
         reconciliation.validate()?;
+        let carrier_gateway = carrier_gateway_config(
+            optional_env("CARRIER_GATEWAY_URL")?,
+            optional_env("CARRIER_GATEWAY_BEARER_TOKEN")?,
+            optional_env("CARRIER_GATEWAY_SIGNING_SECRET")?,
+            parse_bool_env("CARRIER_GATEWAY_ALLOW_INSECURE_HTTP", false)?,
+        )?;
+        let carrier_worker = CarrierManifestWorkerConfig {
+            batch_size: parse_i64_env("CARRIER_BATCH_SIZE", 20, 1, 100)?,
+            tenant_page_size: parse_usize_env("CARRIER_TENANT_PAGE_SIZE", 100, 1, 10_000)?,
+            lease: duration_env("CARRIER_LEASE_SECONDS", 60, 2, 3_600)?,
+            request_timeout: duration_env("CARRIER_REQUEST_TIMEOUT_SECONDS", 20, 1, 3_599)?,
+            retry_delay: duration_env("CARRIER_RETRY_DELAY_SECONDS", 5, 0, 86_400)?,
+            retry_delay_cap: duration_env("CARRIER_RETRY_DELAY_CAP_SECONDS", 300, 0, 86_400)?,
+            max_attempts: u32::try_from(parse_i64_env("CARRIER_MAX_ATTEMPTS", 10, 1, 1_000)?)
+                .context("CARRIER_MAX_ATTEMPTS does not fit in u32")?,
+        };
+        carrier_worker.validate()?;
 
         Ok(Self {
             database_url,
@@ -97,10 +123,41 @@ impl Config {
                     .context("inventory reconciliation interval cannot be negative")?,
             ),
             reconciliation,
+            carrier_poll_interval: duration_env("CARRIER_POLL_INTERVAL_SECONDS", 1, 1, 300)?,
+            carrier_worker,
+            carrier_gateway,
             worker,
             publisher,
         })
     }
+}
+
+fn carrier_gateway_config(
+    endpoint: Option<String>,
+    bearer_token: Option<String>,
+    signing_secret: Option<String>,
+    allow_insecure_http: bool,
+) -> anyhow::Result<Option<CarrierGatewayConfig>> {
+    let Some(endpoint) = endpoint else {
+        if bearer_token.is_some() || signing_secret.is_some() {
+            bail!("CARRIER_GATEWAY_URL is required when carrier gateway credentials are set");
+        }
+        return Ok(None);
+    };
+    let endpoint = Url::parse(&endpoint).context("CARRIER_GATEWAY_URL must be a valid URL")?;
+    if endpoint.scheme() != "https" && !(allow_insecure_http && endpoint.scheme() == "http") {
+        bail!("CARRIER_GATEWAY_URL must use HTTPS unless insecure HTTP is explicitly enabled");
+    }
+    let bearer_token = required_value("CARRIER_GATEWAY_BEARER_TOKEN", bearer_token)?;
+    let signing_secret = required_value("CARRIER_GATEWAY_SIGNING_SECRET", signing_secret)?;
+    if signing_secret.len() < 32 {
+        bail!("CARRIER_GATEWAY_SIGNING_SECRET must contain at least 32 bytes");
+    }
+    Ok(Some(CarrierGatewayConfig {
+        endpoint,
+        bearer_token,
+        signing_secret,
+    }))
 }
 
 fn publisher_config(
@@ -357,5 +414,27 @@ mod tests {
             environment("../../unsafe"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn carrier_gateway_is_optional_but_complete_when_enabled() {
+        assert!(carrier_gateway_config(None, None, None, false)
+            .unwrap()
+            .is_none());
+        assert!(carrier_gateway_config(
+            Some("http://gateway.test/manifests".into()),
+            Some("token".into()),
+            Some("x".repeat(32)),
+            false,
+        )
+        .is_err());
+        assert!(carrier_gateway_config(
+            Some("https://gateway.test/manifests".into()),
+            Some("token".into()),
+            Some("x".repeat(32)),
+            false,
+        )
+        .unwrap()
+        .is_some());
     }
 }

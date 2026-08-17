@@ -4,6 +4,7 @@ use wareboxes_api_contract::v1::{CancelShipmentRequest, ShipmentResponse, Shipme
 use crate::components::{Icon, UiIcon};
 
 use super::cancellation::ShipmentCancellationAction;
+use super::carrier::CarrierManifestPanel;
 use super::display::{dimensions_label, shipment_status_label};
 use super::documents::ShipmentDocumentsPanel;
 use super::{DeparturePanel, ManifestPanel, ShippingSignals};
@@ -18,6 +19,9 @@ pub(super) fn ShipmentExecution(
     on_scan: Callback<()>,
     on_depart: Callback<()>,
     can_cancel: bool,
+    can_manage_carriers: bool,
+    can_retry_carriers: bool,
+    on_carrier_manifested: Callback<(i64, i64)>,
 ) -> impl IntoView {
     let carton_count = shipment.cartons.len();
     let packed_quantity = shipment
@@ -28,6 +32,9 @@ pub(super) fn ShipmentExecution(
     let shipment_id = shipment.shipment_id;
     let shipment_revision = shipment.revision;
     let order_revision = shipment.order_revision;
+    let inventory_owner_id = shipment.inventory_owner_id;
+    let facility_id = shipment.facility_id;
+    let order_id = shipment.order_id;
     view! {
         <div class="shipping-execution">
             <section class="shipping-cartons">
@@ -72,7 +79,22 @@ pub(super) fn ShipmentExecution(
             <aside class="shipping-command-panel">
                 {match shipment.status {
                     ShipmentStatus::AwaitingManifest => view! {
-                        <ManifestPanel signals on_manifest/>
+                        <CarrierManifestPanel
+                            shipment_id
+                            order_id
+                            inventory_owner_id
+                            facility_id
+                            shipment_revision
+                            can_manage=can_manage_carriers
+                            can_retry=can_retry_carriers
+                            on_manifested=on_carrier_manifested
+                            on_unauthorized=signals.on_unauthorized
+                        />
+                        <details class="shipping-manual-fallback">
+                            <summary>"Manual carrier fallback"</summary>
+                            <p>"Use only when the carrier gateway is unavailable and tracking was obtained outside Wareboxes."</p>
+                            <ManifestPanel signals on_manifest/>
+                        </details>
                         {can_cancel.then(|| view! {
                             <ShipmentCancellationAction
                                 shipment_id

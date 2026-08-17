@@ -111,6 +111,29 @@ async fn require_no_active_document_prints_tx(
     }
 }
 
+async fn require_no_active_carrier_manifest_jobs_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    shipment_id: ShipmentId,
+) -> AppResult<()> {
+    let active: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM carrier_manifest_jobs
+           WHERE tenant_id=$1 AND shipment_id=$2
+             AND status IN ('queued','processing','retry_scheduled'))"#,
+    )
+    .bind(tenant_id.get())
+    .bind(shipment_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if active {
+        Err(AppError::conflict(
+            "shipment has an active carrier manifest job",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 async fn order_hint_for_shipment_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,

@@ -3,6 +3,7 @@
 mod automation;
 mod backorder;
 mod billing;
+mod carrier;
 mod configuration;
 mod cross_dock;
 mod cursor;
@@ -83,6 +84,13 @@ pub use billing::{
     CreateBillingContractRequest, ExportBillingRunRequest, GenerateBillingRunRequest,
     ReviewBillingRunRequest, MAX_BILLING_BATCH_KEY_LENGTH, MAX_BILLING_NOTE_LENGTH,
     MAX_BILLING_REFERENCE_LENGTH,
+};
+pub use carrier::{
+    CancelCarrierManifestRequest, CarrierAccountPage, CarrierAccountPageRequest,
+    CarrierAccountResponse, CarrierAccountStatus, CarrierManifestJobPage,
+    CarrierManifestJobPageRequest, CarrierManifestJobResponse, CarrierManifestJobStatus,
+    ChangeCarrierAccountStatusRequest, CreateCarrierAccountRequest, QueueCarrierManifestRequest,
+    ReconfigureCarrierAccountRequest, RetryCarrierManifestRequest,
 };
 pub use configuration::{
     BillableEventType, BillingUnit, ConfigurationLifecycleRequest, ConfigurationPage,

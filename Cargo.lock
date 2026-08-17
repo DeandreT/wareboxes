@@ -5649,6 +5649,7 @@ name = "wareboxes-persistence-postgres"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "serde",
  "serde_json",
@@ -5657,6 +5658,7 @@ dependencies = [
  "thiserror 1.0.69",
  "wareboxes-application",
  "wareboxes-domain",
+ "wareboxes-worker",
 ]
 
 [[package]]
@@ -5687,6 +5689,7 @@ name = "wareboxes-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "dotenvy",
@@ -5709,6 +5712,7 @@ dependencies = [
  "wareboxes-core",
  "wareboxes-domain",
  "wareboxes-persistence-postgres",
+ "wareboxes-worker",
 ]
 
 [[package]]

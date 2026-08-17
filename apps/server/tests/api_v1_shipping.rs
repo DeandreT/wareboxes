@@ -1,5 +1,7 @@
 #[path = "api_v1_shipping/cancellation.rs"]
 mod cancellation;
+#[path = "api_v1_shipping/carrier.rs"]
+mod carrier;
 mod common;
 #[path = "api_v1_shipping/document_policy.rs"]
 mod document_policy;
@@ -1148,6 +1150,55 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
             SELECT has_sequence_privilege('wareboxes_app', $1, 'USAGE'),
                    has_sequence_privilege('wareboxes_app', $1, 'SELECT'),
                    has_sequence_privilege('wareboxes_app', $1, 'UPDATE')
+            "#,
+        )
+        .bind(sequence)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(privileges, (true, false, false), "{sequence}");
+    }
+    for (table, can_update) in [
+        ("carrier_accounts", true),
+        ("carrier_account_versions", false),
+        ("carrier_manifest_jobs", true),
+        ("carrier_manifest_attempts", false),
+        ("carrier_manifest_attempt_results", false),
+    ] {
+        let privileges: (bool, bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT has_table_privilege('wareboxes_app', $1, 'SELECT'),
+                   has_table_privilege('wareboxes_app', $1, 'INSERT'),
+                   has_table_privilege('wareboxes_app', $1, 'UPDATE'),
+                   has_table_privilege('wareboxes_app', $1, 'DELETE')
+            "#,
+        )
+        .bind(table)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(privileges, (true, true, can_update, false), "{table}");
+        let rls: (bool, bool) = sqlx::query_as(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid=$1::regclass",
+        )
+        .bind(table)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(rls, (true, true), "{table}");
+    }
+    for sequence in [
+        "carrier_accounts_id_seq",
+        "carrier_account_versions_id_seq",
+        "carrier_manifest_jobs_id_seq",
+        "carrier_manifest_attempts_id_seq",
+        "carrier_manifest_attempt_results_id_seq",
+    ] {
+        let privileges: (bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT has_sequence_privilege('wareboxes_app',$1,'USAGE'),
+                   has_sequence_privilege('wareboxes_app',$1,'SELECT'),
+                   has_sequence_privilege('wareboxes_app',$1,'UPDATE')
             "#,
         )
         .bind(sequence)
