@@ -54423,3 +54423,395 @@ REVOKE ALL ON FUNCTION public.validate_carrier_manifest_attempt() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_carrier_manifest_attempt_result() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_shipment_active_carrier_job() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_shipment_cancellation_carrier_job() FROM PUBLIC;
+
+-- Platform data-cell registry and immutable tenant home placement. Connection
+-- secrets and physical endpoints intentionally stay in the deployment secret
+-- plane; this catalog contains only routing identity, capacity, and residency
+-- evidence that operators may safely inspect.
+
+CREATE TABLE public.data_cells (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  cell_key text NOT NULL UNIQUE,
+  name text NOT NULL,
+  region text NOT NULL,
+  residency_code text NOT NULL,
+  mode text NOT NULL,
+  status text NOT NULL,
+  revision bigint NOT NULL,
+  max_tenants bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  created_by_user_id bigint REFERENCES public.users(id),
+  changed_at timestamptz,
+  changed_by_user_id bigint REFERENCES public.users(id),
+  change_reason text,
+  CONSTRAINT data_cells_key_check CHECK(
+    cell_key~'^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'),
+  CONSTRAINT data_cells_name_check CHECK(
+    name=btrim(name) AND name<>'' AND char_length(name)<=200
+      AND name!~'[[:cntrl:]]'),
+  CONSTRAINT data_cells_region_check CHECK(
+    region~'^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$'
+      OR region~'^[a-z0-9]$'),
+  CONSTRAINT data_cells_residency_check CHECK(
+    residency_code~'^[A-Z0-9][A-Z0-9-]{0,14}[A-Z0-9]$'
+      OR residency_code~'^[A-Z0-9]$'),
+  CONSTRAINT data_cells_mode_check CHECK(mode IN ('shared','dedicated')),
+  CONSTRAINT data_cells_status_check CHECK(
+    status IN ('provisioning','active','draining','retired')),
+  CONSTRAINT data_cells_capacity_check CHECK(
+    max_tenants BETWEEN 1 AND 1000000
+      AND (mode='shared' OR max_tenants=1)),
+  CONSTRAINT data_cells_revision_check CHECK(revision>0),
+  CONSTRAINT data_cells_change_shape_check CHECK(
+    (revision=1 AND changed_at IS NULL AND changed_by_user_id IS NULL
+      AND change_reason IS NULL)
+    OR (revision>1 AND changed_at IS NOT NULL
+      AND changed_by_user_id IS NOT NULL AND change_reason IS NOT NULL)),
+  CONSTRAINT data_cells_reason_check CHECK(change_reason IS NULL OR (
+    change_reason=btrim(change_reason) AND change_reason<>''
+      AND char_length(change_reason)<=500 AND change_reason!~'[[:cntrl:]]'))
+);
+
+CREATE INDEX data_cells_status_region_idx
+ON public.data_cells(status,region,created_at DESC,id DESC);
+
+CREATE TABLE public.data_cell_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  data_cell_id bigint NOT NULL REFERENCES public.data_cells(id),
+  action text NOT NULL,
+  cell_revision bigint NOT NULL,
+  previous_status text,
+  resulting_status text NOT NULL,
+  actor_user_id bigint REFERENCES public.users(id),
+  occurred_at timestamptz NOT NULL,
+  reason text,
+  request_id text,
+  evidence jsonb NOT NULL,
+  UNIQUE(data_cell_id,cell_revision),
+  CONSTRAINT data_cell_events_action_check CHECK(action IN (
+    'system_registered','registered','reconfigured','activated',
+    'draining','reactivated','retired')),
+  CONSTRAINT data_cell_events_revision_check CHECK(cell_revision>0),
+  CONSTRAINT data_cell_events_status_check CHECK(
+    (previous_status IS NULL OR previous_status IN (
+      'provisioning','active','draining','retired'))
+    AND resulting_status IN ('provisioning','active','draining','retired')),
+  CONSTRAINT data_cell_events_reason_check CHECK(reason IS NULL OR (
+    reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+      AND reason!~'[[:cntrl:]]')),
+  CONSTRAINT data_cell_events_request_check CHECK(request_id IS NULL OR (
+    request_id=btrim(request_id) AND request_id<>'' AND char_length(request_id)<=128)),
+  CONSTRAINT data_cell_events_evidence_check CHECK(jsonb_typeof(evidence)='object'),
+  CONSTRAINT data_cell_events_shape_check CHECK(
+    (action='system_registered' AND cell_revision=1 AND previous_status IS NULL
+      AND resulting_status='active' AND actor_user_id IS NULL AND reason IS NULL)
+    OR (action='registered' AND cell_revision=1 AND previous_status IS NULL
+      AND resulting_status='provisioning' AND actor_user_id IS NOT NULL AND reason IS NULL)
+    OR (action='reconfigured' AND cell_revision>1
+      AND previous_status=resulting_status AND actor_user_id IS NOT NULL AND reason IS NOT NULL)
+    OR (action='activated' AND previous_status='provisioning'
+      AND resulting_status='active' AND actor_user_id IS NOT NULL AND reason IS NOT NULL)
+    OR (action='draining' AND previous_status='active'
+      AND resulting_status='draining' AND actor_user_id IS NOT NULL AND reason IS NOT NULL)
+    OR (action='reactivated' AND previous_status='draining'
+      AND resulting_status='active' AND actor_user_id IS NOT NULL AND reason IS NOT NULL)
+    OR (action='retired' AND previous_status='draining'
+      AND resulting_status='retired' AND actor_user_id IS NOT NULL AND reason IS NOT NULL))
+);
+
+CREATE INDEX data_cell_events_history_idx
+ON public.data_cell_events(data_cell_id,occurred_at DESC,id DESC);
+
+CREATE TABLE public.tenant_cell_placements (
+  tenant_id bigint PRIMARY KEY REFERENCES public.tenants(id),
+  data_cell_id bigint NOT NULL REFERENCES public.data_cells(id),
+  revision bigint NOT NULL,
+  residency_requirement text NOT NULL,
+  placed_at timestamptz NOT NULL,
+  placed_by_user_id bigint REFERENCES public.users(id),
+  placement_reason text NOT NULL,
+  CONSTRAINT tenant_cell_placements_revision_check CHECK(revision>0),
+  CONSTRAINT tenant_cell_placements_residency_check CHECK(
+    residency_requirement~'^[A-Z0-9][A-Z0-9-]{0,14}[A-Z0-9]$'
+      OR residency_requirement~'^[A-Z0-9]$'),
+  CONSTRAINT tenant_cell_placements_reason_check CHECK(
+    placement_reason=btrim(placement_reason) AND placement_reason<>''
+      AND char_length(placement_reason)<=500
+      AND placement_reason!~'[[:cntrl:]]')
+);
+
+CREATE INDEX tenant_cell_placements_cell_idx
+ON public.tenant_cell_placements(data_cell_id,tenant_id);
+
+CREATE TABLE public.tenant_cell_placement_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  placement_revision bigint NOT NULL,
+  action text NOT NULL,
+  previous_data_cell_id bigint REFERENCES public.data_cells(id),
+  resulting_data_cell_id bigint NOT NULL REFERENCES public.data_cells(id),
+  residency_requirement text NOT NULL,
+  actor_user_id bigint REFERENCES public.users(id),
+  occurred_at timestamptz NOT NULL,
+  reason text NOT NULL,
+  request_id text,
+  evidence jsonb NOT NULL,
+  UNIQUE(tenant_id,placement_revision),
+  CONSTRAINT tenant_cell_placement_events_revision_check CHECK(placement_revision>0),
+  CONSTRAINT tenant_cell_placement_events_action_check CHECK(action='placed'),
+  CONSTRAINT tenant_cell_placement_events_initial_check CHECK(
+    placement_revision=1 AND previous_data_cell_id IS NULL),
+  CONSTRAINT tenant_cell_placement_events_residency_check CHECK(
+    residency_requirement~'^[A-Z0-9][A-Z0-9-]{0,14}[A-Z0-9]$'
+      OR residency_requirement~'^[A-Z0-9]$'),
+  CONSTRAINT tenant_cell_placement_events_reason_check CHECK(
+    reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+      AND reason!~'[[:cntrl:]]'),
+  CONSTRAINT tenant_cell_placement_events_request_check CHECK(request_id IS NULL OR (
+    request_id=btrim(request_id) AND request_id<>'' AND char_length(request_id)<=128)),
+  CONSTRAINT tenant_cell_placement_events_evidence_check CHECK(
+    jsonb_typeof(evidence)='object')
+);
+
+CREATE INDEX tenant_cell_placement_events_history_idx
+ON public.tenant_cell_placement_events(tenant_id,occurred_at DESC,id DESC);
+
+-- Every database starts as one usable shared cell. Deployments register their
+-- real cells before provisioning residency-bound tenants; direct test fixtures
+-- and local development remain safely placed without special setup.
+INSERT INTO public.data_cells(
+  cell_key,name,region,residency_code,mode,status,revision,max_tenants,
+  created_at,created_by_user_id
+) VALUES(
+  'local-default','Local default cell','local','GLOBAL','shared','active',1,1000000,
+  CURRENT_TIMESTAMP,NULL
+);
+
+INSERT INTO public.data_cell_events(
+  data_cell_id,action,cell_revision,previous_status,resulting_status,
+  actor_user_id,occurred_at,reason,request_id,evidence
+) SELECT id,'system_registered',1,NULL,'active',NULL,created_at,NULL,NULL,
+  jsonb_build_object('cell_key',cell_key,'region',region,'residency',residency_code,
+    'mode',mode,'max_tenants',max_tenants,'source','baseline')
+FROM public.data_cells WHERE cell_key='local-default';
+
+INSERT INTO public.tenant_cell_placements(
+  tenant_id,data_cell_id,revision,residency_requirement,placed_at,
+  placed_by_user_id,placement_reason
+) SELECT tenant.id,cell.id,1,'GLOBAL',tenant.created,NULL,'baseline default placement'
+FROM public.tenants tenant CROSS JOIN public.data_cells cell
+WHERE cell.cell_key='local-default';
+
+INSERT INTO public.tenant_cell_placement_events(
+  tenant_id,placement_revision,action,previous_data_cell_id,resulting_data_cell_id,
+  residency_requirement,actor_user_id,occurred_at,reason,request_id,evidence
+) SELECT placement.tenant_id,1,'placed',NULL,placement.data_cell_id,'GLOBAL',NULL,
+  placement.placed_at,placement.placement_reason,NULL,
+  jsonb_build_object('tenant_id',placement.tenant_id,
+    'data_cell_id',placement.data_cell_id,'residency_requirement','GLOBAL',
+    'source','baseline')
+FROM public.tenant_cell_placements placement;
+
+CREATE FUNCTION public.validate_data_cell_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; placed_count bigint; status_transition boolean;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'data cells cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'data-cell mutation requires a platform administrator'
+      USING ERRCODE='42501';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF NEW.status<>'provisioning' OR NEW.revision<>1
+      OR NEW.created_by_user_id IS DISTINCT FROM actor_id
+      OR NEW.changed_at IS NOT NULL OR NEW.changed_by_user_id IS NOT NULL
+      OR NEW.change_reason IS NOT NULL THEN
+      RAISE EXCEPTION 'invalid data-cell registration evidence' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  SELECT COUNT(*) INTO placed_count FROM public.tenant_cell_placements placement
+  WHERE placement.data_cell_id=OLD.id;
+  status_transition:=NEW.status IS DISTINCT FROM OLD.status;
+  IF ROW(NEW.id,NEW.cell_key,NEW.region,NEW.residency_code,NEW.mode,
+      NEW.created_at,NEW.created_by_user_id)
+      IS DISTINCT FROM
+     ROW(OLD.id,OLD.cell_key,OLD.region,OLD.residency_code,OLD.mode,
+      OLD.created_at,OLD.created_by_user_id)
+    OR NEW.revision<>OLD.revision+1
+    OR NEW.changed_at IS NULL OR NEW.changed_by_user_id IS DISTINCT FROM actor_id
+    OR NEW.change_reason IS NULL OR NEW.max_tenants<placed_count
+    OR (NEW.mode='dedicated' AND placed_count>1)
+    OR (status_transition AND (
+      NEW.name IS DISTINCT FROM OLD.name OR NEW.max_tenants<>OLD.max_tenants
+      OR NOT ((OLD.status='provisioning' AND NEW.status='active')
+        OR (OLD.status='active' AND NEW.status='draining')
+        OR (OLD.status='draining' AND NEW.status='active')
+        OR (OLD.status='draining' AND NEW.status='retired' AND placed_count=0))))
+    OR (NOT status_transition AND
+      ROW(NEW.name,NEW.max_tenants) IS NOT DISTINCT FROM ROW(OLD.name,OLD.max_tenants)) THEN
+    RAISE EXCEPTION 'invalid data-cell transition' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_data_cell_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; cell public.data_cells%ROWTYPE;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  SELECT * INTO cell FROM public.data_cells current_cell WHERE current_cell.id=NEW.data_cell_id;
+  IF cell.id IS NULL OR cell.revision<>NEW.cell_revision
+    OR cell.status<>NEW.resulting_status
+    OR NEW.action='system_registered'
+    OR actor_id IS NULL OR NEW.actor_user_id IS DISTINCT FROM actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'invalid data-cell event evidence' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reject_data_cell_evidence_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'data-cell evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.require_data_cell_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM public.data_cell_events event
+    WHERE event.data_cell_id=NEW.id AND event.cell_revision=NEW.revision
+      AND event.resulting_status=NEW.status) THEN
+    RAISE EXCEPTION 'data-cell revision requires immutable event evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.place_new_tenant_in_data_cell() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE selected_cell_id bigint; requirement text; cell public.data_cells%ROWTYPE;
+DECLARE placed_count bigint; placement_reason text; request_id text;
+BEGIN
+  selected_cell_id:=NULLIF(
+    current_setting('wareboxes.initial_data_cell_id',true),'')::bigint;
+  requirement:=COALESCE(NULLIF(
+    current_setting('wareboxes.initial_residency_requirement',true),''),'GLOBAL');
+  request_id:=NULLIF(current_setting('wareboxes.request_id',true),'');
+  IF selected_cell_id IS NULL THEN
+    SELECT id INTO selected_cell_id FROM public.data_cells
+    WHERE cell_key='local-default';
+  END IF;
+  SELECT * INTO cell FROM public.data_cells current_cell
+  WHERE current_cell.id=selected_cell_id FOR UPDATE;
+  SELECT COUNT(*) INTO placed_count FROM public.tenant_cell_placements placement
+  WHERE placement.data_cell_id=selected_cell_id;
+  IF cell.id IS NULL OR cell.status<>'active'
+    OR placed_count>=cell.max_tenants
+    OR (cell.mode='dedicated' AND placed_count<>0)
+    OR NOT (requirement='GLOBAL' OR requirement=cell.residency_code) THEN
+    RAISE EXCEPTION 'requested data cell cannot accept this tenant placement'
+      USING ERRCODE='23514';
+  END IF;
+  placement_reason:=CASE WHEN NEW.created_by_user_id IS NULL
+    THEN 'automatic local default placement' ELSE 'initial tenant provisioning' END;
+  INSERT INTO public.tenant_cell_placements(
+    tenant_id,data_cell_id,revision,residency_requirement,placed_at,
+    placed_by_user_id,placement_reason
+  ) VALUES(NEW.id,cell.id,1,requirement,NEW.created,
+    NEW.created_by_user_id,placement_reason);
+  INSERT INTO public.tenant_cell_placement_events(
+    tenant_id,placement_revision,action,previous_data_cell_id,resulting_data_cell_id,
+    residency_requirement,actor_user_id,occurred_at,reason,request_id,evidence
+  ) VALUES(NEW.id,1,'placed',NULL,cell.id,requirement,NEW.created_by_user_id,
+    NEW.created,placement_reason,request_id,
+    jsonb_build_object('tenant_id',NEW.id,'data_cell_id',cell.id,
+      'cell_key',cell.cell_key,'cell_region',cell.region,
+      'cell_residency',cell.residency_code,'cell_mode',cell.mode,
+      'residency_requirement',requirement));
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.guard_tenant_cell_placement() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'tenant home placements are immutable outside a governed move'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_tenant_cell_placement_event() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'tenant placement events are immutable' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER data_cells_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.data_cells FOR EACH ROW EXECUTE FUNCTION public.validate_data_cell_mutation();
+CREATE CONSTRAINT TRIGGER data_cells_require_event AFTER INSERT OR UPDATE
+ON public.data_cells DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_data_cell_event();
+CREATE TRIGGER data_cell_events_validate BEFORE INSERT
+ON public.data_cell_events FOR EACH ROW EXECUTE FUNCTION public.validate_data_cell_event();
+CREATE TRIGGER data_cell_events_immutable BEFORE UPDATE OR DELETE
+ON public.data_cell_events FOR EACH ROW EXECUTE FUNCTION public.reject_data_cell_evidence_mutation();
+CREATE TRIGGER tenants_place_in_data_cell AFTER INSERT ON public.tenants
+FOR EACH ROW EXECUTE FUNCTION public.place_new_tenant_in_data_cell();
+CREATE TRIGGER tenant_cell_placements_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_cell_placements FOR EACH ROW EXECUTE FUNCTION public.guard_tenant_cell_placement();
+CREATE TRIGGER tenant_cell_placement_events_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_cell_placement_events FOR EACH ROW
+EXECUTE FUNCTION public.guard_tenant_cell_placement_event();
+
+ALTER TABLE public.data_cells ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.data_cells FORCE ROW LEVEL SECURITY;
+CREATE POLICY data_cells_platform_isolation ON public.data_cells
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.data_cell_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.data_cell_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY data_cell_events_platform_isolation ON public.data_cell_events
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.tenant_cell_placements ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_cell_placements FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_cell_placements_platform_isolation ON public.tenant_cell_placements
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.tenant_cell_placement_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_cell_placement_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_cell_placement_events_platform_isolation
+ON public.tenant_cell_placement_events
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+
+GRANT SELECT,INSERT,UPDATE ON public.data_cells TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.data_cells_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.data_cell_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.data_cell_events_id_seq TO wareboxes_app;
+GRANT SELECT ON public.tenant_cell_placements TO wareboxes_app;
+GRANT SELECT ON public.tenant_cell_placement_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.tenant_cell_placement_events_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_data_cell_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_data_cell_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_data_cell_evidence_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_data_cell_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.place_new_tenant_in_data_cell() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_tenant_cell_placement() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_tenant_cell_placement_event() FROM PUBLIC;

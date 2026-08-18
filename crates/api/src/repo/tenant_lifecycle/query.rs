@@ -5,7 +5,10 @@ use wareboxes_application::tenant_lifecycle::{
     TenantLifecyclePageQuery, TenantLifecycleReadModel,
 };
 use wareboxes_core::models::TenantAccess;
-use wareboxes_domain::{TenantId, TenantRevision, TenantStatus, UserId};
+use wareboxes_domain::{
+    DataCellId, DataCellMode, DataCellPlacementRevision, TenantId, TenantRevision, TenantStatus,
+    UserId,
+};
 
 use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
@@ -47,6 +50,17 @@ fn map_row(row: &sqlx::postgres::PgRow) -> AppResult<TenantLifecycleReadModel> {
         active_facility_count: row.try_get("active_facility_count")?,
         active_inventory_owner_count: row.try_get("active_inventory_owner_count")?,
         active_service_account_count: row.try_get("active_service_account_count")?,
+        data_cell_id: DataCellId::new(row.try_get("data_cell_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        data_cell_key: row.try_get("data_cell_key")?,
+        data_cell_name: row.try_get("data_cell_name")?,
+        data_cell_region: row.try_get("data_cell_region")?,
+        data_cell_residency: row.try_get("data_cell_residency")?,
+        data_cell_mode: DataCellMode::parse(&row.try_get::<String, _>("data_cell_mode")?)
+            .ok_or_else(|| AppError::internal("stored data-cell mode is invalid"))?,
+        placement_revision: DataCellPlacementRevision::new(row.try_get("placement_revision")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        residency_requirement: row.try_get("residency_requirement")?,
     })
 }
 
@@ -61,6 +75,10 @@ pub(super) async fn read_tx(
         tenant.initial_admin_user_id,administrator.email AS initial_admin_email,
         tenant.status_changed_at,tenant.status_changed_by_user_id AS status_changed_by,
         tenant.status_reason,
+        placement.data_cell_id,cell.cell_key AS data_cell_key,
+        cell.name AS data_cell_name,cell.region AS data_cell_region,
+        cell.residency_code AS data_cell_residency,cell.mode AS data_cell_mode,
+        placement.revision AS placement_revision,placement.residency_requirement,
         (SELECT COUNT(*) FROM tenant_memberships membership
           WHERE membership.tenant_id=tenant.id AND membership.deleted IS NULL
             AND NOT membership.support_managed)
@@ -75,6 +93,8 @@ pub(super) async fn read_tx(
           WHERE account.tenant_id=tenant.id AND account.status='active')
           AS active_service_account_count
         FROM tenants tenant
+        JOIN tenant_cell_placements placement ON placement.tenant_id=tenant.id
+        JOIN data_cells cell ON cell.id=placement.data_cell_id
         LEFT JOIN users administrator ON administrator.id=tenant.initial_admin_user_id
         WHERE tenant.id=$1 AND tenant.deleted IS NULL"#,
     )

@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use wareboxes_domain::{TenantId, TenantRevision, TenantStatus, Timestamp, UserId};
+use wareboxes_domain::{
+    DataCellId, DataCellMode, DataCellPlacementRevision, TenantId, TenantRevision, TenantStatus,
+    Timestamp, UserId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantLifecycleReadModel {
@@ -19,6 +22,14 @@ pub struct TenantLifecycleReadModel {
     pub active_facility_count: i64,
     pub active_inventory_owner_count: i64,
     pub active_service_account_count: i64,
+    pub data_cell_id: DataCellId,
+    pub data_cell_key: String,
+    pub data_cell_name: String,
+    pub data_cell_region: String,
+    pub data_cell_residency: String,
+    pub data_cell_mode: DataCellMode,
+    pub placement_revision: DataCellPlacementRevision,
+    pub residency_requirement: String,
 }
 
 pub type CreateTenantResult = TenantLifecycleReadModel;

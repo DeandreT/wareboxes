@@ -6,10 +6,10 @@ use leptos_router::{
 use wareboxes_api_contract::v1::{
     AutomationWorkspaceResponse, CrossDockPlanningOptionPage, CrossDockWorkPage,
     CycleCountCandidatePage, CycleCountPolicyPage, CycleCountVariancePage, CycleCountWorkPage,
-    InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
-    OutboundLoadQueuePage, PackingQueuePage, PickWavePage, PutawayCandidatePage, PutawayWorkPage,
-    ReplenishmentPolicyPage, ReplenishmentQueuePage, ShippingQueuePage, SupportAccessPage,
-    TenantLifecyclePage,
+    DataCellPage, InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus,
+    OpaqueCursor, OutboundLoadQueuePage, PackingQueuePage, PickWavePage, PutawayCandidatePage,
+    PutawayWorkPage, ReplenishmentPolicyPage, ReplenishmentQueuePage, ShippingQueuePage,
+    SupportAccessPage, TenantLifecyclePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -25,6 +25,7 @@ use crate::cross_dock::CrossDockWorkspace;
 use crate::customer_portal::CustomerPortal;
 use crate::customer_returns::CustomerReturnsWorkspace;
 use crate::cycle_count::CycleCountWorkspace;
+use crate::fleet_cells::FleetCellsWorkspace;
 use crate::fulfillment::{LoadsWorkbench, OrdersWorkbench};
 use crate::inbound_asns::InboundAsnWorkspace;
 use crate::inventory::InventoryWorkspace;
@@ -82,6 +83,7 @@ pub enum WorkspaceBootstrapSection {
     WorkOrchestration,
     Automation,
     ServiceAccounts,
+    FleetCells,
     TenantLifecycle,
     SupportAccess,
     Access,
@@ -107,6 +109,7 @@ pub struct WorkspaceBootstrapData {
     pub automation_workspace: Option<AutomationWorkspaceResponse>,
     pub tenant_lifecycle_page: Option<TenantLifecyclePage>,
     pub support_access_page: Option<SupportAccessPage>,
+    pub data_cell_page: Option<DataCellPage>,
     pub balances: Vec<InventoryBalanceResponse>,
     pub balance_next_cursor: Option<OpaqueCursor>,
     pub access: AccessScopeWorkspace,
@@ -152,6 +155,7 @@ struct WorkspaceData {
     automation_workspace: Option<AutomationWorkspaceResponse>,
     tenant_lifecycle_page: Option<TenantLifecyclePage>,
     support_access_page: Option<SupportAccessPage>,
+    data_cell_page: Option<DataCellPage>,
     balances: Vec<InventoryBalanceResponse>,
     balance_next_cursor: Option<OpaqueCursor>,
     holds: Vec<InventoryHoldResponse>,
@@ -183,6 +187,7 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             automation_workspace: bootstrap.automation_workspace,
             tenant_lifecycle_page: bootstrap.tenant_lifecycle_page,
             support_access_page: bootstrap.support_access_page,
+            data_cell_page: bootstrap.data_cell_page,
             balances: bootstrap.balances,
             balance_next_cursor: bootstrap.balance_next_cursor,
             access: bootstrap.access,
@@ -231,6 +236,7 @@ pub(crate) enum Section {
     WorkOrchestration,
     Automation,
     ServiceAccounts,
+    FleetCells,
     TenantLifecycle,
     SupportAccess,
     Access,
@@ -256,6 +262,7 @@ impl Section {
             Self::WorkOrchestration => Some(WorkspaceBootstrapSection::WorkOrchestration),
             Self::Automation => Some(WorkspaceBootstrapSection::Automation),
             Self::ServiceAccounts => Some(WorkspaceBootstrapSection::ServiceAccounts),
+            Self::FleetCells => Some(WorkspaceBootstrapSection::FleetCells),
             Self::TenantLifecycle => Some(WorkspaceBootstrapSection::TenantLifecycle),
             Self::SupportAccess => Some(WorkspaceBootstrapSection::SupportAccess),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
@@ -320,6 +327,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/work-orchestration/workspace.css"/>
                 <link rel="stylesheet" href="/automation/workspace.css"/>
                 <link rel="stylesheet" href="/service-accounts/workspace.css"/>
+                <link rel="stylesheet" href="/fleet-cells/workspace.css"/>
                 <link rel="stylesheet" href="/tenant-lifecycle/workspace.css"/>
                 <link rel="stylesheet" href="/support-access/workspace.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
@@ -393,6 +401,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("work-orchestration") view=WorkOrchestrationPage/>
                     <Route path=StaticSegment("automation") view=AutomationPage/>
                     <Route path=(StaticSegment("administration"), StaticSegment("service-accounts")) view=ServiceAccountsPage/>
+                    <Route path=(StaticSegment("platform"), StaticSegment("data-cells")) view=FleetCellsPage/>
                     <Route path=(StaticSegment("platform"), StaticSegment("tenants")) view=TenantLifecyclePage/>
                     <Route path=(StaticSegment("platform"), StaticSegment("support-access")) view=SupportAccessPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
@@ -869,6 +878,17 @@ async fn load_workspace(
         Section::ServiceAccounts if has_permission(session, "admin") => {
             data.access = api::access().await?;
         }
+        Section::FleetCells if session.is_platform_administrator => {
+            data.data_cell_page = Some(
+                api::data_cells(&wareboxes_api_contract::v1::DataCellPageRequest {
+                    status: None,
+                    region: None,
+                    cursor: None,
+                    limit: wareboxes_api_contract::v1::PageLimit::default(),
+                })
+                .await?,
+            );
+        }
         Section::TenantLifecycle if session.is_platform_administrator => {
             data.tenant_lifecycle_page = Some(
                 api::tenant_lifecycle_page(
@@ -879,6 +899,15 @@ async fn load_workspace(
                         limit: wareboxes_api_contract::v1::PageLimit::default(),
                     },
                 )
+                .await?,
+            );
+            data.data_cell_page = Some(
+                api::data_cells(&wareboxes_api_contract::v1::DataCellPageRequest {
+                    status: Some(wareboxes_api_contract::v1::DataCellStatus::Active),
+                    region: None,
+                    cursor: None,
+                    limit: wareboxes_api_contract::v1::PageLimit::new(100).unwrap_or_default(),
+                })
                 .await?,
             );
         }
@@ -945,6 +974,7 @@ async fn load_workspace(
         | Section::WorkOrchestration
         | Section::Automation
         | Section::ServiceAccounts
+        | Section::FleetCells
         | Section::TenantLifecycle
         | Section::SupportAccess
         | Section::Administration(_) => {}
@@ -1090,6 +1120,11 @@ fn AutomationPage() -> impl IntoView {
 #[component]
 fn ServiceAccountsPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::ServiceAccounts/> }
+}
+
+#[component]
+fn FleetCellsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::FleetCells/> }
 }
 
 #[component]
@@ -1411,9 +1446,17 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 />
             }
             .into_any(),
+            Section::FleetCells if session.is_platform_administrator => view! {
+                <FleetCellsWorkspace
+                    initial_page=data.data_cell_page
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
             Section::TenantLifecycle if session.is_platform_administrator => view! {
                 <TenantLifecycleWorkspace
                     initial_page=data.tenant_lifecycle_page
+                    initial_cells=data.data_cell_page
                     current_tenant_id=session.active_tenant.tenant_id.get()
                     on_unauthorized=session_expired_callback()
                 />

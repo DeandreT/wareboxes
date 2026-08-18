@@ -9,6 +9,7 @@ mod configuration;
 mod cross_dock;
 mod customer_return;
 mod cycle_count;
+mod data_cell;
 mod facility;
 mod inbound_asn;
 mod inbound_inspection;
@@ -96,6 +97,7 @@ pub use cycle_count::{
     MAX_CYCLE_COUNT_PERCENTAGE_BASIS_POINTS, MAX_CYCLE_COUNT_RECOUNTS,
     MAX_CYCLE_COUNT_VARIANCE_NOTE_LENGTH,
 };
+pub use data_cell::*;
 pub use facility::{
     FacilityRevision, FacilityShippingOrigin, FacilityShippingOriginError,
     FacilityShippingOriginField, MAX_FACILITY_ORIGIN_ADDRESS_LINE_LENGTH,
@@ -417,6 +419,7 @@ positive_id!(UserId, "user ID");
 positive_id!(ServiceAccountId, "service account ID");
 positive_id!(ServiceAccountCredentialId, "service account credential ID");
 positive_id!(SupportAccessGrantId, "support access grant ID");
+positive_id!(DataCellId, "data cell ID");
 positive_id!(EmployeeId, "employee ID");
 positive_id!(EmployeeIdentityChangeId, "employee identity change ID");
 positive_id!(LaborSkillId, "labor skill ID");

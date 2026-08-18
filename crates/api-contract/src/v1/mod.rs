@@ -10,6 +10,7 @@ mod cursor;
 mod customer_portal;
 mod customer_return;
 mod cycle_count;
+mod data_cell;
 mod dynamic_release;
 mod error;
 mod expected_receiving;
@@ -144,6 +145,11 @@ pub use cycle_count::{
     CycleCountWorkPageRequest, CycleCountWorkResponse, CycleCountWorkSort, CycleCountWorkStatus,
     DecideCycleCountVarianceRequest, DecideCycleCountVarianceResponse,
     HeartbeatCycleCountClaimRequest, ReleaseCycleCountClaimRequest,
+};
+pub use data_cell::{
+    ChangeDataCellStatusRequest, DataCellEventPage, DataCellEventPageRequest,
+    DataCellEventResponse, DataCellMode, DataCellPage, DataCellPageRequest, DataCellResponse,
+    DataCellStatus, ReconfigureDataCellRequest, RegisterDataCellRequest,
 };
 pub use dynamic_release::{
     DynamicReleaseCandidateResponse, DynamicReleaseReadinessRequest,

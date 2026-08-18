@@ -65,9 +65,14 @@ pub use carrier::{
     reconfigure_carrier_account, retry_carrier_manifest_job,
 };
 mod cycle_count;
+mod data_cells;
 pub use cycle_count::{
     configure_cycle_count_policy, create_cycle_count_task, cycle_count_candidates,
     cycle_count_policies, cycle_count_variances, cycle_count_work, decide_cycle_count_variance,
+};
+pub use data_cells::{
+    change_data_cell_status, data_cell, data_cell_events, data_cells, reconfigure_data_cell,
+    register_data_cell,
 };
 mod customer_return;
 pub use customer_return::{

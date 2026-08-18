@@ -1,6 +1,7 @@
 use serde::Serialize;
 use wareboxes_domain::{
-    TenantId, TenantLifecycleReason, TenantName, TenantRevision, TenantSlug, TenantStatus,
+    DataCellId, DataResidencyCode, TenantId, TenantLifecycleReason, TenantName, TenantRevision,
+    TenantSlug, TenantStatus,
 };
 
 pub const CREATE_TENANT_OPERATION: &str = "platform.tenant.create.v1";
@@ -11,6 +12,8 @@ pub struct CreateTenantCommand {
     pub slug: TenantSlug,
     pub name: TenantName,
     pub administrator_email: String,
+    pub data_cell_id: DataCellId,
+    pub residency_requirement: DataResidencyCode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

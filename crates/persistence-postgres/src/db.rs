@@ -1212,7 +1212,20 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'support_access_events',
                     'support_access_events_platform_isolation'
+                ),
+                (
+                    'tenant_cell_placements',
+                    'tenant_cell_placements_platform_isolation'
+                ),
+                (
+                    'tenant_cell_placement_events',
+                    'tenant_cell_placement_events_platform_isolation'
                 )
+        ),
+        expected_global_platform_policy(table_name, policy_name) AS (
+            VALUES
+                ('data_cells','data_cells_platform_isolation'),
+                ('data_cell_events','data_cell_events_platform_isolation')
         ),
         tenant_table_classification AS (
             SELECT
@@ -1444,6 +1457,29 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                               LIKE '%platform_actor_is_administrator%'
                             AND pg_get_expr(policy.polwithcheck,policy.polrelid)
                               LIKE '%platform_actor_is_administrator%'
+                      )
+               ) AND NOT EXISTS (
+                   SELECT 1
+                   FROM expected_global_platform_policy expected
+                   JOIN pg_namespace policy_namespace
+                     ON policy_namespace.nspname='public'
+                   JOIN pg_class protected_table
+                     ON protected_table.relnamespace=policy_namespace.oid
+                    AND protected_table.relname=expected.table_name
+                   WHERE NOT protected_table.relrowsecurity
+                      OR NOT protected_table.relforcerowsecurity
+                      OR (SELECT COUNT(*) FROM pg_policy policy
+                          WHERE policy.polrelid=protected_table.oid)<>1
+                      OR NOT EXISTS(
+                        SELECT 1 FROM pg_policy policy
+                        WHERE policy.polrelid=protected_table.oid
+                          AND policy.polname=expected.policy_name
+                          AND policy.polcmd='*' AND policy.polpermissive
+                          AND policy.polroles=ARRAY[0::OID]
+                          AND pg_get_expr(policy.polqual,policy.polrelid)
+                            LIKE '%platform_actor_is_administrator%'
+                          AND pg_get_expr(policy.polwithcheck,policy.polrelid)
+                            LIKE '%platform_actor_is_administrator%'
                       )
                )) AS tenant_policy_contract_valid,
                EXISTS (

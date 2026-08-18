@@ -1,9 +1,10 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    ChangeTenantStatusRequest, CreateTenantRequest, TenantLifecycleResponse, TenantStatus,
+    ChangeTenantStatusRequest, CreateTenantRequest, DataCellPage, TenantLifecycleResponse,
+    TenantStatus,
 };
 
-use super::{dispatch, Dialog, PendingCommand, Signals};
+use super::{dispatch, load_cells, Dialog, PendingCommand, Signals};
 use crate::api;
 
 #[derive(Clone, Copy)]
@@ -11,6 +12,8 @@ pub(super) struct Drafts {
     slug: RwSignal<String>,
     name: RwSignal<String>,
     administrator_email: RwSignal<String>,
+    data_cell_id: RwSignal<String>,
+    residency_requirement: RwSignal<String>,
     reason: RwSignal<String>,
 }
 
@@ -20,14 +23,30 @@ impl Drafts {
             slug: RwSignal::new(String::new()),
             name: RwSignal::new(String::new()),
             administrator_email: RwSignal::new(String::new()),
+            data_cell_id: RwSignal::new(String::new()),
+            residency_requirement: RwSignal::new(String::new()),
             reason: RwSignal::new(String::new()),
         }
     }
 
-    pub(super) fn reset_create(self) {
+    pub(super) fn reset_create(self, cells: &DataCellPage) {
         self.slug.set(String::new());
         self.name.set(String::new());
         self.administrator_email.set(String::new());
+        let selected = cells
+            .items
+            .iter()
+            .find(|cell| cell.available_tenant_slots > 0);
+        self.data_cell_id.set(
+            selected
+                .map(|cell| cell.data_cell_id.to_string())
+                .unwrap_or_default(),
+        );
+        self.residency_requirement.set(
+            selected
+                .map(|cell| cell.residency.clone())
+                .unwrap_or_default(),
+        );
     }
 
     pub(super) fn reset_reason(self) {
@@ -64,9 +83,20 @@ fn create_form(signals: Signals, drafts: Drafts) -> AnyView {
             .get_untracked()
             .trim()
             .to_ascii_lowercase();
-        if slug.is_empty() || name.is_empty() || administrator_email.is_empty() {
+        let data_cell_id = drafts.data_cell_id.get_untracked().parse::<i64>().ok();
+        let residency_requirement = drafts
+            .residency_requirement
+            .get_untracked()
+            .trim()
+            .to_ascii_uppercase();
+        if slug.is_empty()
+            || name.is_empty()
+            || administrator_email.is_empty()
+            || data_cell_id.is_none()
+            || residency_requirement.is_empty()
+        {
             signals.command_error.set(Some(
-                "Enter the slug, name, and existing administrator email.".into(),
+                "Enter identity, administrator, data cell, and residency.".into(),
             ));
             return;
         }
@@ -77,6 +107,8 @@ fn create_form(signals: Signals, drafts: Drafts) -> AnyView {
                     slug,
                     name,
                     administrator_email,
+                    data_cell_id: data_cell_id.unwrap_or_default(),
+                    residency_requirement,
                 },
                 api::new_idempotency_key(),
             ),
@@ -88,11 +120,30 @@ fn create_form(signals: Signals, drafts: Drafts) -> AnyView {
                 <label><span>"Tenant slug"</span><input required minlength="3" maxlength="63" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]" placeholder="northwest-3pl" prop:value=move || drafts.slug.get() on:input=move |event| drafts.slug.set(event_target_value(&event).to_ascii_lowercase())/><small>"Permanent URL-safe identity; lowercase letters, digits, and hyphens."</small></label>
                 <label><span>"Organization name"</span><input required maxlength="200" prop:value=move || drafts.name.get() on:input=move |event| drafts.name.set(event_target_value(&event))/></label>
                 <label><span>"Initial administrator email"</span><input type="email" required maxlength="254" prop:value=move || drafts.administrator_email.get() on:input=move |event| drafts.administrator_email.set(event_target_value(&event))/><small>"Must belong to an existing interactive Wareboxes user. Tenant admin scope is provisioned atomically."</small></label>
+                <label><span>"Home data cell"</span>{move || cell_selector(signals,drafts)}</label>
+                <label><span>"Residency requirement"</span><input required maxlength="16" pattern="[A-Z0-9][A-Z0-9-]*[A-Z0-9]" prop:value=move || drafts.residency_requirement.get() on:input=move |event| drafts.residency_requirement.set(event_target_value(&event).to_ascii_uppercase())/><small>"GLOBAL permits any jurisdiction; a regional code must exactly match the selected cell."</small></label>
             </div>
-            <section class="tenant-lifecycle-warning"><strong>"Provisioning creates a hard tenant boundary."</strong><span>"The selected administrator receives all facility and client scope plus the tenant admin permission. No password or credential is accepted here."</span></section>
+            <section class="tenant-lifecycle-warning"><strong>"Provisioning creates a placed hard tenant boundary."</strong><span>"The cell capacity and residency constraint are locked with tenant creation. The selected administrator receives tenant authority; no password or infrastructure credential is accepted here."</span></section>
             {feedback(signals)}
             <footer><button class="button secondary-action" type="button" disabled=move || signals.command_pending.get() on:click=move |_| signals.dialog.set(None)>"Cancel"</button><button class="button primary-action" type="submit" disabled=move || signals.command_pending.get()>"Provision tenant"</button></footer>
         </form>
+    }.into_any()
+}
+
+fn cell_selector(signals: Signals, drafts: Drafts) -> AnyView {
+    let page = signals.cells.get();
+    let next_cursor = page.next_cursor.clone();
+    view! {
+        <select required prop:value=move || drafts.data_cell_id.get() on:change=move |event| {
+            let selected=event_target_value(&event);
+            drafts.data_cell_id.set(selected.clone());
+            if let Ok(id)=selected.parse::<i64>() {
+                if let Some(cell)=signals.cells.get_untracked().items.into_iter().find(|cell|cell.data_cell_id==id) {
+                    drafts.residency_requirement.set(cell.residency);
+                }
+            }
+        }>{page.items.into_iter().filter(|cell|cell.available_tenant_slots>0).map(|cell|view!{<option value=cell.data_cell_id.to_string()>{format!("{} · {} · {} · {} open",cell.name,cell.region,cell.residency,cell.available_tenant_slots)}</option>}).collect_view()}</select>
+        {next_cursor.map(|cursor| view! { <button class="text-button" type="button" disabled=move || signals.cells_loading.get() on:click=move |_| load_cells(signals,Some(cursor.clone()),true)>{move || if signals.cells_loading.get() { "Loading cells…" } else { "Load more active cells" }}</button> })}
     }.into_any()
 }
 

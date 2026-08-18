@@ -175,10 +175,19 @@ async fn platform_tenant_lifecycle_is_atomic_scoped_and_revokes_access() {
         .unwrap();
     assert_eq!(self_suspend.status(), StatusCode::BAD_REQUEST);
 
+    let admin_db = admin_db_for(&fixture.db).await;
+    let default_cell_id: i64 =
+        sqlx::query_scalar("SELECT id FROM data_cells WHERE cell_key='local-default'")
+            .fetch_one(&admin_db)
+            .await
+            .unwrap();
+    admin_db.close().await;
     let create = CreateTenantRequest {
         slug: "northwest-3pl".into(),
         name: "Northwest 3PL".into(),
         administrator_email: tenant_admin.email.clone(),
+        data_cell_id: default_cell_id,
+        residency_requirement: "GLOBAL".into(),
     };
     let created: TenantLifecycleResponse = response(
         app.clone()

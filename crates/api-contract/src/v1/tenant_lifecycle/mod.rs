@@ -15,6 +15,8 @@ pub struct CreateTenantRequest {
     pub slug: String,
     pub name: String,
     pub administrator_email: String,
+    pub data_cell_id: i64,
+    pub residency_requirement: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +65,14 @@ pub struct TenantLifecycleResponse {
     pub active_facility_count: i64,
     pub active_inventory_owner_count: i64,
     pub active_service_account_count: i64,
+    pub data_cell_id: i64,
+    pub data_cell_key: String,
+    pub data_cell_name: String,
+    pub data_cell_region: String,
+    pub data_cell_residency: String,
+    pub data_cell_mode: super::DataCellMode,
+    pub placement_revision: Revision,
+    pub residency_requirement: String,
 }
 
 pub type TenantLifecyclePage = CursorPage<TenantLifecycleResponse>;
@@ -107,6 +117,8 @@ mod tests {
             slug: "northwest-3pl".into(),
             name: "Northwest 3PL".into(),
             administrator_email: "tenant-admin@example.test".into(),
+            data_cell_id: 1,
+            residency_requirement: "US".into(),
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(

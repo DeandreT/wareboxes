@@ -299,6 +299,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                     {is_platform_administrator.then(|| view! {
                         <p class="nav-group">"Platform"</p>
                         <NavItem
+                            href="/platform/data-cells"
+                            label="Data cells"
+                            icon=UiIcon::Building
+                            active=section == Section::FleetCells
+                        />
+                        <NavItem
                             href="/platform/tenants"
                             label="Tenant lifecycle"
                             icon=UiIcon::Building

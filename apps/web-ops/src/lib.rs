@@ -12,6 +12,7 @@ mod customer_portal;
 mod customer_returns;
 mod cycle_count;
 pub mod facility_shipping_origin;
+mod fleet_cells;
 mod fulfillment;
 mod fulfillment_load_detail;
 mod fulfillment_loads;

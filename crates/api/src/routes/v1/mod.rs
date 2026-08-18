@@ -9,6 +9,7 @@ pub(crate) mod cross_dock;
 pub(crate) mod customer_portal;
 mod customer_returns;
 pub(crate) mod cycle_count;
+pub(crate) mod data_cells;
 mod dynamic_releases;
 mod error;
 mod expected_receiving;
@@ -118,6 +119,23 @@ pub fn router() -> Router<AppState> {
         .route(
             "/platform/tenants",
             get(tenant_lifecycle::list).post(tenant_lifecycle::create),
+        )
+        .route(
+            "/platform/data-cells",
+            get(data_cells::list).post(data_cells::register),
+        )
+        .route("/platform/data-cells/{data_cell_id}", get(data_cells::get))
+        .route(
+            "/platform/data-cells/{data_cell_id}/events",
+            get(data_cells::events),
+        )
+        .route(
+            "/platform/data-cells/{data_cell_id}/reconfigurations",
+            post(data_cells::reconfigure),
+        )
+        .route(
+            "/platform/data-cells/{data_cell_id}/status-changes",
+            post(data_cells::change_status),
         )
         .route("/platform/tenants/{tenant_id}", get(tenant_lifecycle::get))
         .route(

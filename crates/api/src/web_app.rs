@@ -135,6 +135,9 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/platform/tenants" | "/platform/tenants/" => {
             Some(WorkspaceBootstrapSection::TenantLifecycle)
         }
+        "/platform/data-cells" | "/platform/data-cells/" => {
+            Some(WorkspaceBootstrapSection::FleetCells)
+        }
         "/platform/support-access" | "/platform/support-access/" => {
             Some(WorkspaceBootstrapSection::SupportAccess)
         }
@@ -206,8 +209,10 @@ async fn workspace_bootstrap(
                 cross_dock_work: None,
                 replenishment_policies: None,
                 replenishment_queue: None,
+                automation_workspace: None,
                 tenant_lifecycle_page: None,
                 support_access_page: None,
+                data_cell_page: None,
                 balances,
                 balance_next_cursor,
                 access: access_workspace,
@@ -470,21 +475,56 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
-        WorkspaceBootstrapSection::TenantLifecycle => {
+        WorkspaceBootstrapSection::FleetCells => {
             if !session.is_platform_administrator {
                 return Ok(WorkspaceBootstrapData::default());
             }
-            let page = repo::tenant_lifecycle::page(
+            let page = repo::data_cells::page(
                 &state.db,
                 access,
-                &wareboxes_application::tenant_lifecycle::TenantLifecyclePageQuery {
+                &wareboxes_application::data_cell::DataCellPageQuery {
                     status: None,
-                    search: None,
+                    region: None,
                     cursor: None,
                     limit: wareboxes_api_contract::v1::PageLimit::default().get(),
                 },
             )
             .await?;
+            let items = page
+                .items
+                .into_iter()
+                .map(routes::v1::data_cells::map_response)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| crate::error::AppError::internal("could not map data-cell page"))?;
+            Ok(WorkspaceBootstrapData {
+                data_cell_page: Some(wareboxes_api_contract::v1::DataCellPage::new(
+                    items,
+                    page.next_cursor
+                        .map(routes::v1::data_cells::encode_cursor_for_web)
+                        .transpose()?,
+                )),
+                ..WorkspaceBootstrapData::default()
+            })
+        }
+        WorkspaceBootstrapSection::TenantLifecycle => {
+            if !session.is_platform_administrator {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let tenant_query = wareboxes_application::tenant_lifecycle::TenantLifecyclePageQuery {
+                status: None,
+                search: None,
+                cursor: None,
+                limit: wareboxes_api_contract::v1::PageLimit::default().get(),
+            };
+            let cell_query = wareboxes_application::data_cell::DataCellPageQuery {
+                status: Some(wareboxes_domain::DataCellStatus::Active),
+                region: None,
+                cursor: None,
+                limit: 100,
+            };
+            let tenant_page = repo::tenant_lifecycle::page(&state.db, access, &tenant_query);
+            let cell_page = repo::data_cells::page(&state.db, access, &cell_query);
+            let (page, cell_page) = tokio::try_join!(tenant_page, cell_page)?;
             let items = page
                 .items
                 .into_iter()
@@ -495,6 +535,20 @@ async fn workspace_bootstrap(
                     items,
                     page.next_cursor
                         .map(routes::v1::tenant_lifecycle::encode_cursor_for_web)
+                        .transpose()?,
+                )),
+                data_cell_page: Some(wareboxes_api_contract::v1::DataCellPage::new(
+                    cell_page
+                        .items
+                        .into_iter()
+                        .map(routes::v1::data_cells::map_response)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| {
+                            crate::error::AppError::internal("could not map data-cell page")
+                        })?,
+                    cell_page
+                        .next_cursor
+                        .map(routes::v1::data_cells::encode_active_cursor_for_web)
                         .transpose()?,
                 )),
                 ..WorkspaceBootstrapData::default()
@@ -618,6 +672,10 @@ mod tests {
         assert_eq!(
             section_for_path("/administration/service-accounts"),
             Some(WorkspaceBootstrapSection::ServiceAccounts)
+        );
+        assert_eq!(
+            section_for_path("/platform/data-cells"),
+            Some(WorkspaceBootstrapSection::FleetCells)
         );
         assert_eq!(
             section_for_path("/platform/tenants"),

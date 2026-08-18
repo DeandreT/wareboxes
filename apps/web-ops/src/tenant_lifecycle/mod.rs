@@ -3,7 +3,8 @@ mod forms;
 
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    ChangeTenantStatusRequest, CreateTenantRequest, OpaqueCursor, TenantLifecycleEventPage,
+    ChangeTenantStatusRequest, CreateTenantRequest, DataCellPage, DataCellPageRequest,
+    DataCellStatus, OpaqueCursor, PageLimit, TenantLifecycleEventPage,
     TenantLifecycleEventPageRequest, TenantLifecyclePage, TenantLifecyclePageRequest,
     TenantLifecycleResponse, TenantStatus,
 };
@@ -28,15 +29,18 @@ pub(super) enum PendingCommand {
 pub(super) struct Signals {
     current_tenant_id: i64,
     tenants: RwSignal<TenantLifecyclePage>,
+    cells: RwSignal<DataCellPage>,
     events: RwSignal<TenantLifecycleEventPage>,
     selected: RwSignal<Option<TenantLifecycleResponse>>,
     status: RwSignal<Option<TenantStatus>>,
     search: RwSignal<String>,
     loading: RwSignal<bool>,
     loaded: RwSignal<bool>,
+    cells_loading: RwSignal<bool>,
     detail_loading: RwSignal<bool>,
     events_loading: RwSignal<bool>,
     list_generation: RwSignal<u64>,
+    cells_generation: RwSignal<u64>,
     detail_generation: RwSignal<u64>,
     event_generation: RwSignal<u64>,
     error: RwSignal<Option<String>>,
@@ -51,24 +55,29 @@ pub(super) struct Signals {
 #[component]
 pub(crate) fn TenantLifecycleWorkspace(
     initial_page: Option<TenantLifecyclePage>,
+    initial_cells: Option<DataCellPage>,
     current_tenant_id: i64,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let has_initial = initial_page.is_some();
+    let has_initial_cells = initial_cells.is_some();
     let signals = Signals {
         current_tenant_id,
         tenants: RwSignal::new(
             initial_page.unwrap_or_else(|| TenantLifecyclePage::new(Vec::new(), None)),
         ),
+        cells: RwSignal::new(initial_cells.unwrap_or_else(|| DataCellPage::new(Vec::new(), None))),
         events: RwSignal::new(TenantLifecycleEventPage::new(Vec::new(), None)),
         selected: RwSignal::new(None),
         status: RwSignal::new(None),
         search: RwSignal::new(String::new()),
         loading: RwSignal::new(!has_initial),
         loaded: RwSignal::new(has_initial),
+        cells_loading: RwSignal::new(!has_initial_cells),
         detail_loading: RwSignal::new(false),
         events_loading: RwSignal::new(false),
         list_generation: RwSignal::new(0),
+        cells_generation: RwSignal::new(0),
         detail_generation: RwSignal::new(0),
         event_generation: RwSignal::new(0),
         error: RwSignal::new(None),
@@ -84,10 +93,13 @@ pub(crate) fn TenantLifecycleWorkspace(
         if !has_initial {
             refresh(signals);
         }
+        if !has_initial_cells {
+            load_cells(signals, None, false);
+        }
     });
 
     let create = move |_| {
-        drafts.reset_create();
+        drafts.reset_create(&signals.cells.get_untracked());
         signals.command_error.set(None);
         signals.retry.set(None);
         signals.dialog.set(Some(Dialog::Create));
@@ -105,7 +117,7 @@ pub(crate) fn TenantLifecycleWorkspace(
 
     view! {
         <section class="tenant-lifecycle-workspace">
-            <header class="page-heading tenant-lifecycle-heading"><div><p class="eyebrow">"Platform operations"</p><h1>"Tenant lifecycle"</h1><p>"Provision, suspend, and reactivate hard SaaS tenant boundaries with attributed access revocation and immutable evidence."</p></div><div><button class="button primary-action" type="button" on:click=create>"Provision tenant"</button><button class="button secondary-action" type="button" disabled=move || signals.loading.get() on:click=move |_| refresh(signals)><Icon icon=UiIcon::Refresh/><span>"Refresh"</span></button></div></header>
+            <header class="page-heading tenant-lifecycle-heading"><div><p class="eyebrow">"Platform operations"</p><h1>"Tenant lifecycle"</h1><p>"Provision, place, suspend, and reactivate hard SaaS tenant boundaries with attributed access revocation and immutable evidence."</p></div><div><button class="button primary-action" type="button" disabled=move || !signals.cells.get().items.iter().any(|cell|cell.available_tenant_slots>0) on:click=create>"Provision tenant"</button><button class="button secondary-action" type="button" disabled=move || signals.loading.get() on:click=move |_| refresh(signals)><Icon icon=UiIcon::Refresh/><span>"Refresh"</span></button></div></header>
 
             <form class="tenant-lifecycle-toolbar" on:submit=apply><label><span>"Search"</span><input type="search" maxlength="120" placeholder="Name or slug" prop:value=move || signals.search.get() on:input=move |event| signals.search.set(event_target_value(&event))/></label><label><span>"Status"</span><select prop:value=move || status_wire(signals.status.get()) on:change=move |event| signals.status.set(parse_status(&event_target_value(&event)))><option value="">"All tenants"</option><option value="active">"Active"</option><option value="suspended">"Suspended"</option></select></label><button class="button secondary-action compact" type="submit">"Apply"</button></form>
 
@@ -154,7 +166,7 @@ fn detail_panel(signals: Signals, drafts: forms::Drafts) -> AnyView {
     view! {
         <section class="tenant-lifecycle-panel tenant-detail">
             <header><div><p class="eyebrow">{tenant.slug.clone()}</p><h2>{tenant.name.clone()}</h2><span class=display::status_class(tenant.status)>{display::status_label(tenant.status)}</span></div><button class=if tenant.status==TenantStatus::Active { "button danger-action compact" } else { "button primary-action compact" } type="button" disabled=current_tenant && tenant.status==TenantStatus::Active title=if current_tenant && tenant.status==TenantStatus::Active { "Switch to another active tenant before suspending this tenant" } else { "Change tenant status" } on:click=move |_| { drafts.reset_reason(); signals.command_error.set(None); signals.retry.set(None); signals.dialog.set(Some(Dialog::Status(Box::new(tenant_for_status.clone())))); }>{if tenant.status==TenantStatus::Active { "Suspend" } else { "Reactivate" }}</button></header>
-            <dl class="tenant-lifecycle-facts"><div><dt>"Tenant ID"</dt><dd>{tenant.tenant_id}</dd></div><div><dt>"Revision"</dt><dd>{tenant.revision.get()}</dd></div><div><dt>"Created"</dt><dd>{display::short_timestamp(&tenant.created_at)}</dd></div><div><dt>"Initial administrator"</dt><dd>{tenant.initial_admin_email.clone().unwrap_or_else(|| "Legacy provisioning".into())}</dd></div><div><dt>"Members"</dt><dd>{tenant.active_member_count}</dd></div><div><dt>"Facilities / clients"</dt><dd>{format!("{} / {}",tenant.active_facility_count,tenant.active_inventory_owner_count)}</dd></div><div><dt>"Active integrations"</dt><dd>{tenant.active_service_account_count}</dd></div><div><dt>"Last status reason"</dt><dd>{tenant.status_reason.clone().unwrap_or_else(|| "Initial active state".into())}</dd></div></dl>
+            <dl class="tenant-lifecycle-facts"><div><dt>"Tenant ID"</dt><dd>{tenant.tenant_id}</dd></div><div><dt>"Revision"</dt><dd>{tenant.revision.get()}</dd></div><div><dt>"Created"</dt><dd>{display::short_timestamp(&tenant.created_at)}</dd></div><div><dt>"Initial administrator"</dt><dd>{tenant.initial_admin_email.clone().unwrap_or_else(|| "Legacy provisioning".into())}</dd></div><div><dt>"Home data cell"</dt><dd>{format!("{} · {}",tenant.data_cell_key,tenant.data_cell_region)}</dd></div><div><dt>"Residency"</dt><dd>{format!("{} requires {}",tenant.data_cell_residency,tenant.residency_requirement)}</dd></div><div><dt>"Members"</dt><dd>{tenant.active_member_count}</dd></div><div><dt>"Facilities / clients"</dt><dd>{format!("{} / {}",tenant.active_facility_count,tenant.active_inventory_owner_count)}</dd></div><div><dt>"Active integrations"</dt><dd>{tenant.active_service_account_count}</dd></div><div><dt>"Last status reason"</dt><dd>{tenant.status_reason.clone().unwrap_or_else(|| "Initial active state".into())}</dd></div></dl>
             <section class="tenant-lifecycle-evidence"><header><div><h3>"Lifecycle evidence"</h3><span>{format!("{event_count} events loaded")}</span></div>{next_events.map(|cursor| { let id=tenant.tenant_id; view! { <button class="text-button" type="button" disabled=move || signals.events_loading.get() on:click=move |_| load_events(signals,id,Some(cursor.clone()),true)>"Load more"</button> } })}</header>
                 {if signals.events_loading.get() && events.items.is_empty() { state("Loading events",true) } else if events.items.is_empty() { state("No lifecycle events recorded.",false) } else { view! { <ol>{events.items.into_iter().map(|event| view! { <li><div><strong>{display::action_label(&event.action)}</strong><span>{display::short_timestamp(&event.occurred_at)}</span></div><p>{event.reason.clone().unwrap_or_else(|| "Tenant provisioned".into())}</p><dl><div><dt>"Revision"</dt><dd>{event.tenant_revision.get()}</dd></div><div><dt>"Actor"</dt><dd>{format!("User #{}",event.actor_id)}</dd></div><div><dt>"Sessions revoked"</dt><dd>{event.revoked_session_count}</dd></div><div><dt>"Credentials revoked"</dt><dd>{event.revoked_credential_count}</dd></div></dl><details><summary>"Evidence payload"</summary><pre>{serde_json::to_string_pretty(&event.evidence).unwrap_or_else(|_| "{}".into())}</pre></details></li> }).collect_view()}</ol> }.into_any() }}
             </section>
@@ -207,6 +219,39 @@ fn load_page(signals: Signals, cursor: Option<OpaqueCursor>, append: bool) {
         if signals.list_generation.get_untracked() == generation {
             signals.loading.set(false);
             signals.loaded.set(true);
+        }
+    });
+}
+
+pub(super) fn load_cells(signals: Signals, cursor: Option<OpaqueCursor>, append: bool) {
+    signals.cells_generation.update(|value| *value += 1);
+    let generation = signals.cells_generation.get_untracked();
+    signals.cells_loading.set(true);
+    let request = DataCellPageRequest {
+        status: Some(DataCellStatus::Active),
+        region: None,
+        cursor,
+        limit: PageLimit::new(100).unwrap_or_default(),
+    };
+    leptos::task::spawn_local(async move {
+        match api::data_cells(&request).await {
+            Ok(page) if signals.cells_generation.get_untracked() == generation => {
+                if append {
+                    signals.cells.update(|current| {
+                        current.items.extend(page.items);
+                        current.next_cursor = page.next_cursor;
+                    });
+                } else {
+                    signals.cells.set(page);
+                }
+            }
+            Err(error) if signals.cells_generation.get_untracked() == generation => {
+                handle_read_error(signals, error)
+            }
+            _ => {}
+        }
+        if signals.cells_generation.get_untracked() == generation {
+            signals.cells_loading.set(false);
         }
     });
 }
@@ -383,6 +428,14 @@ mod tests {
             active_facility_count: 0,
             active_inventory_owner_count: 0,
             active_service_account_count: 0,
+            data_cell_id: 1,
+            data_cell_key: "local-default".into(),
+            data_cell_name: "Local default cell".into(),
+            data_cell_region: "local".into(),
+            data_cell_residency: "GLOBAL".into(),
+            data_cell_mode: wareboxes_api_contract::v1::DataCellMode::Shared,
+            placement_revision: wareboxes_api_contract::v1::Revision::new(1).unwrap(),
+            residency_requirement: "GLOBAL".into(),
         };
         assert!(!matches_filters(Some(TenantStatus::Active), "", &tenant));
         assert!(matches_filters(

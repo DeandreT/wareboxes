@@ -107,6 +107,24 @@ pub async fn create(
     if slug_exists {
         return Err(AppError::conflict("tenant slug already exists"));
     }
+    crate::repo::data_cells::require_available_tx(
+        &mut tx,
+        command.data_cell_id,
+        &command.residency_requirement,
+    )
+    .await?;
+    sqlx::query("SELECT set_config('wareboxes.initial_data_cell_id',$1,TRUE)")
+        .bind(command.data_cell_id.get().to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT set_config('wareboxes.initial_residency_requirement',$1,TRUE)")
+        .bind(command.residency_requirement.as_str())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT set_config('wareboxes.request_id',$1,TRUE)")
+        .bind(&context.request_id)
+        .execute(&mut *tx)
+        .await?;
     let administrator = sqlx::query(
         r#"SELECT subject.id,subject.email FROM users subject
         JOIN user_credentials credential ON credential.user_id=subject.id
@@ -153,6 +171,8 @@ pub async fn create(
         "revision": 1,
         "initial_administrator_user_id": administrator_id,
         "initial_administrator_email": administrator_email,
+        "data_cell_id": command.data_cell_id.get(),
+        "residency_requirement": command.residency_requirement.as_str(),
         "actor_user_id": context.actor_id.get(),
         "occurred_at": occurred_at,
     });

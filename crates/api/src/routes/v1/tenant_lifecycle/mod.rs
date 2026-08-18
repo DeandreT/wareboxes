@@ -13,8 +13,8 @@ use wareboxes_application::tenant_lifecycle::{
     TenantLifecyclePageQuery, TenantLifecycleReadModel,
 };
 use wareboxes_domain::{
-    TenantId, TenantLifecycleReason, TenantName, TenantRevision, TenantSlug,
-    TenantStatus as DomainStatus,
+    DataCellId, DataCellMode as DomainCellMode, DataResidencyCode, TenantId, TenantLifecycleReason,
+    TenantName, TenantRevision, TenantSlug, TenantStatus as DomainStatus,
 };
 
 use super::error::{V1Error, V1Result};
@@ -122,6 +122,9 @@ pub async fn create(
         slug: TenantSlug::new(body.slug).map_err(validation)?,
         name: TenantName::new(body.name).map_err(validation)?,
         administrator_email,
+        data_cell_id: DataCellId::new(body.data_cell_id).map_err(validation)?,
+        residency_requirement: DataResidencyCode::new(body.residency_requirement)
+            .map_err(validation)?,
     };
     let context = user.command_context(&idempotency_key);
     let result =
@@ -196,6 +199,20 @@ fn map_response(value: TenantLifecycleReadModel) -> V1Result<TenantLifecycleResp
         active_facility_count: value.active_facility_count,
         active_inventory_owner_count: value.active_inventory_owner_count,
         active_service_account_count: value.active_service_account_count,
+        data_cell_id: value.data_cell_id.get(),
+        data_cell_key: value.data_cell_key,
+        data_cell_name: value.data_cell_name,
+        data_cell_region: value.data_cell_region,
+        data_cell_residency: value.data_cell_residency,
+        data_cell_mode: match value.data_cell_mode {
+            DomainCellMode::Shared => wareboxes_api_contract::v1::DataCellMode::Shared,
+            DomainCellMode::Dedicated => wareboxes_api_contract::v1::DataCellMode::Dedicated,
+        },
+        placement_revision: wareboxes_api_contract::v1::Revision::new(
+            value.placement_revision.get(),
+        )
+        .map_err(invalid_result)?,
+        residency_requirement: value.residency_requirement,
     })
 }
 
