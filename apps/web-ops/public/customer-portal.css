@@ -1,14 +1,16 @@
 .customer-portal {
-  --portal-accent: #187052;
-  --portal-accent-soft: #e8f4ef;
-  --portal-canvas: #f3f6f4;
-  --portal-panel-line: #dce3df;
+  --portal-accent: var(--green);
+  --portal-accent-soft: var(--green-soft);
+  --portal-canvas: var(--surface-subtle);
+  --portal-panel-line: var(--line);
+  --portal-card-shadow: 0 2px 7px
+    color-mix(in srgb, var(--sidebar) 12%, transparent);
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
   background: var(--portal-canvas);
-  color: var(--ink-strong, #17201d);
+  color: var(--ink);
 }
 
 .portal-toolbar {
@@ -19,9 +21,10 @@
   gap: 12px;
   align-items: end;
   padding: 11px 16px;
-  border-bottom: 1px solid var(--line, #d9dfdc);
-  background: rgb(255 255 255 / 96%);
-  box-shadow: 0 1px 0 rgb(23 32 29 / 3%);
+  border-bottom: 1px solid var(--line);
+  background: var(--topbar-background);
+  box-shadow: 0 1px 0
+    color-mix(in srgb, var(--sidebar) 10%, transparent);
 }
 
 .portal-heading {
@@ -38,7 +41,8 @@
   height: 38px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid #cce3d9;
+  border: 1px solid
+    color-mix(in srgb, var(--portal-accent) 25%, var(--portal-panel-line));
   border-radius: 10px;
   background: var(--portal-accent-soft);
   color: var(--portal-accent);
@@ -59,7 +63,7 @@
 .portal-heading > div > span,
 .portal-field > span {
   display: block;
-  color: #69766f;
+  color: var(--ink-soft);
   font-size: 11px;
 }
 
@@ -101,10 +105,10 @@
 .portal-toolbar input[type="search"] {
   height: 34px;
   min-width: 142px;
-  border: 1px solid #c9d3ce;
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
-  background: #fff;
-  color: #26312d;
+  background: var(--surface);
+  color: var(--control-ink);
   padding: 0 10px;
   transition:
     border-color 120ms ease,
@@ -113,13 +117,14 @@
 
 .portal-toolbar select:hover,
 .portal-toolbar input[type="search"]:hover {
-  border-color: #9eaca5;
+  border-color: var(--ink-soft);
 }
 
 .portal-toolbar select:focus,
 .portal-toolbar input[type="search"]:focus {
   border-color: var(--portal-accent);
-  box-shadow: 0 0 0 3px rgb(24 112 82 / 12%);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--portal-accent) 18%, transparent);
 }
 
 .portal-search {
@@ -137,7 +142,7 @@
   gap: 7px;
   padding: 0 8px;
   border-radius: 6px;
-  color: #55625c;
+  color: var(--ink-soft);
   cursor: pointer;
   font-size: 11px;
   font-weight: 620;
@@ -145,7 +150,7 @@
 }
 
 .portal-history:hover {
-  background: #f2f5f3;
+  background: var(--surface-raised);
 }
 
 .portal-history input {
@@ -180,7 +185,11 @@
   overflow: auto;
   padding: 14px;
   background:
-    radial-gradient(circle at 100% 0, rgb(24 112 82 / 4%), transparent 28rem),
+    radial-gradient(
+      circle at 100% 0,
+      color-mix(in srgb, var(--portal-accent) 7%, transparent),
+      transparent 28rem
+    ),
     var(--portal-canvas);
 }
 
@@ -198,32 +207,32 @@
   padding: 13px 15px 12px;
   border: 1px solid var(--portal-panel-line);
   border-radius: 9px;
-  background: #fff;
-  box-shadow: 0 2px 7px rgb(23 32 29 / 4%);
+  background: var(--surface);
+  box-shadow: var(--portal-card-shadow);
 }
 
 .portal-metrics article::before {
   position: absolute;
   inset: 0 auto 0 0;
   width: 3px;
-  background: #43866e;
+  background: var(--green);
   content: "";
 }
 
 .portal-metrics article:nth-child(2)::before {
-  background: #2d795e;
+  background: var(--success-ink);
 }
 
 .portal-metrics article:nth-child(3)::before {
-  background: #4f72a2;
+  background: var(--blue);
 }
 
 .portal-metrics article:nth-child(4)::before {
-  background: #8b6c2c;
+  background: var(--amber);
 }
 
 .portal-metrics span {
-  color: #65736d;
+  color: var(--label-ink);
   font-size: 10px;
   font-weight: 720;
   letter-spacing: 0.07em;
@@ -242,7 +251,7 @@
 .portal-metrics small {
   display: block;
   margin-top: 4px;
-  color: #77837d;
+  color: var(--ink-soft);
   font-size: 11px;
 }
 
@@ -265,8 +274,8 @@
   overflow: hidden;
   border: 1px solid var(--portal-panel-line);
   border-radius: 9px;
-  background: #fff;
-  box-shadow: 0 2px 7px rgb(23 32 29 / 4%);
+  background: var(--surface);
+  box-shadow: var(--portal-card-shadow);
 }
 
 .portal-panel > header {
@@ -275,8 +284,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 0 13px;
-  border-bottom: 1px solid #e4e9e6;
-  background: linear-gradient(180deg, #fff, #fdfefd);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--surface), var(--surface-raised));
 }
 
 .portal-panel h2 {
@@ -288,7 +297,7 @@
 .portal-panel header span {
   display: block;
   margin-top: 2px;
-  color: #738079;
+  color: var(--ink-soft);
   font-size: 11px;
 }
 
@@ -308,9 +317,9 @@
   z-index: 1;
   top: 0;
   padding: 8px 10px;
-  border-bottom: 1px solid #dce3df;
-  background: #f3f6f4;
-  color: #596660;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+  color: var(--label-ink);
   font-size: 9px;
   font-weight: 760;
   letter-spacing: 0.06em;
@@ -321,8 +330,8 @@
 
 .portal-panel td {
   padding: 8px 10px;
-  border-bottom: 1px solid #edf1ef;
-  color: #36413c;
+  border-bottom: 1px solid var(--row-border);
+  color: var(--table-ink);
   vertical-align: top;
 }
 
@@ -331,7 +340,7 @@
 }
 
 .portal-panel tbody tr:hover td {
-  background: #f8faf9;
+  background: var(--row-hover);
 }
 
 .portal-panel td strong,
@@ -340,13 +349,13 @@
 }
 
 .portal-panel td strong {
-  color: #202a26;
+  color: var(--ink);
   font-weight: 720;
 }
 
 .portal-panel td small {
   margin-top: 2px;
-  color: #7a8781;
+  color: var(--ink-soft);
   font-size: 10px;
 }
 
@@ -371,7 +380,7 @@
   gap: 10px;
   align-items: center;
   padding: 9px 3px;
-  border-bottom: 1px solid #edf1ef;
+  border-bottom: 1px solid var(--row-border);
 }
 
 .portal-documents article:last-child {
@@ -392,14 +401,14 @@
 }
 
 .portal-documents strong {
-  color: #26312c;
+  color: var(--ink);
   font-size: 12px;
 }
 
 .portal-documents span,
 .portal-documents small {
   margin-top: 2px;
-  color: #77837d;
+  color: var(--ink-soft);
   font-size: 10px;
 }
 
@@ -408,16 +417,17 @@
   width: 32px;
   height: 32px;
   place-items: center;
-  border: 1px solid #d7e8e0;
+  border: 1px solid
+    color-mix(in srgb, var(--portal-accent) 25%, var(--portal-panel-line));
   border-radius: 7px;
-  background: #edf5f1;
-  color: #27664f;
+  background: var(--portal-accent-soft);
+  color: var(--portal-accent);
 }
 
 .portal-empty {
   margin: 0;
   padding: 28px 22px;
-  color: #738079;
+  color: var(--ink-soft);
   text-align: center;
 }
 
@@ -427,7 +437,7 @@
 }
 
 .portal-state.error {
-  color: #8b2b2b;
+  color: var(--danger-ink);
 }
 
 @keyframes portal-spin {
