@@ -25,8 +25,8 @@ use closure::LoadClosureConfirmation;
 use receiving::ReceivingExecutionPanel;
 use rejection::InboundRejectionConfirmation;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LoadDetailTab {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LoadDetailTab {
     Header,
     Receiving,
     Freight,
@@ -58,6 +58,7 @@ struct DetailDeleteContext {
 #[component]
 pub fn LoadDetailPanel(
     load: Load,
+    tab: RwSignal<LoadDetailTab>,
     catalog_items: Vec<Item>,
     locations: Vec<Location>,
     pending: RwSignal<bool>,
@@ -65,7 +66,6 @@ pub fn LoadDetailPanel(
     on_refreshed: Callback<i64>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
-    let tab = RwSignal::new(LoadDetailTab::Header);
     let command_pending = RwSignal::new(false);
     let command_error = RwSignal::new(None::<String>);
     let arrival_open = RwSignal::new(false);
@@ -1609,6 +1609,16 @@ fn receiving_tab_visible(load_type: LoadType, status: LoadStatus) -> bool {
         )
 }
 
+impl LoadDetailTab {
+    pub(super) fn normalized_for(self, load_type: LoadType, status: LoadStatus) -> Self {
+        if self == Self::Receiving && !receiving_tab_visible(load_type, status) {
+            Self::Header
+        } else {
+            self
+        }
+    }
+}
+
 fn transition_title(target: LoadStatus) -> &'static str {
     match target {
         LoadStatus::Scheduled => "Schedule this load?",
@@ -1828,6 +1838,34 @@ mod tests {
             LoadType::Outbound,
             LoadStatus::Arrived
         ));
+    }
+
+    #[test]
+    fn refreshed_tabs_fall_back_only_when_the_section_becomes_unavailable() {
+        for tab in [
+            LoadDetailTab::Header,
+            LoadDetailTab::Freight,
+            LoadDetailTab::Notes,
+            LoadDetailTab::Activity,
+            LoadDetailTab::Documents,
+        ] {
+            assert_eq!(
+                tab.normalized_for(LoadType::Inbound, LoadStatus::Closed),
+                tab
+            );
+        }
+        assert_eq!(
+            LoadDetailTab::Receiving.normalized_for(LoadType::Inbound, LoadStatus::Received),
+            LoadDetailTab::Receiving
+        );
+        assert_eq!(
+            LoadDetailTab::Receiving.normalized_for(LoadType::Inbound, LoadStatus::Closed),
+            LoadDetailTab::Header
+        );
+        assert_eq!(
+            LoadDetailTab::Receiving.normalized_for(LoadType::Outbound, LoadStatus::Arrived),
+            LoadDetailTab::Header
+        );
     }
 
     #[test]

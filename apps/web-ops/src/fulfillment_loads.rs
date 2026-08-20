@@ -7,7 +7,7 @@ use wareboxes_core::models::{Item, Load, LoadStatus, Location};
 
 use crate::api;
 use crate::components::{Icon, SearchField, UiIcon};
-use crate::fulfillment_load_detail::LoadDetailPanel;
+use crate::fulfillment_load_detail::{LoadDetailPanel, LoadDetailTab};
 use crate::fulfillment_shared::{optional_text, parse_optional_timestamp, short_timestamp};
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::use_toast_bus;
@@ -48,6 +48,7 @@ pub fn LoadsWorkbench(
     let initial_count = initial_loads.len();
     let loads = RwSignal::new(initial_loads);
     let selected = RwSignal::new(None::<Load>);
+    let detail_tab = RwSignal::new(LoadDetailTab::Header);
     let selected_request_id = RwSignal::new(None::<i64>);
     let selected_pending = RwSignal::new(false);
     let selected_error = RwSignal::new(None::<String>);
@@ -124,10 +125,16 @@ pub fn LoadsWorkbench(
     let open_load = move |load_id: i64| {
         create_open.set(false);
         layout.show_detail();
+        detail_tab.set(tab_for_selected_load(
+            selected.get_untracked().as_ref().map(|load| load.id),
+            load_id,
+            detail_tab.get_untracked(),
+        ));
         selected_request_id.set(Some(load_id));
         request_load_detail(
             load_id,
             selected,
+            detail_tab,
             selected_request_id,
             selected_pending,
             selected_error,
@@ -140,6 +147,7 @@ pub fn LoadsWorkbench(
         request_load_detail(
             load_id,
             selected,
+            detail_tab,
             selected_request_id,
             selected_pending,
             selected_error,
@@ -150,6 +158,7 @@ pub fn LoadsWorkbench(
 
     let created = Callback::new(move |load_id: i64| {
         create_open.set(false);
+        detail_tab.set(LoadDetailTab::Header);
         refresh_selected.run(load_id);
     });
 
@@ -250,6 +259,7 @@ pub fn LoadsWorkbench(
                             on:click=move |_| {
                                 selected.set(None);
                                 selected_request_id.set(None);
+                                detail_tab.set(LoadDetailTab::Header);
                                 create_open.set(true);
                                 layout.show_detail();
                             }
@@ -404,6 +414,7 @@ pub fn LoadsWorkbench(
                                         view! {
                                             <LoadDetailPanel
                                                 load
+                                                tab=detail_tab
                                                 catalog_items=detail_items.get_value()
                                                 locations=detail_locations.get_value()
                                                 pending=selected_pending
@@ -890,6 +901,7 @@ async fn fetch_loads(path: &str) -> Result<Vec<Load>, api::ApiError> {
 fn request_load_detail(
     load_id: i64,
     selected: RwSignal<Option<Load>>,
+    detail_tab: RwSignal<LoadDetailTab>,
     selected_request_id: RwSignal<Option<i64>>,
     pending: RwSignal<bool>,
     error: RwSignal<Option<String>>,
@@ -900,10 +912,16 @@ fn request_load_detail(
     leptos::task::spawn_local(async move {
         match api::internal_get::<Option<Load>>(&format!("/api/loads/{load_id}")).await {
             Ok(Some(load)) if selected_request_id.get_untracked() == Some(load_id) => {
+                detail_tab.set(
+                    detail_tab
+                        .get_untracked()
+                        .normalized_for(load.r#type, load.status),
+                );
                 selected.set(Some(load));
                 pending.set(false);
             }
             Ok(None) if selected_request_id.get_untracked() == Some(load_id) => {
+                detail_tab.set(LoadDetailTab::Header);
                 selected.set(None);
                 error.set(Some(
                     "Load not found or outside your warehouse scope.".to_owned(),
@@ -918,6 +936,18 @@ fn request_load_detail(
             Ok(Some(_)) | Ok(None) | Err(_) => {}
         }
     });
+}
+
+fn tab_for_selected_load(
+    rendered_load_id: Option<i64>,
+    next_load_id: i64,
+    current_tab: LoadDetailTab,
+) -> LoadDetailTab {
+    if rendered_load_id == Some(next_load_id) {
+        current_tab
+    } else {
+        LoadDetailTab::Header
+    }
 }
 
 fn title_case(value: &str) -> String {
@@ -935,6 +965,32 @@ mod tests {
     fn title_case_keeps_wire_values_readable() {
         assert_eq!(title_case("inbound"), "Inbound");
         assert_eq!(title_case("receiving"), "Receiving");
+    }
+
+    #[test]
+    fn same_load_refresh_preserves_detail_tabs_and_new_selection_resets() {
+        for tab in [
+            LoadDetailTab::Freight,
+            LoadDetailTab::Notes,
+            LoadDetailTab::Documents,
+        ] {
+            assert_eq!(tab_for_selected_load(Some(42), 42, tab), tab);
+            assert_eq!(
+                tab_for_selected_load(Some(42), 43, tab),
+                LoadDetailTab::Header
+            );
+        }
+    }
+
+    #[test]
+    fn failed_navigation_retry_resets_from_the_still_rendered_load() {
+        let rendered_load_id = Some(42);
+        let retried_load_id = 43;
+
+        assert_eq!(
+            tab_for_selected_load(rendered_load_id, retried_load_id, LoadDetailTab::Notes),
+            LoadDetailTab::Header
+        );
     }
 
     #[test]
