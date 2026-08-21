@@ -85,7 +85,8 @@ pub(super) fn policy_panel(
                 view! {
                     <div class="table-scroll">
                         <table class="dense-table orchestration-policy-table">
-                            <thead><tr><th>"Scope"</th><th>"Mode"</th><th>"Positive weights"</th><th>"Penalty weights"</th><th>"Limits"</th><th>"Version evidence"</th><th></th></tr></thead>
+                            <caption class="sr-only">"Versioned work orchestration policies in the active scope"</caption>
+                            <thead><tr><th>"Scope"</th><th>"Mode"</th><th>"Positive weights"</th><th>"Penalty weights"</th><th>"Limits"</th><th>"Version evidence"</th><th class="action-column"><span class="sr-only">"Actions"</span></th></tr></thead>
                             <tbody>{page.items.into_iter().map(|policy| {
                                 let resolved_for_filter = generation_policy_is_resolved(
                                     &resolution,
@@ -162,7 +163,7 @@ fn policy_row(
             <td class="numeric"><strong>{format!("C{} · B{}", policy.congestion_penalty_weight, policy.bottleneck_penalty_weight)}</strong><small>"Congestion · bottleneck"</small></td>
             <td><strong>{format!("{} candidates", policy.max_candidates)}</strong><small>{format!("{} min due horizon", policy.due_horizon_minutes)}</small></td>
             <td><strong>{format!("#{} · rev {}", policy.policy_id, policy.revision.get())}</strong><small>{format!("Actor #{} · {}", policy.configured_by, short_timestamp(&policy.configured_at))}</small>{policy.supersedes_policy_id.map(|id| view!{<small>{format!("Supersedes #{id}")}</small>})}</td>
-            <td>{(can_supervise && active).then(|| view! {
+            <td class="action-column">{(can_supervise && active).then(|| view! {
                 <div class="orchestration-row-actions">
                     <button class="button secondary-action compact" type="button" on:click=configure>"Supersede"</button>
                     {(enabled).then(|| view!{<button class="button secondary-action compact fallback" type="button" on:click=disable>"Use manual FIFO"</button>})}
@@ -262,7 +263,7 @@ pub(super) fn plan_panel(signals: Signals, access: StoredValue<AccessScopeWorksp
                 empty_inner("No advisory plans", "Generate a plan from an active policy to freeze current task, congestion, and capacity evidence.")
             } else {
                 view! {
-                    <div class="table-scroll"><table class="dense-table"><thead><tr><th>"Plan"</th><th>"Scope / position"</th><th>"Mode"</th><th>"Candidate evidence"</th><th>"Policy"</th><th>"Generated"</th><th></th></tr></thead><tbody>{page.items.into_iter().map(|plan| { let plan_id=plan.plan_id; let scope=access.with_value(|value| plan_scope(value, plan.facility_id, plan.requested_inventory_owner_id)); view!{<tr class:selected=signals.selected_plan.get().as_ref().is_some_and(|selected|selected.plan_id==plan.plan_id)><td><strong>{format!("#{}",plan.plan_id)}</strong>{plan.generated_for_user_id.map(|id|view!{<small>{format!("Worker #{id}")}</small>})}</td><td><strong>{scope}</strong><small>{plan.current_location_label}</small></td><td><span class=plan_mode_class(plan.plan_mode)>{plan_mode_label(plan.plan_mode)}</span>{(plan.plan_mode==OrchestrationPlanMode::ManualFifo).then(||view!{<small>"Safe fallback"</small>})}</td><td><strong>{format!("{} ranked / {} eligible",plan.item_count,plan.candidate_count)}</strong><small>{short_timestamp(&plan.input_snapshot_at)}</small></td><td><strong>{format!("#{} · rev {}",plan.policy_id,plan.policy_revision.get())}</strong><small>{if plan.policy_inventory_owner_id.is_some(){"Client override"}else{"Facility default"}}</small></td><td><strong>{short_timestamp(&plan.generated_at)}</strong><small>{format!("Actor #{}",plan.generated_by)}</small></td><td><button class="button secondary-action compact" type="button" disabled=move || signals.detail_loading.get() on:click=move |_| load_plan_detail(signals,plan_id)>"Inspect evidence"</button></td></tr>} }).collect_view()}</tbody></table></div>
+                    <div class="table-scroll"><table class="dense-table orchestration-plan-table"><caption class="sr-only">"Immutable work orchestration plan history"</caption><thead><tr><th>"Plan"</th><th>"Scope / position"</th><th>"Mode"</th><th>"Candidate evidence"</th><th>"Policy"</th><th>"Generated"</th><th class="action-column"><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{page.items.into_iter().map(|plan| { let plan_id=plan.plan_id; let scope=access.with_value(|value| plan_scope(value, plan.facility_id, plan.requested_inventory_owner_id)); view!{<tr class:selected=signals.selected_plan.get().as_ref().is_some_and(|selected|selected.plan_id==plan.plan_id)><td><strong>{format!("#{}",plan.plan_id)}</strong>{plan.generated_for_user_id.map(|id|view!{<small>{format!("Worker #{id}")}</small>})}</td><td><strong>{scope}</strong><small>{plan.current_location_label}</small></td><td><span class=plan_mode_class(plan.plan_mode)>{plan_mode_label(plan.plan_mode)}</span>{(plan.plan_mode==OrchestrationPlanMode::ManualFifo).then(||view!{<small>"Safe fallback"</small>})}</td><td><strong>{format!("{} ranked / {} eligible",plan.item_count,plan.candidate_count)}</strong><small>{short_timestamp(&plan.input_snapshot_at)}</small></td><td><strong>{format!("#{} · rev {}",plan.policy_id,plan.policy_revision.get())}</strong><small>{if plan.policy_inventory_owner_id.is_some(){"Client override"}else{"Facility default"}}</small></td><td><strong>{short_timestamp(&plan.generated_at)}</strong><small>{format!("Actor #{}",plan.generated_by)}</small></td><td class="action-column"><button class="button secondary-action compact" type="button" disabled=move || signals.detail_loading.get() on:click=move |_| load_plan_detail(signals,plan_id)>"Inspect evidence"</button></td></tr>} }).collect_view()}</tbody></table></div>
                 }.into_any()
             }}
             {next.map(|cursor| view!{<button class="button secondary-action compact orchestration-load-more" type="button" disabled=move || signals.plans_loading.get() on:click=move |_| load_plans(signals,Some(cursor.clone()),true)>"Load more plans"</button>})}
@@ -592,15 +593,15 @@ fn signal_is_historical_at(expires_at: &str, now: DateTime<Utc>) -> bool {
 }
 
 fn loading_state(label: &'static str) -> AnyView {
-    view!{<section class="orchestration-state"><span class="loading-line"></span><h2>{label}</h2></section>}.into_any()
+    view!{<section class="orchestration-state loading" role="status" aria-live="polite"><span class="loading-line"></span><h2>{label}</h2></section>}.into_any()
 }
 
 fn inline_loading(label: &'static str) -> AnyView {
-    view!{<div class="orchestration-inline-state"><span class="loading-line"></span><span>{label}</span></div>}.into_any()
+    view!{<div class="orchestration-inline-state loading" role="status" aria-live="polite"><span class="loading-line"></span><span>{label}</span></div>}.into_any()
 }
 
 fn empty_inner(title: &'static str, message: &'static str) -> AnyView {
-    view!{<div class="orchestration-inline-state"><strong>{title}</strong><span>{message}</span></div>}.into_any()
+    view!{<div class="orchestration-inline-state empty"><strong>{title}</strong><span>{message}</span></div>}.into_any()
 }
 
 #[cfg(test)]

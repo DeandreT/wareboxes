@@ -193,7 +193,7 @@ pub(crate) fn WorkOrchestrationWorkspace(
                 </div>
             </header>
 
-            <form class="orchestration-toolbar" on:submit=apply_filters>
+            <form class="orchestration-toolbar" aria-label="Orchestration filters" on:submit=apply_filters>
                 <label>
                     <span>"Facility"</span>
                     <select
