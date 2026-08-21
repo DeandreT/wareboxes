@@ -29,6 +29,10 @@
   white-space: nowrap;
 }
 
+.inbound-asn-toolbar > .pane-controls {
+  flex: 0 0 auto;
+}
+
 .inbound-asn-toolbar .search-field {
   flex: 1 1 180px;
   max-width: 260px;
@@ -196,8 +200,18 @@
 
 .inbound-asn-detail .detail-actions,
 .inbound-asn-form .detail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
   align-self: end;
   margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.inbound-asn-detail .detail-actions > a.button {
+  text-decoration: none;
 }
 
 .asn-cancellation-evidence {
@@ -232,6 +246,64 @@
   min-height: 0;
 }
 
+.asn-create-form {
+  container-type: inline-size;
+  gap: 10px;
+  padding: 10px;
+}
+
+.asn-create-form .asn-form-section {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.asn-create-form .detail-section-heading {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.asn-create-form .detail-section-heading > div {
+  display: grid;
+  gap: 1px;
+}
+
+.asn-create-form .detail-section-heading h3,
+.asn-create-form .detail-section-heading p {
+  margin: 0;
+}
+
+.asn-create-form .detail-section-heading h3 {
+  font-size: 13px;
+}
+
+.asn-create-form .detail-section-heading p {
+  color: var(--ink-soft);
+  font-size: 10px;
+  text-align: right;
+}
+
+.asn-create-form .asn-arrival-field input {
+  max-width: 320px;
+}
+
+.asn-create-form .asn-line-count {
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .asn-line-inputs {
   display: flex;
   flex-wrap: wrap;
@@ -260,6 +332,108 @@
 
 .asn-line-inputs .button {
   flex: 0 0 auto;
+}
+
+.asn-create-form .asn-line-inputs {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: end;
+  gap: 7px;
+}
+
+.asn-create-form .asn-line-inputs > * {
+  min-width: 0;
+}
+
+.asn-create-form .asn-line-inputs label {
+  display: grid;
+  gap: 3px;
+  color: var(--control-ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.asn-create-form .asn-line-inputs input,
+.asn-create-form .asn-line-inputs select {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-height);
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.asn-create-form .asn-line-inputs input:focus,
+.asn-create-form .asn-line-inputs select:focus {
+  border-color: var(--blue);
+  outline: 2px solid rgb(39 102 176 / 16%);
+}
+
+.asn-create-form .asn-line-item-field {
+  grid-column: span 3;
+}
+
+.asn-create-form .asn-line-lot-field {
+  grid-column: span 2;
+}
+
+.asn-create-form .asn-line-serial-field {
+  grid-column: span 2;
+}
+
+.asn-create-form .asn-line-expiration-field {
+  grid-column: span 3;
+}
+
+.asn-create-form .asn-line-inputs .button {
+  justify-self: stretch;
+}
+
+.asn-lines-empty {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-align: center;
+}
+
+.asn-draft-line-scroll {
+  max-height: min(260px, 32vh);
+  border: 1px solid var(--line);
+}
+
+.asn-draft-line-table {
+  min-width: 560px;
+  table-layout: fixed;
+}
+
+.asn-draft-line-table th:first-child {
+  width: 34%;
+}
+
+.asn-draft-line-table th:nth-child(2) {
+  width: 43%;
+}
+
+.asn-draft-line-table th:nth-child(3) {
+  width: 15%;
+}
+
+.asn-draft-line-table th:nth-child(4) {
+  width: 8%;
+}
+
+.asn-draft-line-table td small {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 10px;
 }
 
 .inbound-asn-dialog-backdrop {
@@ -335,4 +509,32 @@
     order: 2;
   }
 
+}
+
+@container (max-width: 560px) {
+  .asn-create-form .asn-form-section-heading {
+    align-items: start;
+  }
+
+  .asn-create-form .asn-form-section-heading p {
+    max-width: 170px;
+  }
+
+  .asn-create-form .asn-line-inputs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .asn-create-form .asn-line-item-field,
+  .asn-create-form .asn-line-expiration-field {
+    grid-column: 1 / -1;
+  }
+
+  .asn-create-form .asn-line-lot-field,
+  .asn-create-form .asn-line-serial-field {
+    grid-column: span 1;
+  }
+
+  .asn-create-form .asn-line-inputs .button {
+    grid-column: 2;
+  }
 }

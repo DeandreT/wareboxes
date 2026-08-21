@@ -162,10 +162,10 @@ pub(crate) fn InboundAsnWorkspace(
             <h1 class="sr-only">"Inbound ASNs"</h1>
             <section class="data-section inbound-asn-list split-master">
                 <form class="inbound-asn-toolbar" on:submit=apply_filters>
+                    <PaneControls layout master_label="ASN table" detail_label="ASN detail"/>
                     <div class="toolbar-summary">
                         <strong>{move || page.get().map_or(0, |value| value.items.len())}</strong>
                         <span>"source documents"</span>
-                        <PaneControls layout master_label="ASN table" detail_label="ASN detail"/>
                     </div>
                     <SearchField label="Search ASNs".to_owned() placeholder="ASN, PO, or supplier" value=search/>
                     <label><span class="sr-only">"Client"</span><select prop:value=move || owner.get() on:change=move |event| owner.set(event_target_value(&event))><option value="">"All clients"</option>{scoped_access.get_value().inventory_owners.into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
@@ -468,7 +468,52 @@ fn CreateAsnPanel(
         });
     };
 
-    view! { <form class="inbound-asn-form" on:submit=submit><header class="detail-heading"><div><span class="eyebrow">"Source intake"</span><h2>"New advance shipping notice"</h2></div><button class="text-button" type="button" on:click=move |_| on_close.run(())>"Close"</button></header><div class="form-grid two-column"><label><span>"Client"</span><select required disabled=move || !lines.get().is_empty() prop:value=move || owner.get() on:change=move |event| { owner.set(event_target_value(&event)); lines.set(Vec::new()); }>{clients.into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label><label><span>"Facility"</span><select required prop:value=move || facility.get() on:change=move |event| facility.set(event_target_value(&event))>{facilities.into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label><label><span>"ASN number"</span><input required maxlength="120" prop:value=move || number.get() on:input=move |event| number.set(event_target_value(&event))/></label><label><span>"Supplier"</span><input required maxlength="200" prop:value=move || supplier.get() on:input=move |event| supplier.set(event_target_value(&event))/></label><label class="full-width"><span>"Expected arrival"</span><input type="datetime-local" prop:value=move || expected.get() on:input=move |event| expected.set(event_target_value(&event))/></label></div><section class="asn-line-builder"><div class="detail-section-heading"><h3>"Expected freight"</h3><span>{move || format!("{} lines", lines.get().len())}</span></div><div class="asn-line-inputs"><select aria-label="Item" prop:value=move || item_id.get() on:change=move |event| item_id.set(event_target_value(&event))><option value="">{move || if items_loading.get() { "Loading items" } else { "Choose item" }}</option>{move || items.get().into_iter().map(|item| view! { <option value=item.item_id>{item.description.unwrap_or_else(|| format!("Item #{}", item.item_id))}</option> }).collect_view()}</select><input aria-label="Quantity" type="number" min="1" placeholder="Qty" prop:value=move || quantity.get() on:input=move |event| quantity.set(event_target_value(&event))/><input aria-label="Lot" placeholder="Lot (optional)" prop:value=move || lot.get() on:input=move |event| lot.set(event_target_value(&event))/><input aria-label="Serial" placeholder="Serial (optional)" prop:value=move || serial.get() on:input=move |event| serial.set(event_target_value(&event))/><input aria-label="Expiration" type="datetime-local" prop:value=move || expiration.get() on:input=move |event| expiration.set(event_target_value(&event))/><button class="button secondary-action compact" type="button" on:click=add_line>"Add line"</button></div><div class="table-scroll"><table class="dense-table"><tbody>{move || lines.get().into_iter().enumerate().map(|(index, line)| view! { <tr><td><strong>{line.description}</strong><small>{line.uom}</small></td><td>{identity_label(line.lot.as_deref(), line.serial.as_deref(), line.expiration.as_deref())}</td><td class="numeric">{format_quantity(line.expected_quantity)}</td><td><button class="icon-button danger" type="button" title="Remove line" aria-label="Remove line" on:click=move |_| lines.update(|values| { values.remove(index); })><Icon icon=UiIcon::Remove/></button></td></tr> }).collect_view()}</tbody></table></div></section><Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show><footer class="detail-actions"><button class="button quiet-action" type="button" on:click=move |_| on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move || pending.get()>{move || if pending.get() { "Creating..." } else { "Create ASN" }}</button></footer></form> }
+    view! {
+        <form class="inbound-asn-form asn-create-form" on:submit=submit>
+            <header class="detail-heading">
+                <div><span class="eyebrow">"Source intake"</span><h2>"New advance shipping notice"</h2></div>
+                <button class="text-button" type="button" on:click=move |_| on_close.run(())>"Close"</button>
+            </header>
+            <section class="asn-form-section" aria-labelledby="asn-source-document-title">
+                <div class="detail-section-heading asn-form-section-heading">
+                    <div><span class="eyebrow">"Source document"</span><h3 id="asn-source-document-title">"Notice details"</h3></div>
+                    <p>"Identify the supplier, destination, and expected arrival."</p>
+                </div>
+                <div class="form-grid two-column asn-document-grid">
+                    <label><span>"Client"</span><select required disabled=move || !lines.get().is_empty() prop:value=move || owner.get() on:change=move |event| { owner.set(event_target_value(&event)); lines.set(Vec::new()); }>{clients.into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
+                    <label><span>"Facility"</span><select required prop:value=move || facility.get() on:change=move |event| facility.set(event_target_value(&event))>{facilities.into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
+                    <label><span>"ASN number"</span><input required maxlength="120" placeholder="Supplier notice number" prop:value=move || number.get() on:input=move |event| number.set(event_target_value(&event))/></label>
+                    <label><span>"Supplier"</span><input required maxlength="200" placeholder="Supplier or origin" prop:value=move || supplier.get() on:input=move |event| supplier.set(event_target_value(&event))/></label>
+                    <label class="wide asn-arrival-field"><span>"Expected arrival"</span><input type="datetime-local" prop:value=move || expected.get() on:input=move |event| expected.set(event_target_value(&event))/></label>
+                </div>
+            </section>
+            <section class="asn-form-section asn-line-builder" aria-labelledby="asn-expected-freight-title">
+                <div class="detail-section-heading">
+                    <div><span class="eyebrow">"Line authorization"</span><h3 id="asn-expected-freight-title">"Expected freight"</h3></div>
+                    <span class="asn-line-count">{move || format!("{} lines", lines.get().len())}</span>
+                </div>
+                <div class="asn-line-inputs">
+                    <label class="asn-line-item-field"><span>"Item"</span><select prop:value=move || item_id.get() on:change=move |event| item_id.set(event_target_value(&event))><option value="">{move || if items_loading.get() { "Loading items" } else { "Choose item" }}</option>{move || items.get().into_iter().map(|item| view! { <option value=item.item_id>{item.description.unwrap_or_else(|| format!("Item #{}", item.item_id))}</option> }).collect_view()}</select></label>
+                    <label class="asn-line-quantity-field"><span>"Quantity"</span><input type="number" min="1" placeholder="Qty" prop:value=move || quantity.get() on:input=move |event| quantity.set(event_target_value(&event))/></label>
+                    <label class="asn-line-lot-field"><span>"Lot"</span><input placeholder="Optional" prop:value=move || lot.get() on:input=move |event| lot.set(event_target_value(&event))/></label>
+                    <label class="asn-line-serial-field"><span>"Serial"</span><input placeholder="Optional" prop:value=move || serial.get() on:input=move |event| serial.set(event_target_value(&event))/></label>
+                    <label class="asn-line-expiration-field"><span>"Expiration"</span><input type="datetime-local" prop:value=move || expiration.get() on:input=move |event| expiration.set(event_target_value(&event))/></label>
+                    <button class="button secondary-action compact" type="button" on:click=add_line><Icon icon=UiIcon::Add/><span>"Add line"</span></button>
+                </div>
+                <Show when=move || !lines.get().is_empty() fallback=|| view! { <p class="asn-lines-empty">"Add expected freight to build the receiving document."</p> }>
+                    <div class="table-scroll asn-draft-line-scroll">
+                        <table class="data-table asn-draft-line-table">
+                            <caption class="sr-only">"Expected freight lines on this advance shipping notice"</caption>
+                            <thead><tr><th>"Item"</th><th>"Identity"</th><th class="numeric">"Expected"</th><th class="icon-column"><span class="sr-only">"Actions"</span></th></tr></thead>
+                            <tbody>{move || lines.get().into_iter().enumerate().map(|(index, line)| view! { <tr><td><strong>{line.description}</strong><small>{line.uom}</small></td><td>{identity_label(line.lot.as_deref(), line.serial.as_deref(), line.expiration.as_deref())}</td><td class="numeric"><strong>{format_quantity(line.expected_quantity)}</strong></td><td class="icon-column"><button class="icon-button danger" type="button" title="Remove line" aria-label="Remove line" on:click=move |_| lines.update(|values| { values.remove(index); })><Icon icon=UiIcon::Remove/></button></td></tr> }).collect_view()}</tbody>
+                        </table>
+                    </div>
+                </Show>
+            </section>
+            <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
+            <footer class="detail-actions"><button class="button quiet-action" type="button" on:click=move |_| on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move || pending.get()>{move || if pending.get() { "Creating..." } else { "Create ASN" }}</button></footer>
+        </form>
+    }
 }
 
 #[component]

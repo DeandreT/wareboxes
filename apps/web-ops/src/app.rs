@@ -307,6 +307,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/inventory-rollups.css"/>
                 <link rel="stylesheet" href="/fulfillment.css"/>
                 <link rel="stylesheet" href="/inbound-asns.css"/>
+                <link rel="stylesheet" href="/customer-returns.css"/>
                 <link rel="stylesheet" href="/purchase-orders.css"/>
                 <link rel="stylesheet" href="/transfer-orders.css"/>
                 <link rel="stylesheet" href="/pick-shortages.css"/>
@@ -321,6 +322,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/yard.css"/>
                 <link rel="stylesheet" href="/labor.css"/>
                 <link rel="stylesheet" href="/value-added-work.css"/>
+                <link rel="stylesheet" href="/vendor-returns.css"/>
                 <link rel="stylesheet" href="/customer-portal.css"/>
                 <link rel="stylesheet" href="/replenishment.css"/>
                 <link rel="stylesheet" href="/slotting.css"/>

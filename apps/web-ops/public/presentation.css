@@ -8,6 +8,7 @@ html[data-density="compact"] {
   --toolbar-height: 40px;
   --topbar-background: rgb(255 255 255 / 96%);
   --row-border: #e9eceb;
+  --row-stripe: #f5f7f6;
   --row-hover: #f8faf9;
   --table-ink: #343b3e;
   --label-ink: #606b68;
@@ -52,6 +53,7 @@ html[data-theme="dark"] {
   --shadow: 0 12px 36px rgb(0 0 0 / 30%);
   --topbar-background: rgb(27 32 34 / 96%);
   --row-border: #30383a;
+  --row-stripe: #202628;
   --row-hover: #252c2e;
   --table-ink: #dce2df;
   --label-ink: #a8b3af;
@@ -90,6 +92,7 @@ html[data-theme="dark"] {
     --shadow: 0 12px 36px rgb(0 0 0 / 30%);
     --topbar-background: rgb(27 32 34 / 96%);
     --row-border: #30383a;
+    --row-stripe: #202628;
     --row-hover: #252c2e;
     --table-ink: #dce2df;
     --label-ink: #a8b3af;
@@ -109,12 +112,14 @@ html[data-theme="dark"] {
   background: var(--topbar-background);
 }
 
-.data-table th {
+.data-table th,
+.dense-table th {
   height: var(--table-head-height);
   color: var(--label-ink);
 }
 
-.data-table td {
+.data-table td,
+.dense-table td {
   height: var(--table-row-height);
   padding-top: var(--table-cell-padding-y);
   padding-bottom: var(--table-cell-padding-y);
@@ -122,8 +127,17 @@ html[data-theme="dark"] {
   color: var(--table-ink);
 }
 
+.data-table tbody tr:nth-child(even):not(.active-row):not(.selected):not(.selected-row),
+.data-table tbody tr:nth-child(even):not(.active-row):not(.selected):not(.selected-row) .action-column,
+.dense-table tbody tr:nth-child(even):not(.active-row):not(.selected):not(.selected-row),
+.dense-table tbody tr:nth-child(even):not(.active-row):not(.selected):not(.selected-row) .action-column {
+  background: var(--row-stripe);
+}
+
 .data-table tbody tr:hover,
-.data-table tbody tr:hover .action-column {
+.data-table tbody tr:hover .action-column,
+.dense-table tbody tr:hover,
+.dense-table tbody tr:hover .action-column {
   background: var(--row-hover);
 }
 
