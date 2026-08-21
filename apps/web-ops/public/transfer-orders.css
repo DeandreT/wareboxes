@@ -32,6 +32,62 @@
   max-width: 145px;
 }
 
+.transfer-demand-section {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.transfer-demand-section .detail-section-heading {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.transfer-demand-section .detail-section-heading h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.transfer-demand-section .detail-section-heading span {
+  color: var(--ink-soft);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.transfer-demand-table-scroll {
+  min-width: 0;
+  border: 1px solid var(--line);
+}
+
+.transfer-demand-table {
+  width: 100%;
+  min-width: 560px;
+  table-layout: fixed;
+}
+
+.transfer-demand-table th:nth-child(1) {
+  width: 38%;
+}
+
+.transfer-demand-table th:nth-child(2) {
+  width: 12%;
+}
+
+.transfer-demand-table th:nth-child(3) {
+  width: 16%;
+}
+
+.transfer-demand-table th:nth-child(4) {
+  width: 18%;
+}
+
+.transfer-demand-table th:nth-child(5) {
+  width: 16%;
+}
+
 .transfer-execution-dialog {
   width: min(820px, calc(100vw - 32px));
 }
