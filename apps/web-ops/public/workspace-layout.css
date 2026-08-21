@@ -7,6 +7,18 @@
     minmax(360px, 1fr);
 }
 
+.split-workspace > .split-master {
+  grid-column: 1;
+}
+
+.split-workspace > .split-pane-handle {
+  grid-column: 2;
+}
+
+.split-workspace > .split-detail {
+  grid-column: 3;
+}
+
 .split-workspace[data-pane-mode="master"] {
   grid-template-columns: minmax(0, 1fr) 28px 0;
 }

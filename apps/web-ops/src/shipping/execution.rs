@@ -2,6 +2,7 @@ use leptos::{html, prelude::*};
 use wareboxes_api_contract::v1::{CancelShipmentRequest, ShipmentResponse, ShipmentStatus};
 
 use crate::components::{Icon, UiIcon};
+use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 
 use super::cancellation::ShipmentCancellationAction;
 use super::carrier::CarrierManifestPanel;
@@ -14,6 +15,7 @@ pub(super) fn ShipmentExecution(
     shipment: ShipmentResponse,
     signals: ShippingSignals,
     scan_input: NodeRef<html::Input>,
+    layout: SplitPaneState,
     on_manifest: Callback<()>,
     on_cancel: Callback<(i64, CancelShipmentRequest)>,
     on_scan: Callback<()>,
@@ -36,11 +38,14 @@ pub(super) fn ShipmentExecution(
     let facility_id = shipment.facility_id;
     let order_id = shipment.order_id;
     view! {
-        <div class="shipping-execution">
-            <section class="shipping-cartons">
+        <div class="shipping-execution split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <section class="shipping-cartons split-master">
                 <header>
                     <div><h3>"Cartons"</h3><span>{format!("{carton_count} cartons · {packed_quantity} units")}</span></div>
-                    <span class="status success">{shipment_status_label(shipment.status)}</span>
+                    <div class="shipping-carton-header-actions">
+                        <span class="status success">{shipment_status_label(shipment.status)}</span>
+                        <PaneControls layout master_label="carton workspace" detail_label="shipping controls"/>
+                    </div>
                 </header>
                 <div class="table-scroll shipping-carton-scroll">
                     <table class="data-table shipping-carton-table">
@@ -76,7 +81,8 @@ pub(super) fn ShipmentExecution(
                     on_unauthorized=signals.on_unauthorized
                 />
             </section>
-            <aside class="shipping-command-panel">
+            <SplitPaneHandle layout/>
+            <aside class="shipping-command-panel split-detail">
                 {match shipment.status {
                     ShipmentStatus::AwaitingManifest => view! {
                         <CarrierManifestPanel

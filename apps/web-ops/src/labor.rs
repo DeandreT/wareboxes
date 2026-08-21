@@ -128,80 +128,84 @@ pub(crate) fn LaborWorkspace(
         <section class="labor-workspace">
             <form class="labor-toolbar" on:submit=apply>
                 <div class="labor-heading">
-                    <Icon icon=UiIcon::Employees/>
+                    <span class="labor-heading-icon"><Icon icon=UiIcon::Employees/></span>
                     <div>
                         <h1>"Labor control"</h1>
                         <span>"Attendance, execution, qualifications, and equipment readiness"</span>
+                        <small class="labor-window-help">"Blank dates use the last 24 hours · 31 day maximum"</small>
                     </div>
                 </div>
-                <label>
-                    <span>"Facility"</span>
-                    <select
-                        prop:value=move || option_value(signals.facility_filter.get())
-                        on:change=move |event| signals.facility_filter.set(parse_id(&event_target_value(&event)))
+                <div class="labor-filter-grid">
+                    <label>
+                        <span>"Facility"</span>
+                        <select
+                            prop:value=move || option_value(signals.facility_filter.get())
+                            on:change=move |event| signals.facility_filter.set(parse_id(&event_target_value(&event)))
+                        >
+                            <option value="">"All facilities"</option>
+                            {access.with_value(|value| scope_options(&value.facilities))}
+                        </select>
+                    </label>
+                    <label>
+                        <span>"Client"</span>
+                        <select
+                            prop:value=move || option_value(signals.owner_filter.get())
+                            on:change=move |event| signals.owner_filter.set(parse_id(&event_target_value(&event)))
+                        >
+                            <option value="">"All clients"</option>
+                            {access.with_value(|value| scope_options(&value.inventory_owners))}
+                        </select>
+                    </label>
+                    <label>
+                        <span>"Employee"</span>
+                        <select
+                            prop:value=move || option_value(signals.employee_filter.get())
+                            on:change=move |event| signals.employee_filter.set(parse_id(&event_target_value(&event)))
+                        >
+                            <option value="">"All employees"</option>
+                            {move || employee_options(&signals.workspace.get())}
+                        </select>
+                    </label>
+                    <label>
+                        <span>"From (UTC)"</span>
+                        <input
+                            type="date"
+                            prop:value=move || signals.from_date.get()
+                            on:input=move |event| signals.from_date.set(event_target_value(&event))
+                        />
+                    </label>
+                    <label>
+                        <span>"Until, exclusive (UTC)"</span>
+                        <input
+                            type="date"
+                            prop:value=move || signals.until_date.get()
+                            on:input=move |event| signals.until_date.set(event_target_value(&event))
+                        />
+                    </label>
+                </div>
+                <div class="labor-toolbar-actions">
+                    <label class="labor-history-toggle">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || signals.include_history.get()
+                            on:change=move |event| signals.include_history.set(event_target_checked(&event))
+                        />
+                        <span>"Include history"</span>
+                    </label>
+                    <button class="button secondary-action compact" type="submit" disabled=move || signals.loading.get()>
+                        "Apply"
+                    </button>
+                    <button
+                        class="icon-button"
+                        type="button"
+                        title="Refresh labor workspace"
+                        aria-label="Refresh labor workspace"
+                        disabled=move || signals.loading.get()
+                        on:click=refresh
                     >
-                        <option value="">"All facilities"</option>
-                        {access.with_value(|value| scope_options(&value.facilities))}
-                    </select>
-                </label>
-                <label>
-                    <span>"Client"</span>
-                    <select
-                        prop:value=move || option_value(signals.owner_filter.get())
-                        on:change=move |event| signals.owner_filter.set(parse_id(&event_target_value(&event)))
-                    >
-                        <option value="">"All clients"</option>
-                        {access.with_value(|value| scope_options(&value.inventory_owners))}
-                    </select>
-                </label>
-                <label>
-                    <span>"Employee"</span>
-                    <select
-                        prop:value=move || option_value(signals.employee_filter.get())
-                        on:change=move |event| signals.employee_filter.set(parse_id(&event_target_value(&event)))
-                    >
-                        <option value="">"All employees"</option>
-                        {move || employee_options(&signals.workspace.get())}
-                    </select>
-                </label>
-                <label>
-                    <span>"From (UTC)"</span>
-                    <input
-                        type="date"
-                        prop:value=move || signals.from_date.get()
-                        on:input=move |event| signals.from_date.set(event_target_value(&event))
-                    />
-                </label>
-                <label>
-                    <span>"Until, exclusive (UTC)"</span>
-                    <input
-                        type="date"
-                        prop:value=move || signals.until_date.get()
-                        on:input=move |event| signals.until_date.set(event_target_value(&event))
-                    />
-                </label>
-                <label class="labor-history-toggle">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || signals.include_history.get()
-                        on:change=move |event| signals.include_history.set(event_target_checked(&event))
-                    />
-                    <span>"Include history"</span>
-                </label>
-                <button class="button secondary-action compact" type="submit" disabled=move || signals.loading.get()>
-                    "Apply"
-                </button>
-                <button
-                    class="icon-button"
-                    type="button"
-                    title="Refresh labor workspace"
-                    aria-label="Refresh labor workspace"
-                    disabled=move || signals.loading.get()
-                    on:click=refresh
-                >
-                    <Icon icon=UiIcon::Refresh/>
-                </button>
-                <small class="labor-window-help">"Blank dates use the last 24 hours. Maximum range: 31 days."</small>
+                        <Icon icon=UiIcon::Refresh/>
+                    </button>
+                </div>
             </form>
 
             {move || {
@@ -270,6 +274,7 @@ fn labor_body(
     let reload = Callback::new(move |_| load_workspace(signals));
     view! {
         <div class="labor-body">
+            {move || labor_metrics(&signals.workspace.get())}
             <LaborCommandCenter
                 workspace=signals.workspace
                 access=access.get_value()
@@ -283,7 +288,6 @@ fn labor_body(
                 on_success=reload
                 on_unauthorized=signals.on_unauthorized
             />
-            {move || labor_metrics(&signals.workspace.get())}
             <div class="labor-live-grid">
                 {attendance_panel(signals, access, can_execute)}
                 {activity_panel(signals, access, can_execute)}
@@ -302,7 +306,7 @@ fn labor_body(
 fn labor_metrics(workspace: &LaborWorkspaceResponse) -> AnyView {
     let metrics = calculate_metrics(workspace);
     view! {
-        <dl class="labor-metrics">
+        <dl class="labor-metrics" aria-label="Labor status summary">
             <div><dt>"On clock"</dt><dd>{metrics.clocked_in}</dd><small>"open intervals"</small></div>
             <div><dt>"Active work"</dt><dd>{metrics.active_activities}</dd><small>"in progress"</small></div>
             <div><dt>"Utilization"</dt><dd>{percent(metrics.utilization_basis_points)}</dd><small>"direct / paid"</small></div>
@@ -321,10 +325,10 @@ fn attendance_panel(
 ) -> AnyView {
     view! {
         <section class="labor-panel labor-live-panel">
-            <header><div><h2>"Attendance"</h2><span>{move || format!("{} intervals", signals.workspace.get().attendance.len())}</span></div></header>
+            <header><h2>"Attendance"</h2><span class="labor-panel-count">{move || format!("{} intervals", signals.workspace.get().attendance.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
-                    <thead><tr><th>"Employee"</th><th>"Facility"</th><th>"State"</th><th>"Clock in"</th><th>"Paid"</th><th></th></tr></thead>
+                    <thead><tr><th>"Employee"</th><th>"Facility"</th><th>"State"</th><th>"Clock in"</th><th class="numeric">"Paid"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead>
                     <tbody>
                         {move || {
                             let rows = signals.workspace.get().attendance;
@@ -341,8 +345,8 @@ fn attendance_panel(
                                             <td>{facility}</td>
                                             <td><span class=attendance_status_class(row.status)>{attendance_status_label(row.status)}</span></td>
                                             <td>{short_timestamp(&row.effective_clocked_in_at)}</td>
-                                            <td>{duration(row.effective_paid_seconds)}</td>
-                                            <td>{(can_execute && is_open).then(|| view! { <button class="text-button" type="button" on:click=move |_| open_action(signals, target.clone())>"Clock out"</button> })}</td>
+                                            <td class="numeric">{duration(row.effective_paid_seconds)}</td>
+                                            <td class="labor-action-column">{(can_execute && is_open).then(|| view! { <button class="text-button" type="button" on:click=move |_| open_action(signals, target.clone())>"Clock out"</button> })}</td>
                                         </tr>
                                     }
                                 }).collect_view().into_any()
@@ -363,10 +367,10 @@ fn activity_panel(
 ) -> AnyView {
     view! {
         <section class="labor-panel labor-live-panel">
-            <header><div><h2>"Labor activity"</h2><span>{move || format!("{} records", signals.workspace.get().activities.len())}</span></div></header>
+            <header><h2>"Labor activity"</h2><span class="labor-panel-count">{move || format!("{} records", signals.workspace.get().activities.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
-                    <thead><tr><th>"Employee / activity"</th><th>"Client"</th><th>"State"</th><th>"Started"</th><th>"Qty / actual"</th><th></th></tr></thead>
+                    <thead><tr><th>"Employee / activity"</th><th>"Client"</th><th>"State"</th><th>"Started"</th><th class="numeric">"Qty / actual"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead>
                     <tbody>
                         {move || {
                             let rows = signals.workspace.get().activities;
@@ -387,8 +391,8 @@ fn activity_panel(
                                             <td>{owner}</td>
                                             <td><span class=activity_status_class(row.status)>{activity_status_label(row.status)}</span></td>
                                             <td>{short_timestamp(&row.effective_started_at)}</td>
-                                            <td>{quantity_actual(&row)}</td>
-                                            <td>{(can_execute && is_active).then(|| view! {
+                                            <td class="numeric">{quantity_actual(&row)}</td>
+                                            <td class="labor-action-column">{(can_execute && is_active).then(|| view! {
                                                 <div class="labor-row-actions">
                                                     <button class="text-button" type="button" on:click=move |_| open_action(signals, complete_target.clone())>"Complete"</button>
                                                     <button class="text-button danger" type="button" on:click=move |_| open_action(signals, cancel_target.clone())>"Cancel"</button>
@@ -410,10 +414,10 @@ fn activity_panel(
 fn summary_panel(workspace: &LaborWorkspaceResponse) -> AnyView {
     view! {
         <section class="labor-panel labor-summary-panel">
-            <header><div><h2>"Performance by employee"</h2><span>{format!("{} employees", workspace.summaries.len())}</span></div></header>
+            <header><h2>"Performance by employee"</h2><span class="labor-panel-count">{format!("{} employees", workspace.summaries.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
-                    <thead><tr><th>"Employee"</th><th>"Paid"</th><th>"Direct"</th><th>"Indirect"</th><th>"Exceptions"</th><th>"Expected"</th><th>"Utilization"</th><th>"Efficiency"</th></tr></thead>
+                    <thead><tr><th>"Employee"</th><th class="numeric">"Paid"</th><th class="numeric">"Direct"</th><th class="numeric">"Indirect"</th><th class="numeric">"Exceptions"</th><th class="numeric">"Expected"</th><th class="numeric">"Utilization"</th><th class="numeric">"Efficiency"</th></tr></thead>
                     <tbody>
                         {if workspace.summaries.is_empty() {
                             view! { <tr class="empty-row"><td colspan="8">"No completed labor is attributable to this reporting window."</td></tr> }.into_any()
@@ -421,13 +425,13 @@ fn summary_panel(workspace: &LaborWorkspaceResponse) -> AnyView {
                             workspace.summaries.iter().map(|row| view! {
                                 <tr>
                                     <td><strong>{row.employee_name.clone()}</strong><small>{format!("Employee #{}", row.employee_id)}</small></td>
-                                    <td>{duration(Some(row.paid_seconds))}</td>
-                                    <td>{duration(Some(row.direct_seconds))}</td>
-                                    <td>{duration(Some(row.indirect_seconds))}</td>
-                                    <td>{duration(Some(row.exception_seconds))}</td>
-                                    <td>{duration(Some(row.expected_seconds))}</td>
-                                    <td>{percent(row.utilization_basis_points)}</td>
-                                    <td>{percent(row.efficiency_basis_points)}</td>
+                                    <td class="numeric">{duration(Some(row.paid_seconds))}</td>
+                                    <td class="numeric">{duration(Some(row.direct_seconds))}</td>
+                                    <td class="numeric">{duration(Some(row.indirect_seconds))}</td>
+                                    <td class="numeric">{duration(Some(row.exception_seconds))}</td>
+                                    <td class="numeric">{duration(Some(row.expected_seconds))}</td>
+                                    <td class="numeric">{percent(row.utilization_basis_points)}</td>
+                                    <td class="numeric">{percent(row.efficiency_basis_points)}</td>
                                 </tr>
                             }).collect_view().into_any()
                         }}
@@ -447,7 +451,7 @@ fn qualification_panel(
     let workspace = signals.workspace.get();
     view! {
         <section class="labor-panel labor-reference-panel">
-            <header><div><h2>"Skills & certifications"</h2><span>{format!("{} skills · {} certificates", workspace.skills.len(), workspace.certifications.len())}</span></div></header>
+            <header><h2>"Skills & certifications"</h2><span class="labor-panel-count">{format!("{} skills · {} certificates", workspace.skills.len(), workspace.certifications.len())}</span></header>
             <div class="labor-subtable">
                 <h3>"Skill catalog"</h3>
                 {if workspace.skills.is_empty() {
@@ -463,11 +467,11 @@ fn qualification_panel(
                 {if workspace.certifications.is_empty() {
                     view! { <p class="labor-inline-empty">"No certifications in scope."</p> }.into_any()
                 } else {
-                    view! { <table><thead><tr><th>"Employee"</th><th>"Skill / facility"</th><th>"Expires"</th><th></th></tr></thead><tbody>{workspace.certifications.into_iter().map(|row| {
+                    view! { <table><thead><tr><th>"Employee"</th><th>"Skill / facility"</th><th>"Expires"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{workspace.certifications.into_iter().map(|row| {
                         let active = row.revoked_at.is_none();
                         let target = ActionTarget::Revoke(row.clone());
                         let facility = scope_name(&access.get_value().facilities, row.facility_id);
-                        view! { <tr><td><strong>{row.employee_name}</strong></td><td><code>{row.skill_code}</code><small>{facility}</small></td><td>{row.expires_at.as_deref().map(short_date).unwrap_or_else(|| "No expiry".into())}</td><td>{(can_certify && active).then(|| view! { <button class="text-button danger" type="button" on:click=move |_| open_action(signals, target.clone())>"Revoke"</button> })}</td></tr> }
+                        view! { <tr><td><strong>{row.employee_name}</strong></td><td><code>{row.skill_code}</code><small>{facility}</small></td><td>{row.expires_at.as_deref().map(short_date).unwrap_or_else(|| "No expiry".into())}</td><td class="labor-action-column">{(can_certify && active).then(|| view! { <button class="text-button danger" type="button" on:click=move |_| open_action(signals, target.clone())>"Revoke"</button> })}</td></tr> }
                     }).collect_view()}</tbody></table> }.into_any()
                 }}
             </div>
@@ -483,16 +487,16 @@ fn equipment_panel(
     let workspace = signals.workspace.get();
     view! {
         <section class="labor-panel labor-reference-panel">
-            <header><div><h2>"Equipment readiness"</h2><span>{format!("{} assets · {} classes", workspace.equipment_assets.len(), workspace.equipment_classes.len())}</span></div></header>
+            <header><h2>"Equipment readiness"</h2><span class="labor-panel-count">{format!("{} assets · {} classes", workspace.equipment_assets.len(), workspace.equipment_classes.len())}</span></header>
             <div class="labor-subtable">
                 {if workspace.equipment_assets.is_empty() {
                     view! { <p class="labor-inline-empty">"No equipment assets in scope."</p> }.into_any()
                 } else {
-                    view! { <table><thead><tr><th>"Asset"</th><th>"Facility / class"</th><th>"State"</th><th></th></tr></thead><tbody>{workspace.equipment_assets.into_iter().map(|row| {
+                    view! { <table><thead><tr><th>"Asset"</th><th>"Facility / class"</th><th>"State"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{workspace.equipment_assets.into_iter().map(|row| {
                         let mutable = row.status != EquipmentStatus::Retired;
                         let target = ActionTarget::Equipment(row.clone());
                         let facility = scope_name(&access.get_value().facilities, row.facility_id);
-                        view! { <tr><td><strong>{row.equipment_number}</strong><small>{row.name}</small></td><td>{facility}<small>{row.equipment_class_code}</small></td><td><span class=equipment_status_class(row.status)>{equipment_status_label(row.status)}</span></td><td>{(can_manage_equipment && mutable).then(|| view! { <button class="text-button" type="button" on:click=move |_| open_action(signals, target.clone())>"Change"</button> })}</td></tr> }
+                        view! { <tr><td><strong>{row.equipment_number}</strong><small>{row.name}</small></td><td>{facility}<small>{row.equipment_class_code}</small></td><td><span class=equipment_status_class(row.status)>{equipment_status_label(row.status)}</span></td><td class="labor-action-column">{(can_manage_equipment && mutable).then(|| view! { <button class="text-button" type="button" on:click=move |_| open_action(signals, target.clone())>"Change"</button> })}</td></tr> }
                     }).collect_view()}</tbody></table> }.into_any()
                 }}
             </div>
@@ -509,10 +513,10 @@ fn standards_panel(
 ) -> AnyView {
     view! {
         <section class="labor-panel labor-reference-panel labor-standards-panel">
-            <header><div><h2>"Labor standards"</h2><span>{format!("{} effective definitions", workspace.standards.len())}</span></div></header>
+            <header><h2>"Labor standards"</h2><span class="labor-panel-count">{format!("{} effective definitions", workspace.standards.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
-                    <thead><tr><th>"Code / standard"</th><th>"Facility"</th><th>"Client"</th><th>"Activity"</th><th>"Basis"</th><th>"Setup"</th><th>"Rate"</th><th>"Effective"</th></tr></thead>
+                    <thead><tr><th>"Code / standard"</th><th>"Facility"</th><th>"Client"</th><th>"Activity"</th><th>"Basis"</th><th class="numeric">"Setup"</th><th class="numeric">"Rate"</th><th>"Effective"</th></tr></thead>
                     <tbody>
                         {if workspace.standards.is_empty() {
                             view! { <tr class="empty-row"><td colspan="8">"No labor standards in scope."</td></tr> }.into_any()
@@ -520,7 +524,7 @@ fn standards_panel(
                             workspace.standards.iter().map(|row| {
                                 let facility = scope_name(&access.get_value().facilities, row.facility_id);
                                 let owner = row.inventory_owner_id.map_or_else(|| "Tenant default".into(), |id| scope_name(&access.get_value().inventory_owners, id));
-                                view! { <tr><td><code>{row.code.clone()}</code><small>{row.name.clone()}</small></td><td>{facility}</td><td>{owner}</td><td>{activity_kind_label(row.activity_kind)}</td><td>{quantity_basis_label(row.quantity_basis)}</td><td>{duration(Some(row.setup_seconds))}</td><td>{format!("{}s / {}", row.seconds_per_unit, quantity_basis_label(row.quantity_basis).to_lowercase())}</td><td>{short_date(&row.effective_from)}</td></tr> }
+                                view! { <tr><td><code>{row.code.clone()}</code><small>{row.name.clone()}</small></td><td>{facility}</td><td>{owner}</td><td>{activity_kind_label(row.activity_kind)}</td><td>{quantity_basis_label(row.quantity_basis)}</td><td class="numeric">{duration(Some(row.setup_seconds))}</td><td class="numeric">{format!("{}s / {}", row.seconds_per_unit, quantity_basis_label(row.quantity_basis).to_lowercase())}</td><td>{short_date(&row.effective_from)}</td></tr> }
                             }).collect_view().into_any()
                         }}
                     </tbody>

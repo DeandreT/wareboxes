@@ -222,7 +222,7 @@ pub(super) fn CarrierManifestPanel(
                     }).collect_view()}
                 </select></label>
                 <label><span>"Service"</span><input maxlength="100" placeholder="GROUND / NEXT_DAY" prop:value=move || signals.service_code.get() disabled=move || signals.pending.get() on:input=move |event| signals.service_code.set(event_target_value(&event))/></label>
-                <button type="button" class="button primary-action" disabled=move || signals.pending.get() || active_job(&signals.jobs.get()).is_some() || signals.selected_account.get().is_none() on:click=queue>
+                <button type="button" class="button primary-action carrier-queue-action" disabled=move || signals.pending.get() || active_job(&signals.jobs.get()).is_some() || signals.selected_account.get().is_none() on:click=queue>
                     {move || if signals.pending.get() { "Submitting..." } else { "Request carrier manifest" }}
                 </button>
             </div>
@@ -267,9 +267,9 @@ pub(super) fn CarrierManifestPanel(
                     <div class="carrier-account-form">
                         <label><span>"Display name"</span><input maxlength="200" prop:value=move || signals.display_name.get() on:input=move |event| signals.display_name.set(event_target_value(&event))/></label>
                         <label><span>"Carrier code"</span><input maxlength="100" disabled=move || signals.editing_account.get().is_some() prop:value=move || signals.carrier_code.get() on:input=move |event| signals.carrier_code.set(event_target_value(&event))/></label>
-                        <label><span>"Gateway account key (non-secret)"</span><input maxlength="200" prop:value=move || signals.account_key.get() on:input=move |event| signals.account_key.set(event_target_value(&event))/></label>
-                        <button type="button" class="button primary-action compact" disabled=move || signals.pending.get() on:click=save_account>{move || if signals.editing_account.get().is_some() { "Save revision" } else { "Create account" }}</button>
-                        <button type="button" class="button secondary-action compact" on:click=new_account>"New account"</button>
+                        <label class="carrier-account-key"><span>"Gateway account key (non-secret)"</span><input maxlength="200" prop:value=move || signals.account_key.get() on:input=move |event| signals.account_key.set(event_target_value(&event))/></label>
+                        <button type="button" class="button primary-action compact carrier-account-save" disabled=move || signals.pending.get() on:click=save_account>{move || if signals.editing_account.get().is_some() { "Save revision" } else { "Create account" }}</button>
+                        <button type="button" class="button secondary-action compact carrier-account-reset" on:click=new_account>"New account"</button>
                     </div>
                 </details>
             </Show>

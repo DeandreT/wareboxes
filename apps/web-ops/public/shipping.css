@@ -602,7 +602,6 @@
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr) 284px;
 }
 
 .shipping-cartons {
@@ -610,7 +609,18 @@
   min-width: 0;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  border-right: 1px solid var(--line);
+}
+
+.shipping-carton-header-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.shipping-carton-header-actions .pane-controls {
+  padding-left: 7px;
+  border-left: 1px solid var(--line);
 }
 
 .shipping-documents {
@@ -802,9 +812,12 @@
 }
 
 .shipping-command-panel {
+  display: grid;
   min-width: 0;
+  min-height: 0;
+  align-content: start;
   overflow-y: auto;
-  background: var(--surface-subtle);
+  background: var(--surface);
 }
 
 .shipping-manifest,
@@ -967,7 +980,4 @@
     grid-template-columns: 285px minmax(0, 1fr);
   }
 
-  .shipping-execution {
-    grid-template-columns: minmax(0, 1fr) 305px;
-  }
 }

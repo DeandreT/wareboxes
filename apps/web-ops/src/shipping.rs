@@ -23,6 +23,7 @@ use crate::api;
 use crate::components::{Icon, UiIcon};
 use crate::facility_shipping_origin::FacilityShippingOriginDialog;
 use crate::toast::{use_toast_bus, ToastBus};
+use crate::workspace_layout::SplitPaneState;
 
 use display::{compact_timestamp, departure_action_label, optional_text};
 use execution::ShipmentExecution;
@@ -145,6 +146,7 @@ pub(crate) fn ShippingWorkspace(
         toasts: use_toast_bus(),
     };
     let origin_dialog_open = RwSignal::new(false);
+    let execution_layout = SplitPaneState::new("shipping-execution", 1_100);
     let scan_input = NodeRef::<html::Input>::new();
 
     #[cfg(target_arch = "wasm32")]
@@ -369,6 +371,7 @@ pub(crate) fn ShippingWorkspace(
                     queue
                     signals
                     scan_input
+                    execution_layout
                     can_configure_origins
                     can_configure_qa
                     can_manage_carriers
@@ -404,6 +407,7 @@ fn ShippingDetail(
     queue: QueueSignals,
     signals: ShippingSignals,
     scan_input: NodeRef<html::Input>,
+    execution_layout: SplitPaneState,
     can_configure_origins: bool,
     can_configure_qa: bool,
     can_manage_carriers: bool,
@@ -484,6 +488,7 @@ fn ShippingDetail(
                                 shipment
                                 signals
                                 scan_input
+                                layout=execution_layout
                                 on_manifest
                                 on_cancel=on_cancel_shipment
                                 on_scan

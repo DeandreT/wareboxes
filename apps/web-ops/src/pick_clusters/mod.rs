@@ -200,6 +200,9 @@ fn render_workspace(
         return view! { <div class="workspace-state compact"><h3>"Loading cluster workspace"</h3></div> }.into_any();
     }
     let Some(workspace) = signals.workspace.get() else {
+        if signals.error.get().is_some() {
+            return view! { <div class="workspace-empty"><h3>"Cart workspace unavailable"</h3><p>"Review the error above, then refresh this workspace."</p></div> }.into_any();
+        }
         return view! { <div class="workspace-empty"><h3>"Select an exact scope"</h3><p>"Choose one facility and one client to load eligible released tasks."</p></div> }.into_any();
     };
     let active_carts = workspace

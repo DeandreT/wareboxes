@@ -52,6 +52,8 @@ pub(crate) fn PickZonesWorkspace(
                     view! { <div class="workspace-state compact"><h3>"Loading zone queues"</h3></div> }.into_any()
                 } else if let Some(workspace)=signals.workspace.get() {
                     queue_table(workspace).into_any()
+                } else if signals.error.get().is_some() {
+                    view! { <div class="workspace-empty"><h3>"Zone queues unavailable"</h3><p>"Review the error above, then refresh this workspace."</p></div> }.into_any()
                 } else {
                     view! { <div class="workspace-empty"><h3>"Select an exact scope"</h3><p>"Choose one facility and one client to read pick-zone demand."</p></div> }.into_any()
                 }

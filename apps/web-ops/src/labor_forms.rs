@@ -202,12 +202,20 @@ pub(super) fn LaborCommandCenter(
             true,
         )
     };
+    let granted_permissions = permission_summary(
+        can_execute,
+        can_configure,
+        can_manage_equipment,
+        can_certify,
+        can_supervise,
+    );
+    let permission_title = granted_permissions.clone();
 
     view! {
         <section class="labor-panel labor-command-center" aria-label="Labor operator commands">
             <header>
                 <div><h2>"Operator workbench"</h2><span>"Scoped, eligibility-checked labor commands"</span></div>
-                <span class="labor-command-permissions">{permission_summary(can_execute, can_configure, can_manage_equipment, can_certify, can_supervise)}</span>
+                <span class="labor-command-permissions" title=permission_title>{granted_permissions}</span>
             </header>
             <form on:submit=submit>
                 <div class="labor-command-scope">
@@ -262,7 +270,7 @@ pub(super) fn LaborCommandCenter(
                     <Show when=move || signals.retry.get().is_some()>
                         <span class="labor-retry-evidence">"Outcome unknown: the saved request and idempotency key will be retried exactly."</span>
                     </Show>
-                    <button class="button primary-action" type="submit" disabled=move || signals.pending.get()>
+                    <button class="button primary-action compact" type="submit" disabled=move || signals.pending.get()>
                         {move || if signals.pending.get() { "Submitting…" } else if signals.retry.get().is_some() { "Retry exact command" } else { submit_label(signals.form.get()) }}
                     </button>
                 </footer>

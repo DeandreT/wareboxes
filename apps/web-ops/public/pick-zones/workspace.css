@@ -1,25 +1,199 @@
 .pick-zone-panel {
   display: grid;
-  gap: 12px;
-  margin: 0 0 14px;
-  padding: 14px;
+  min-width: 0;
+  overflow: hidden;
+  gap: 0;
+  margin: 0 0 8px;
+  padding: 0;
 }
 
-.pick-zone-heading,
-.pick-zone-heading > div,
-.pick-zone-summary {
+.pick-zone-heading {
   display: flex;
+  min-height: 58px;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
 }
 
-.pick-zone-heading > div:first-child { display: block; }
-.pick-zone-heading h2 { display: flex; align-items: center; gap: 7px; margin: 2px 0; }
-.pick-zone-heading p { margin: 0; color: var(--text-muted); }
-.pick-zone-toolbar { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
-.pick-zone-toolbar label { display: grid; gap: 4px; min-width: 190px; }
-.pick-zone-summary { justify-content: flex-start; flex-wrap: wrap; }
-.pick-zone-summary span { padding: 7px 10px; border-radius: 6px; background: var(--surface-subtle); }
-.pick-zone-summary strong { margin-right: 4px; }
-.pick-zone-table code { font-weight: 700; color: var(--text); }
+.pick-zone-heading > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.pick-zone-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.pick-zone-heading h2 svg {
+  flex: 0 0 auto;
+}
+
+.pick-zone-heading p {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.pick-zone-toolbar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 220px));
+  align-items: end;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.pick-zone-toolbar label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  color: var(--label-ink);
+  font-size: 8.5px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.pick-zone-toolbar select {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-height);
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--control-ink);
+  font-size: 10.5px;
+  text-transform: none;
+}
+
+.pick-zone-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.pick-zone-summary span {
+  display: flex;
+  min-height: 36px;
+  align-items: baseline;
+  gap: 4px;
+  padding: 7px 9px;
+  border-right: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 9.5px;
+}
+
+.pick-zone-summary span:last-child {
+  border-right: 0;
+}
+
+.pick-zone-summary strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pick-zone-table {
+  min-width: 540px;
+  table-layout: fixed;
+  font-size: 10.5px;
+}
+
+.pick-zone-table th:first-child {
+  width: 25%;
+}
+
+.pick-zone-table th:nth-child(2) {
+  width: 35%;
+}
+
+.pick-zone-table th:nth-child(3),
+.pick-zone-table th:nth-child(4) {
+  width: 10%;
+}
+
+.pick-zone-table th:last-child {
+  width: 20%;
+}
+
+.pick-zone-table th,
+.pick-zone-table td {
+  padding-right: 8px;
+  padding-left: 8px;
+}
+
+.pick-zone-table code {
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.pick-zone-table .table-empty-row {
+  height: 54px;
+}
+
+.pick-zone-panel > .inline-command-error {
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.pick-zone-panel > .workspace-state,
+.pick-zone-panel > .workspace-empty {
+  display: grid;
+  min-height: 76px;
+  align-content: center;
+  justify-items: center;
+  gap: 3px;
+  padding: 14px;
+  color: var(--ink-soft);
+  text-align: center;
+}
+
+.pick-zone-panel > .workspace-state.compact {
+  min-height: 76px;
+}
+
+.pick-zone-panel > .workspace-state h3,
+.pick-zone-panel > .workspace-empty h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.pick-zone-panel > .workspace-state p,
+.pick-zone-panel > .workspace-empty p {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+@media (max-width: 700px) {
+  .pick-zone-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pick-zone-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pick-zone-summary span {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .pick-zone-summary span:last-child {
+    border-bottom: 0;
+  }
+}

@@ -19,27 +19,38 @@
     z-index: 12;
     top: 0;
     display: grid;
-    grid-template-columns: minmax(260px, 1.4fr) repeat(3, minmax(132px, .72fr)) repeat(2, minmax(142px, .72fr)) auto auto auto;
-    gap: 8px;
-    align-items: end;
-    padding: 12px 16px 9px;
+    grid-template-columns: minmax(220px, .8fr) minmax(620px, 2.4fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 7px 10px;
     border-bottom: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--surface-raised) 94%, transparent);
-    box-shadow: 0 7px 22px rgb(0 0 0 / 7%);
+    background: var(--topbar-background);
+    box-shadow: 0 2px 10px rgb(0 0 0 / 6%);
     backdrop-filter: blur(15px);
 }
 
 .labor-heading {
     display: flex;
-    gap: 10px;
+    gap: 9px;
     align-items: center;
     min-width: 0;
 }
 
-.labor-heading > svg {
-    width: 25px;
-    height: 25px;
+.labor-heading-icon {
+    display: grid;
+    width: 31px;
+    height: 31px;
+    flex: 0 0 31px;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border-default));
+    border-radius: 6px;
     color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.labor-heading-icon .ui-icon {
+    width: 17px;
+    height: 17px;
 }
 
 .labor-heading h1,
@@ -51,25 +62,41 @@
 }
 
 .labor-heading h1 {
-    font-size: 1.18rem;
+    font-size: 1rem;
     letter-spacing: -.025em;
+    line-height: 1.15;
 }
 
-.labor-heading span,
-.labor-panel > header span,
+.labor-heading > div > span,
 .labor-heading + span {
     color: var(--text-secondary);
-    font-size: .72rem;
+    font-size: .65rem;
+}
+
+.labor-filter-grid {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(3, minmax(108px, 1fr)) repeat(2, minmax(128px, .92fr));
+    gap: 6px;
+    align-items: end;
+}
+
+.labor-toolbar-actions {
+    display: flex;
+    align-items: end;
+    justify-content: flex-end;
+    gap: 5px;
 }
 
 .labor-toolbar label,
 .labor-drawer label {
     display: grid;
-    gap: 4px;
+    gap: 2px;
     color: var(--text-secondary);
-    font-size: .68rem;
-    font-weight: 700;
-    letter-spacing: .025em;
+    font-size: .6rem;
+    font-weight: 760;
+    letter-spacing: .04em;
+    text-transform: uppercase;
 }
 
 .labor-toolbar select,
@@ -78,14 +105,14 @@
 .labor-drawer input,
 .labor-drawer textarea {
     min-width: 0;
-    height: 32px;
-    padding: 0 8px;
+    height: var(--control-height);
+    padding: 0 7px;
     border: 1px solid var(--border-default);
-    border-radius: 5px;
+    border-radius: 4px;
     color: var(--text-primary);
-    background: var(--surface-raised);
+    background: var(--surface);
     font: inherit;
-    font-size: .76rem;
+    font-size: .7rem;
 }
 
 .labor-drawer textarea {
@@ -98,26 +125,38 @@
 .labor-history-toggle {
     display: flex !important;
     align-items: center;
-    align-self: center;
-    gap: 6px !important;
+    gap: 5px !important;
+    min-height: var(--control-height);
+    padding: 0 7px;
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    background: var(--surface);
+    font-size: .65rem !important;
+    letter-spacing: 0 !important;
+    text-transform: none;
     white-space: nowrap;
 }
 
 .labor-history-toggle input {
+    width: 14px;
+    height: 14px;
     margin: 0;
+    accent-color: var(--accent);
 }
 
 .labor-window-help {
-    grid-column: 2 / -1;
+    display: block;
+    margin-top: 2px;
     color: var(--text-tertiary);
-    font-size: .66rem;
-    text-align: right;
+    font-size: .58rem;
+    font-weight: 620;
+    line-height: 1.2;
 }
 
 .labor-body {
     display: grid;
-    gap: 10px;
-    padding: 10px 14px 18px;
+    gap: 8px;
+    padding: 8px 10px 14px;
 }
 
 .labor-command-center > header {
@@ -125,50 +164,59 @@
 }
 
 .labor-command-permissions {
+    overflow: hidden;
+    max-width: 55%;
+    padding: 3px 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border-default));
+    border-radius: 999px;
     color: var(--accent) !important;
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: .62rem !important;
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    font-size: .58rem !important;
+    font-weight: 720;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .labor-command-center > form {
     display: grid;
-    gap: 9px;
-    padding: 10px 11px;
+    gap: 6px;
+    padding: 7px 9px 8px;
 }
 
 .labor-command-scope,
 .labor-form-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(150px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(4, minmax(135px, 1fr));
+    gap: 6px;
     align-items: end;
 }
 
 .labor-form-grid-wide {
-    grid-template-columns: repeat(5, minmax(140px, 1fr));
+    grid-template-columns: repeat(5, minmax(130px, 1fr));
 }
 
 .labor-command-center label {
     display: grid;
-    gap: 3px;
+    gap: 2px;
     min-width: 0;
     color: var(--text-secondary);
-    font-size: .65rem;
+    font-size: .59rem;
     font-weight: 720;
-    letter-spacing: .025em;
+    letter-spacing: .035em;
+    text-transform: uppercase;
 }
 
 .labor-command-center select,
 .labor-command-center input {
     min-width: 0;
-    height: 31px;
-    padding: 0 8px;
+    height: var(--control-height);
+    padding: 0 7px;
     border: 1px solid var(--border-default);
-    border-radius: 5px;
+    border-radius: 4px;
     color: var(--text-primary);
-    background: var(--surface-raised);
+    background: var(--surface);
     font: inherit;
-    font-size: .72rem;
+    font-size: .68rem;
 }
 
 .labor-command-center .labor-check {
@@ -185,20 +233,20 @@
 
 .labor-roster-state {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
-    min-height: 31px;
+    min-height: var(--control-height);
     color: var(--text-tertiary);
-    font-size: .67rem;
+    font-size: .62rem;
 }
 
 .labor-reference-search {
     display: flex;
-    gap: 9px;
+    gap: 7px;
     align-items: center;
-    padding: 7px 9px;
+    padding: 5px 7px;
     border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--border-default));
-    border-radius: 5px;
+    border-radius: 4px;
     color: var(--text-secondary);
     background: color-mix(in srgb, var(--accent) 3%, transparent);
     font-size: .67rem;
@@ -207,9 +255,9 @@
 .labor-eligibility {
     display: grid;
     grid-template-columns: auto repeat(3, minmax(180px, 1fr));
-    gap: 8px 14px;
+    gap: 6px 12px;
     align-items: start;
-    padding: 8px 10px;
+    padding: 6px 8px;
     border-left: 3px solid var(--accent);
     background: var(--surface-subtle);
     font-size: .66rem;
@@ -243,9 +291,9 @@
 .labor-command-center footer {
     display: flex;
     justify-content: flex-end;
-    gap: 10px;
+    gap: 6px;
     align-items: center;
-    padding-top: 8px;
+    padding-top: 5px;
     border-top: 1px solid var(--border-subtle);
 }
 
@@ -258,19 +306,24 @@
 
 .labor-metrics {
     display: grid;
-    grid-template-columns: repeat(6, minmax(120px, 1fr));
+    grid-template-columns: repeat(6, minmax(112px, 1fr));
     gap: 1px;
     overflow: hidden;
     margin: 0;
     border: 1px solid var(--border-subtle);
-    border-radius: 7px;
+    border-radius: 5px;
     background: var(--border-subtle);
 }
 
 .labor-metrics > div {
+    display: grid;
     min-width: 0;
-    padding: 9px 12px 8px;
-    background: var(--surface-raised);
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    column-gap: 8px;
+    align-items: center;
+    padding: 6px 9px;
+    background: var(--surface);
 }
 
 .labor-metrics > div.attention {
@@ -278,37 +331,47 @@
 }
 
 .labor-metrics dt {
+    grid-column: 1;
+    grid-row: 1;
     color: var(--text-secondary);
-    font-size: .66rem;
+    font-size: .59rem;
     font-weight: 750;
     letter-spacing: .055em;
     text-transform: uppercase;
+    white-space: nowrap;
 }
 
 .labor-metrics dd {
-    margin: 2px 0 0;
-    font-size: 1.35rem;
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    margin: 0;
+    font-size: 1.08rem;
     font-variant-numeric: tabular-nums;
     font-weight: 760;
     line-height: 1.1;
 }
 
 .labor-metrics small {
+    grid-column: 1;
+    grid-row: 2;
+    overflow: hidden;
     color: var(--text-tertiary);
-    font-size: .64rem;
+    font-size: .57rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .labor-live-grid {
     display: grid;
     grid-template-columns: minmax(420px, .9fr) minmax(590px, 1.35fr);
-    gap: 10px;
-    min-height: 262px;
+    gap: 8px;
+    min-height: 220px;
 }
 
 .labor-reference-grid {
     display: grid;
     grid-template-columns: minmax(480px, 1.1fr) minmax(400px, .9fr);
-    gap: 10px;
+    gap: 8px;
 }
 
 .labor-standards-panel {
@@ -319,8 +382,8 @@
     min-width: 0;
     overflow: hidden;
     border: 1px solid var(--border-subtle);
-    border-radius: 7px;
-    background: var(--surface-raised);
+    border-radius: 5px;
+    background: var(--surface);
     box-shadow: 0 2px 7px rgb(0 0 0 / 3%);
 }
 
@@ -328,28 +391,45 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    min-height: 42px;
-    padding: 7px 11px;
+    min-height: 36px;
+    gap: 10px;
+    padding: 5px 9px;
     border-bottom: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--surface-subtle) 64%, var(--surface-raised));
+    background: var(--surface-raised);
 }
 
 .labor-panel > header h2 {
-    font-size: .83rem;
-    letter-spacing: .01em;
+    font-size: .76rem;
+    letter-spacing: .005em;
 }
 
-.labor-panel > header span {
+.labor-command-center > header > div > span {
     display: block;
     margin-top: 2px;
+    color: var(--text-secondary);
+    font-size: .62rem;
+}
+
+.labor-panel-count {
+    display: inline-flex;
+    min-height: 19px;
+    align-items: center;
+    padding: 1px 6px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    background: var(--surface);
+    font-size: .58rem;
+    font-weight: 680;
+    white-space: nowrap;
 }
 
 .labor-live-panel .labor-table-scroll {
-    max-height: 286px;
+    max-height: 252px;
 }
 
 .labor-summary-panel .labor-table-scroll {
-    max-height: 240px;
+    max-height: 220px;
 }
 
 .labor-table-scroll,
@@ -362,18 +442,20 @@
     width: 100%;
     border-collapse: collapse;
     table-layout: auto;
-    font-size: .72rem;
+    color: var(--table-ink);
+    font-size: .68rem;
 }
 
 .labor-panel th {
     position: sticky;
     z-index: 1;
     top: 0;
-    padding: 6px 8px;
+    height: var(--table-head-height);
+    padding: 4px 7px;
     border-bottom: 1px solid var(--border-default);
-    color: var(--text-secondary);
+    color: var(--label-ink);
     background: var(--surface-raised);
-    font-size: .61rem;
+    font-size: .57rem;
     font-weight: 760;
     letter-spacing: .05em;
     text-align: left;
@@ -382,8 +464,8 @@
 }
 
 .labor-panel td {
-    height: 36px;
-    padding: 4px 8px;
+    height: var(--table-row-height);
+    padding: var(--table-cell-padding-y) 7px;
     border-bottom: 1px solid var(--border-subtle);
     font-variant-numeric: tabular-nums;
     vertical-align: middle;
@@ -395,7 +477,7 @@
 }
 
 .labor-panel tbody tr:hover td {
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    background: var(--row-hover);
 }
 
 .labor-panel td strong,
@@ -404,31 +486,32 @@
 }
 
 .labor-panel td strong {
-    font-size: .74rem;
+    color: var(--text-primary);
+    font-size: .69rem;
 }
 
 .labor-panel td small {
     overflow: hidden;
     max-width: 250px;
     color: var(--text-tertiary);
-    font-size: .61rem;
+    font-size: .57rem;
     text-overflow: ellipsis;
 }
 
 .labor-panel code {
     color: var(--text-primary);
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: .68rem;
+    font-size: .63rem;
     font-weight: 700;
 }
 
 .labor-status {
     display: inline-flex;
     align-items: center;
-    min-height: 20px;
-    padding: 2px 7px;
+    min-height: 18px;
+    padding: 1px 6px;
     border-radius: 999px;
-    font-size: .61rem;
+    font-size: .57rem;
     font-weight: 760;
     letter-spacing: .02em;
     white-space: nowrap;
@@ -462,13 +545,22 @@
 
 .labor-row-actions .text-button,
 .labor-panel td > .text-button {
-    min-height: 24px;
+    min-height: 22px;
     padding: 2px 5px;
-    font-size: .66rem;
+    font-size: .61rem;
+}
+
+.labor-panel .numeric {
+    text-align: right;
+}
+
+.labor-action-column {
+    width: 1%;
+    text-align: right;
 }
 
 .labor-subtable {
-    max-height: 220px;
+    max-height: 205px;
     border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -480,11 +572,11 @@
     position: sticky;
     z-index: 2;
     top: 0;
-    padding: 6px 9px;
+    padding: 5px 8px;
     border-bottom: 1px solid var(--border-subtle);
     color: var(--text-secondary);
     background: var(--surface-subtle);
-    font-size: .66rem;
+    font-size: .6rem;
     letter-spacing: .04em;
     text-transform: uppercase;
 }
@@ -492,10 +584,10 @@
 .labor-class-key {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px 12px;
-    padding: 8px 10px;
+    gap: 5px 10px;
+    padding: 6px 8px;
     color: var(--text-secondary);
-    font-size: .67rem;
+    font-size: .62rem;
 }
 
 .labor-class-key span {
@@ -504,8 +596,8 @@
 }
 
 .labor-inline-empty,
-.empty-row td {
-    padding: 18px 10px !important;
+.labor-workspace .empty-row td {
+    padding: 14px 9px !important;
     color: var(--text-tertiary);
     text-align: center;
 }
@@ -627,17 +719,19 @@
     font-size: .72rem;
 }
 
-@media (max-width: 1450px) {
+@media (max-width: 1350px) {
     .labor-toolbar {
-        grid-template-columns: minmax(230px, 1.1fr) repeat(3, minmax(120px, .7fr)) repeat(2, minmax(130px, .65fr)) auto auto;
+        grid-template-columns: minmax(220px, 1fr) auto;
     }
 
-    .labor-history-toggle {
+    .labor-filter-grid {
+        grid-column: 1 / -1;
+        grid-row: 2;
+    }
+
+    .labor-toolbar-actions {
         grid-column: 2;
-    }
-
-    .labor-window-help {
-        grid-column: 3 / -1;
+        grid-row: 1;
     }
 
     .labor-live-grid {
@@ -650,25 +744,6 @@
 }
 
 @media (max-width: 1180px) {
-    .labor-toolbar {
-        grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(120px, .68fr)) auto auto;
-    }
-
-    .labor-toolbar label:nth-of-type(4),
-    .labor-toolbar label:nth-of-type(5) {
-        grid-row: 2;
-    }
-
-    .labor-history-toggle {
-        grid-row: 2;
-        grid-column: auto;
-    }
-
-    .labor-window-help {
-        grid-row: 2;
-        grid-column: auto / span 2;
-    }
-
     .labor-metrics {
         grid-template-columns: repeat(3, 1fr);
     }
@@ -686,5 +761,25 @@
     .labor-form-grid,
     .labor-form-grid-wide {
         grid-template-columns: repeat(3, minmax(140px, 1fr));
+    }
+}
+
+@media (max-width: 1040px) {
+    .labor-filter-grid {
+        grid-template-columns: repeat(3, minmax(120px, 1fr));
+    }
+
+    .labor-command-scope,
+    .labor-form-grid,
+    .labor-form-grid-wide {
+        grid-template-columns: repeat(2, minmax(150px, 1fr));
+    }
+
+    .labor-command-permissions {
+        max-width: 45%;
+    }
+
+    .labor-drawer {
+        width: min(430px, 48vw);
     }
 }

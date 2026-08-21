@@ -247,8 +247,6 @@ pub(crate) fn PickWavesWorkspace(
     });
 
     view! {
-        <PickZonesWorkspace access=zone_access on_unauthorized/>
-        <PickClustersWorkspace access=cluster_access on_unauthorized/>
         <section class="pick-wave-page operations-page">
             <header class="page-heading pick-wave-heading">
                 <div><span class="eyebrow">"Outbound execution"</span><h1>"Pick waves"</h1></div>
@@ -282,6 +280,10 @@ pub(crate) fn PickWavesWorkspace(
                 <SplitPaneHandle layout/>
                 <section class="pick-wave-detail split-detail"><WaveDetail signals submit_release open_cancel/></section>
             </div>
+        </section>
+        <section class="pick-wave-support-grid" aria-label="Directed picking workspaces">
+            <PickZonesWorkspace access=zone_access on_unauthorized/>
+            <PickClustersWorkspace access=cluster_access on_unauthorized/>
         </section>
         <Show when=move || signals.dialog.get().is_some()>{move || signals.dialog.get().map(|dialog| view! { <WaveDialog dialog signals drafts facilities locations orders submit_plan submit_cancel/> })}</Show>
     }
