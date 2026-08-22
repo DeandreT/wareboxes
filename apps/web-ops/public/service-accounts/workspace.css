@@ -1,38 +1,80 @@
 .service-accounts-workspace {
   display: grid;
-  gap: 1rem;
+  min-width: 0;
+  gap: 8px;
 }
 
 .service-accounts-heading > div:last-child,
 .service-account-actions,
 .service-account-dialog footer {
-  align-items: center;
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: .65rem;
+  gap: 6px;
 }
 
 .service-account-toolbar {
-  align-items: end;
-  background: var(--surface-raised, #fff);
-  border: 1px solid var(--border-subtle, #d9ddde);
-  border-radius: .65rem;
   display: flex;
-  gap: .75rem;
-  padding: .75rem;
+  min-height: var(--toolbar-height);
+  align-items: end;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--surface-raised);
 }
 
 .service-account-toolbar label,
 .service-account-form-grid label,
 .service-account-dialog form > label {
   display: grid;
-  gap: .35rem;
+  min-width: 0;
+  gap: 3px;
+}
+
+.service-account-toolbar label > span,
+.service-account-form-grid label > span,
+.service-account-dialog form > label > span,
+.service-account-scope-grid legend {
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.service-accounts-workspace input:not([type="checkbox"]):not([type="radio"]),
+.service-accounts-workspace select,
+.service-accounts-workspace textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--control-ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.service-accounts-workspace textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.service-accounts-workspace input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+.service-accounts-workspace select:focus-visible,
+.service-accounts-workspace textarea:focus-visible {
+  border-color: var(--blue);
 }
 
 .service-account-layout {
   display: grid;
-  gap: 1rem;
-  grid-template-columns: minmax(42rem, 1.35fr) minmax(30rem, 1fr);
+  min-width: 0;
+  grid-template-columns: minmax(0, 1.4fr) minmax(24rem, 1fr);
+  align-items: start;
+  gap: 8px;
 }
 
 .service-account-list,
@@ -42,23 +84,26 @@
 .service-account-secret,
 .service-account-error,
 .service-account-retry {
-  background: var(--surface-raised, #fff);
-  border: 1px solid var(--border-subtle, #d9ddde);
-  border-radius: .65rem;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--surface);
 }
 
 .service-account-list > header,
 .service-account-detail > header,
 .service-account-evidence-panel > header {
-  align-items: start;
   display: flex;
+  min-height: 40px;
+  align-items: start;
   justify-content: space-between;
-  padding: .9rem 1rem;
+  padding: 6px 8px;
+  background: var(--surface-raised);
 }
 
 .service-account-list > .table-scroll,
 .service-account-evidence-panel > .table-scroll {
-  border-top: 1px solid var(--border-subtle, #d9ddde);
+  border-top: 1px solid var(--line);
 }
 
 .service-account-list .dense-table {
@@ -72,33 +117,37 @@
   display: block;
 }
 
-.permission-list,
+.service-accounts-workspace .permission-list,
 .service-account-scope-summary span {
   display: flex;
   flex-wrap: wrap;
-  gap: .3rem;
+  gap: 3px;
 }
 
-.permission-list span,
-.scope-pill {
-  background: var(--surface-muted, #eef1f1);
+.service-accounts-workspace .permission-list span,
+.service-accounts-workspace .scope-pill {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
   border-radius: 999px;
-  font-size: .75rem;
-  padding: .18rem .45rem;
+  background: var(--muted-badge);
+  color: var(--muted-badge-ink);
+  font-size: 9px;
 }
 
-.scope-pill.permission {
-  background: #e7f1ef;
-  color: #145a50;
+.service-accounts-workspace .scope-pill.permission {
+  border-color: color-mix(in srgb, var(--green) 35%, var(--line));
+  background: var(--green-soft);
+  color: var(--success-ink);
 }
 
 .service-account-detail-empty,
 .service-account-state {
-  align-content: center;
   display: grid;
-  gap: .4rem;
-  min-height: 12rem;
-  padding: 1.5rem;
+  min-height: 10rem;
+  align-content: center;
+  gap: 4px;
+  padding: 16px;
+  color: var(--ink-soft);
   text-align: center;
 }
 
@@ -110,15 +159,16 @@
 .service-account-metadata,
 .service-account-scope-summary {
   display: grid;
-  gap: .65rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  padding: .8rem 1rem;
+  gap: 6px;
+  padding: 7px 8px;
 }
 
 .service-account-metadata > div,
 .service-account-scope-summary > div {
   display: grid;
-  gap: .2rem;
+  min-width: 0;
+  gap: 2px;
 }
 
 .service-account-scope-summary > div:last-child {
@@ -127,116 +177,124 @@
 
 .service-account-metadata span,
 .service-account-scope-summary strong {
-  color: var(--text-muted, #667072);
-  font-size: .75rem;
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
 .service-account-actions {
-  border-block: 1px solid var(--border-subtle, #d9ddde);
-  padding: .8rem 1rem;
+  padding: 6px 8px;
+  border-block: 1px solid var(--line);
 }
 
 .service-account-evidence-panel + .service-account-evidence-panel {
-  border-top: 1px solid var(--border-subtle, #d9ddde);
+  border-top: 1px solid var(--line);
 }
 
 .service-account-events {
   display: grid;
-  gap: .7rem;
-  list-style: none;
+  gap: 5px;
   margin: 0;
-  padding: 0 1rem 1rem;
+  padding: 0 8px 8px;
+  list-style: none;
 }
 
 .service-account-events li {
   display: grid;
-  gap: .55rem;
-  grid-template-columns: .65rem 1fr;
+  grid-template-columns: 7px 1fr;
+  gap: 6px;
 }
 
 .service-account-events li div,
 .service-account-secret div {
   display: grid;
-  gap: .2rem;
+  gap: 2px;
 }
 
-.history-marker {
-  background: #237a6f;
+.service-accounts-workspace .history-marker {
+  width: 6px;
+  height: 6px;
+  margin-top: 4px;
   border-radius: 50%;
-  height: .55rem;
-  margin-top: .3rem;
-  width: .55rem;
+  background: var(--green);
 }
 
 .service-account-secret,
 .service-account-error,
 .service-account-retry {
-  align-items: center;
   display: grid;
-  gap: .8rem;
-  grid-template-columns: minmax(14rem, auto) minmax(24rem, 1fr) auto;
-  padding: .8rem 1rem;
+  grid-template-columns: minmax(14rem, 0.65fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
 }
 
 .service-account-secret {
-  background: #fff7dd;
-  border-color: #d7b85c;
+  border-color: var(--amber);
+  background: var(--amber-soft);
+  color: var(--warning-ink);
 }
 
 .service-account-secret input {
-  font-family: ui-monospace, monospace;
   width: 100%;
+  font-family: ui-monospace, monospace;
 }
 
 .service-account-error {
-  background: #fff0ef;
-  border-color: #dc8e89;
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--danger-ink);
 }
 
-.load-more {
-  margin: .75rem 1rem;
+.service-accounts-workspace .load-more {
+  margin: 6px 8px;
 }
 
 .service-account-dialog-backdrop {
-  align-items: start;
-  background: rgb(13 20 21 / 55%);
-  display: grid;
+  position: fixed;
   inset: 0;
+  z-index: 80;
+  display: grid;
+  align-items: start;
   justify-items: center;
   overflow: auto;
-  padding: 5vh 2rem;
-  position: fixed;
-  z-index: 80;
+  padding: 5vh 24px;
+  background: rgb(13 20 21 / 55%);
 }
 
 .service-account-dialog {
-  background: var(--surface-raised, #fff);
-  border-radius: .75rem;
-  box-shadow: 0 1.2rem 4rem rgb(0 0 0 / 28%);
+  width: min(70rem, 100%);
   max-width: 70rem;
-  padding: 1rem;
-  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .service-account-dialog > header {
-  align-items: start;
   display: flex;
+  align-items: start;
   justify-content: space-between;
-  margin-bottom: 1rem;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
 }
 
 .service-account-dialog form,
 .service-account-dialog fieldset {
   display: grid;
-  gap: .75rem;
+  gap: 7px;
 }
 
 .service-account-form-grid,
 .service-account-scope-grid {
   display: grid;
-  gap: .8rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
 }
 
 .service-account-scope-grid {
@@ -244,48 +302,63 @@
 }
 
 .service-account-scope-grid fieldset {
-  border: 1px solid var(--border-subtle, #d9ddde);
-  border-radius: .5rem;
-  padding: .7rem;
+  min-width: 0;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
 }
 
-.scope-checks {
+.service-accounts-workspace .scope-checks {
   display: grid;
-  gap: .35rem;
   max-height: 16rem;
   overflow: auto;
+  gap: 4px;
 }
 
-.scope-checks label,
-.scope-all {
-  align-items: center;
+.service-accounts-workspace .scope-checks label,
+.service-accounts-workspace .scope-all {
   display: flex;
-  gap: .45rem;
+  align-items: center;
+  gap: 5px;
 }
 
-.secret-warning {
-  background: #fff7dd;
-  border-left: .25rem solid #c08b16;
+.service-accounts-workspace .scope-all {
+  margin-bottom: 5px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.service-accounts-workspace .secret-warning {
   display: grid;
-  gap: .25rem;
-  padding: .7rem;
+  gap: 2px;
+  padding: 7px;
+  border-left: 3px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--warning-ink);
 }
 
-.secret-warning.danger {
-  background: #fff0ef;
-  border-color: #b64a43;
+.service-accounts-workspace .secret-warning.danger {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--danger-ink);
+}
+
+.service-account-help {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 10px;
 }
 
 .service-account-dialog footer {
-  border-top: 1px solid var(--border-subtle, #d9ddde);
   justify-content: end;
-  margin-top: .25rem;
-  padding-top: .8rem;
+  margin-top: 2px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
 }
 
-@media (max-width: 78rem) {
-  .service-account-layout,
-  .service-account-scope-grid {
+@media (max-width: 1100px) {
+  .service-account-layout {
     grid-template-columns: 1fr;
   }
 }

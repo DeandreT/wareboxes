@@ -30,6 +30,12 @@ enum MonitorTab {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum IntegrationDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum MappingTab {
     Owners,
     Items,
@@ -84,10 +90,12 @@ struct MonitorSignals {
     outbound_history: RwSignal<Vec<Option<OpaqueCursor>>>,
     inbound_generation: RwSignal<u64>,
     outbound_generation: RwSignal<u64>,
-    detail_generation: RwSignal<u64>,
+    inbound_detail_generation: RwSignal<u64>,
+    outbound_detail_generation: RwSignal<u64>,
     inbound_loading: RwSignal<bool>,
     outbound_loading: RwSignal<bool>,
-    detail_loading: RwSignal<bool>,
+    inbound_detail_loading: RwSignal<bool>,
+    outbound_detail_loading: RwSignal<bool>,
     command_pending: RwSignal<bool>,
     error: RwSignal<Option<String>>,
     notice: RwSignal<Option<String>>,
@@ -125,10 +133,12 @@ impl MonitorSignals {
             outbound_history: RwSignal::new(Vec::new()),
             inbound_generation: RwSignal::new(0),
             outbound_generation: RwSignal::new(0),
-            detail_generation: RwSignal::new(0),
+            inbound_detail_generation: RwSignal::new(0),
+            outbound_detail_generation: RwSignal::new(0),
             inbound_loading: RwSignal::new(false),
             outbound_loading: RwSignal::new(false),
-            detail_loading: RwSignal::new(false),
+            inbound_detail_loading: RwSignal::new(false),
+            outbound_detail_loading: RwSignal::new(false),
             command_pending: RwSignal::new(false),
             error: RwSignal::new(None),
             notice: RwSignal::new(None),
@@ -177,22 +187,28 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
             <header class="integration-toolbar">
                 <div class="segmented-control" role="tablist" aria-label="Integration directions">
                     <button
+                        id="integration-inbound-tab"
                         type="button"
                         role="tab"
+                        aria-controls="integration-inbound-panel"
                         aria-selected=move || (signals.tab.get() == MonitorTab::Inbound).to_string()
                         class:active=move || signals.tab.get() == MonitorTab::Inbound
                         on:click=move |_| signals.tab.set(MonitorTab::Inbound)
                     >"Inbound"</button>
                     <button
+                        id="integration-outbound-tab"
                         type="button"
                         role="tab"
+                        aria-controls="integration-outbound-panel"
                         aria-selected=move || (signals.tab.get() == MonitorTab::Outbound).to_string()
                         class:active=move || signals.tab.get() == MonitorTab::Outbound
                         on:click=move |_| signals.tab.set(MonitorTab::Outbound)
                     >"Outbound"</button>
                     <button
+                        id="integration-mappings-tab"
                         type="button"
                         role="tab"
+                        aria-controls="integration-mappings-panel"
                         aria-selected=move || (signals.tab.get() == MonitorTab::Mappings).to_string()
                         class:active=move || signals.tab.get() == MonitorTab::Mappings
                         on:click=move |_| signals.tab.set(MonitorTab::Mappings)
@@ -260,63 +276,129 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                 </Show>
             </header>
 
-            <Show
-                when=move || signals.tab.get() == MonitorTab::Mappings
-                fallback=move || view! {
-                    {move || signals.error.get().map(|message| view! {
-                        <div class="integration-error" role="alert">{message}</div>
-                    })}
-                    {move || signals.notice.get().map(|message| view! {
-                        <div class="integration-notice" role="status">{message}</div>
-                    })}
-
-                    <div
-                        class="integration-body split-workspace"
-                        style=move || layout.style()
-                        data-pane-mode=move || layout.mode_attribute()
-                    >
-                        <section class="integration-list split-master">
-                            <Show
-                                when=move || signals.tab.get() == MonitorTab::Inbound
-                                fallback=move || view! { <OutboundTable signals select=select_outbound/> }
-                            >
-                                <InboundTable signals select=select_inbound/>
-                            </Show>
-                        </section>
-                        <SplitPaneHandle layout/>
-                        <aside class="integration-detail split-detail">
-                            <Show
-                                when=move || signals.tab.get() == MonitorTab::Inbound
-                                fallback=move || view! { <OutboundDetail signals/> }
-                            >
-                                <InboundDetail signals/>
-                            </Show>
-                        </aside>
-                    </div>
-                }
-            >
-                <IntegrationMappingsWorkspace on_unauthorized/>
+            <Show when=move || signals.tab.get() != MonitorTab::Mappings>
+                {move || signals.error.get().map(|message| view! {
+                    <div class="integration-error" role="alert">{message}</div>
+                })}
+                {move || signals.notice.get().map(|message| view! {
+                    <div class="integration-notice" role="status">{message}</div>
+                })}
             </Show>
+            <IntegrationDirectionPanel
+                signals
+                layout
+                direction=IntegrationDirection::Inbound
+                select_inbound
+                select_outbound
+            />
+            <IntegrationDirectionPanel
+                signals
+                layout
+                direction=IntegrationDirection::Outbound
+                select_inbound
+                select_outbound
+            />
+            <IntegrationMappingsWorkspace on_unauthorized monitor_tab=signals.tab/>
         </section>
     }
 }
 
 #[component]
-fn IntegrationMappingsWorkspace(on_unauthorized: Callback<()>) -> impl IntoView {
+fn IntegrationDirectionPanel(
+    signals: MonitorSignals,
+    layout: SplitPaneState,
+    direction: IntegrationDirection,
+    select_inbound: Callback<i64>,
+    select_outbound: Callback<i64>,
+) -> impl IntoView {
+    let (monitor_tab, panel_id, tab_id) = match direction {
+        IntegrationDirection::Inbound => (
+            MonitorTab::Inbound,
+            "integration-inbound-panel",
+            "integration-inbound-tab",
+        ),
+        IntegrationDirection::Outbound => (
+            MonitorTab::Outbound,
+            "integration-outbound-panel",
+            "integration-outbound-tab",
+        ),
+    };
+
+    view! {
+        <div
+            id=panel_id
+            class="integration-body split-workspace"
+            role="tabpanel"
+            aria-labelledby=tab_id
+            hidden=move || signals.tab.get() != monitor_tab
+            style=move || layout.style()
+            data-pane-mode=move || layout.mode_attribute()
+        >
+            <Show when=move || signals.tab.get() == monitor_tab>
+                <section class="integration-list split-master">
+                    <Show
+                        when=move || direction == IntegrationDirection::Inbound
+                        fallback=move || view! { <OutboundTable signals select=select_outbound/> }
+                    >
+                        <InboundTable signals select=select_inbound/>
+                    </Show>
+                </section>
+                <SplitPaneHandle layout/>
+                <aside class="integration-detail split-detail">
+                    <Show
+                        when=move || direction == IntegrationDirection::Inbound
+                        fallback=move || view! { <OutboundDetail signals/> }
+                    >
+                        <InboundDetail signals/>
+                    </Show>
+                </aside>
+            </Show>
+        </div>
+    }
+}
+
+#[component]
+fn IntegrationMappingsWorkspace(
+    on_unauthorized: Callback<()>,
+    monitor_tab: RwSignal<MonitorTab>,
+) -> impl IntoView {
     let tab = RwSignal::new(MappingTab::Owners);
     view! {
-        <section class="integration-mappings-shell">
+        <section
+            id="integration-mappings-panel"
+            class="integration-mappings-shell"
+            role="tabpanel"
+            aria-labelledby="integration-mappings-tab"
+            hidden=move || monitor_tab.get() != MonitorTab::Mappings
+        >
             <nav class="segmented-control integration-mapping-tabs" role="tablist" aria-label="Order integration mappings">
-                <button type="button" role="tab" aria-selected=move || (tab.get() == MappingTab::Owners).to_string() class:active=move || tab.get() == MappingTab::Owners on:click=move |_| tab.set(MappingTab::Owners)>
+                <button id="integration-owner-mappings-tab" type="button" role="tab" aria-controls="integration-owner-mappings-panel" aria-selected=move || (tab.get() == MappingTab::Owners).to_string() class:active=move || tab.get() == MappingTab::Owners on:click=move |_| tab.set(MappingTab::Owners)>
                     "Owner identities"
                 </button>
-                <button type="button" role="tab" aria-selected=move || (tab.get() == MappingTab::Items).to_string() class:active=move || tab.get() == MappingTab::Items on:click=move |_| tab.set(MappingTab::Items)>
+                <button id="integration-item-mappings-tab" type="button" role="tab" aria-controls="integration-item-mappings-panel" aria-selected=move || (tab.get() == MappingTab::Items).to_string() class:active=move || tab.get() == MappingTab::Items on:click=move |_| tab.set(MappingTab::Items)>
                     "Item identities"
                 </button>
             </nav>
-            <Show when=move || tab.get() == MappingTab::Owners fallback=move || view! { <IntegrationItemMappingsWorkspace on_unauthorized/> }>
-                <IntegrationOwnerMappingsWorkspace on_unauthorized/>
-            </Show>
+            <div
+                id="integration-owner-mappings-panel"
+                role="tabpanel"
+                aria-labelledby="integration-owner-mappings-tab"
+                hidden=move || monitor_tab.get() != MonitorTab::Mappings || tab.get() != MappingTab::Owners
+            >
+                <Show when=move || monitor_tab.get() == MonitorTab::Mappings && tab.get() == MappingTab::Owners>
+                    <IntegrationOwnerMappingsWorkspace on_unauthorized/>
+                </Show>
+            </div>
+            <div
+                id="integration-item-mappings-panel"
+                role="tabpanel"
+                aria-labelledby="integration-item-mappings-tab"
+                hidden=move || monitor_tab.get() != MonitorTab::Mappings || tab.get() != MappingTab::Items
+            >
+                <Show when=move || monitor_tab.get() == MonitorTab::Mappings && tab.get() == MappingTab::Items>
+                    <IntegrationItemMappingsWorkspace on_unauthorized/>
+                </Show>
+            </div>
         </section>
     }
 }
@@ -433,7 +515,7 @@ fn PageFooter(
 ) -> impl IntoView {
     view! {
         <footer class="integration-page-footer">
-            <span>{move || if loading.get() { "Loading".to_owned() } else { format!("{} {label}",count.get()) }}</span>
+            <span>{move || if loading.get() { "Loading".to_owned() } else { format!("{} {label} on this page",count.get()) }}</span>
             <div>
                 <button type="button" class="button quiet-action compact" disabled=move || loading.get() || !has_previous.get() on:click=move |_| previous.run(())>"Previous"</button>
                 <button type="button" class="button quiet-action compact" disabled=move || loading.get() || !has_next.get() on:click=move |_| next.run(())>"Next"</button>
@@ -445,7 +527,7 @@ fn PageFooter(
 #[component]
 fn InboundDetail(signals: MonitorSignals) -> impl IntoView {
     view! { {move || {
-        if signals.detail_loading.get() {
+        if signals.inbound_detail_loading.get() {
             view! { <div class="integration-empty" aria-busy="true"><h2>"Loading receipt detail"</h2></div> }.into_any()
         } else {
             signals.inbound_detail.get().map_or_else(
@@ -551,7 +633,7 @@ fn inbound_detail_view(
 #[component]
 fn OutboundDetail(signals: MonitorSignals) -> impl IntoView {
     view! { {move || {
-        if signals.detail_loading.get() {
+        if signals.outbound_detail_loading.get() {
             view! { <div class="integration-empty" aria-busy="true"><h2>"Loading delivery detail"</h2></div> }.into_any()
         } else {
             signals.outbound_detail.get().map_or_else(
@@ -841,6 +923,21 @@ fn refresh_current(signals: MonitorSignals) {
     }
 }
 
+fn detail_refresh_is_current(
+    selected_at_request: Option<i64>,
+    selected_now: Option<i64>,
+    refresh_generation: Option<u64>,
+    current_generation: u64,
+) -> bool {
+    selected_at_request.is_some()
+        && selected_at_request == selected_now
+        && refresh_generation == Some(current_generation)
+}
+
+fn should_reconcile_detail(active_tab: MonitorTab, request_tab: MonitorTab) -> bool {
+    active_tab == request_tab
+}
+
 fn request_inbound(
     signals: MonitorSignals,
     cursor: Option<OpaqueCursor>,
@@ -850,6 +947,15 @@ fn request_inbound(
     signals.inbound_generation.set(generation);
     signals.inbound_loading.set(true);
     signals.error.set(None);
+    let selected_id = signals.selected_inbound_id.get_untracked();
+    let previous_detail = signals.inbound_detail.get_untracked();
+    let detail_generation = selected_id.map(|_| {
+        let generation = signals.inbound_detail_generation.get_untracked() + 1;
+        signals.inbound_detail_generation.set(generation);
+        signals.inbound_detail.set(None);
+        signals.inbound_detail_loading.set(true);
+        generation
+    });
     let filters = InboundIntegrationFilters {
         query: text_filter(&signals.search.get_untracked()),
         source_key: text_filter(&signals.source_key.get_untracked()),
@@ -864,12 +970,64 @@ fn request_inbound(
         }
         match result {
             Ok(page) => {
+                let selected_still_visible =
+                    selected_id.is_some_and(|id| page.items.iter().any(|receipt| receipt.id == id));
                 signals.inbound_page.set(page);
                 signals.inbound_cursor.set(cursor);
                 signals.inbound_history.set(history);
+                if detail_refresh_is_current(
+                    selected_id,
+                    signals.selected_inbound_id.get_untracked(),
+                    detail_generation,
+                    signals.inbound_detail_generation.get_untracked(),
+                ) {
+                    match (
+                        selected_id,
+                        selected_still_visible,
+                        should_reconcile_detail(signals.tab.get_untracked(), MonitorTab::Inbound),
+                    ) {
+                        (Some(id), true, true) => {
+                            let notice = signals.notice.get_untracked();
+                            select_inbound_receipt(signals, id);
+                            signals.notice.set(notice);
+                        }
+                        (Some(_), true, false) => {
+                            signals.inbound_detail.set(previous_detail.clone());
+                            signals.inbound_detail_loading.set(false);
+                        }
+                        (Some(_), false, _) => clear_inbound_selection(signals),
+                        _ => {}
+                    }
+                }
             }
-            Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
-            Err(error) => signals.error.set(Some(error.message)),
+            Err(error) if error.unauthorized => {
+                if detail_refresh_is_current(
+                    selected_id,
+                    signals.selected_inbound_id.get_untracked(),
+                    detail_generation,
+                    signals.inbound_detail_generation.get_untracked(),
+                ) {
+                    if signals.tab.get_untracked() != MonitorTab::Inbound {
+                        signals.inbound_detail.set(previous_detail.clone());
+                    }
+                    signals.inbound_detail_loading.set(false);
+                }
+                signals.on_unauthorized.run(());
+            }
+            Err(error) => {
+                if detail_refresh_is_current(
+                    selected_id,
+                    signals.selected_inbound_id.get_untracked(),
+                    detail_generation,
+                    signals.inbound_detail_generation.get_untracked(),
+                ) {
+                    if signals.tab.get_untracked() != MonitorTab::Inbound {
+                        signals.inbound_detail.set(previous_detail);
+                    }
+                    signals.inbound_detail_loading.set(false);
+                }
+                signals.error.set(Some(error.message));
+            }
         }
         signals.inbound_loading.set(false);
     });
@@ -884,6 +1042,15 @@ fn request_outbound(
     signals.outbound_generation.set(generation);
     signals.outbound_loading.set(true);
     signals.error.set(None);
+    let selected_id = signals.selected_outbound_id.get_untracked();
+    let previous_detail = signals.outbound_detail.get_untracked();
+    let detail_generation = selected_id.map(|_| {
+        let generation = signals.outbound_detail_generation.get_untracked() + 1;
+        signals.outbound_detail_generation.set(generation);
+        signals.outbound_detail.set(None);
+        signals.outbound_detail_loading.set(true);
+        generation
+    });
     let filters = OutboundIntegrationFilters {
         query: text_filter(&signals.search.get_untracked()),
         event_type: text_filter(&signals.event_type.get_untracked()),
@@ -899,23 +1066,75 @@ fn request_outbound(
         }
         match result {
             Ok(page) => {
+                let selected_still_visible =
+                    selected_id.is_some_and(|id| page.items.iter().any(|event| event.id == id));
                 signals.outbound_page.set(page);
                 signals.outbound_cursor.set(cursor);
                 signals.outbound_history.set(history);
+                if detail_refresh_is_current(
+                    selected_id,
+                    signals.selected_outbound_id.get_untracked(),
+                    detail_generation,
+                    signals.outbound_detail_generation.get_untracked(),
+                ) {
+                    match (
+                        selected_id,
+                        selected_still_visible,
+                        should_reconcile_detail(signals.tab.get_untracked(), MonitorTab::Outbound),
+                    ) {
+                        (Some(id), true, true) => {
+                            let notice = signals.notice.get_untracked();
+                            select_outbound_event(signals, id);
+                            signals.notice.set(notice);
+                        }
+                        (Some(_), true, false) => {
+                            signals.outbound_detail.set(previous_detail.clone());
+                            signals.outbound_detail_loading.set(false);
+                        }
+                        (Some(_), false, _) => clear_outbound_selection(signals),
+                        _ => {}
+                    }
+                }
             }
-            Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
-            Err(error) => signals.error.set(Some(error.message)),
+            Err(error) if error.unauthorized => {
+                if detail_refresh_is_current(
+                    selected_id,
+                    signals.selected_outbound_id.get_untracked(),
+                    detail_generation,
+                    signals.outbound_detail_generation.get_untracked(),
+                ) {
+                    if signals.tab.get_untracked() != MonitorTab::Outbound {
+                        signals.outbound_detail.set(previous_detail.clone());
+                    }
+                    signals.outbound_detail_loading.set(false);
+                }
+                signals.on_unauthorized.run(());
+            }
+            Err(error) => {
+                if detail_refresh_is_current(
+                    selected_id,
+                    signals.selected_outbound_id.get_untracked(),
+                    detail_generation,
+                    signals.outbound_detail_generation.get_untracked(),
+                ) {
+                    if signals.tab.get_untracked() != MonitorTab::Outbound {
+                        signals.outbound_detail.set(previous_detail);
+                    }
+                    signals.outbound_detail_loading.set(false);
+                }
+                signals.error.set(Some(error.message));
+            }
         }
         signals.outbound_loading.set(false);
     });
 }
 
 fn select_inbound_receipt(signals: MonitorSignals, receipt_id: i64) {
-    let generation = signals.detail_generation.get_untracked() + 1;
-    signals.detail_generation.set(generation);
+    let generation = signals.inbound_detail_generation.get_untracked() + 1;
+    signals.inbound_detail_generation.set(generation);
     signals.selected_inbound_id.set(Some(receipt_id));
     signals.inbound_detail.set(None);
-    signals.detail_loading.set(true);
+    signals.inbound_detail_loading.set(true);
     signals.error.set(None);
     signals.notice.set(None);
     if signals
@@ -930,7 +1149,7 @@ fn select_inbound_receipt(signals: MonitorSignals, receipt_id: i64) {
     signals.reprocess_confirmation.set(None);
     leptos::task::spawn_local(async move {
         let result = api::inbound_integration_detail(receipt_id).await;
-        if signals.detail_generation.get_untracked() != generation
+        if signals.inbound_detail_generation.get_untracked() != generation
             || signals.selected_inbound_id.get_untracked() != Some(receipt_id)
         {
             return;
@@ -940,16 +1159,16 @@ fn select_inbound_receipt(signals: MonitorSignals, receipt_id: i64) {
             Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
             Err(error) => signals.error.set(Some(error.message)),
         }
-        signals.detail_loading.set(false);
+        signals.inbound_detail_loading.set(false);
     });
 }
 
 fn select_outbound_event(signals: MonitorSignals, event_id: i64) {
-    let generation = signals.detail_generation.get_untracked() + 1;
-    signals.detail_generation.set(generation);
+    let generation = signals.outbound_detail_generation.get_untracked() + 1;
+    signals.outbound_detail_generation.set(generation);
     signals.selected_outbound_id.set(Some(event_id));
     signals.outbound_detail.set(None);
-    signals.detail_loading.set(true);
+    signals.outbound_detail_loading.set(true);
     signals.error.set(None);
     signals.notice.set(None);
     if signals
@@ -974,7 +1193,7 @@ fn select_outbound_event(signals: MonitorSignals, event_id: i64) {
     signals.discard_confirmation.set(None);
     leptos::task::spawn_local(async move {
         let result = api::outbound_integration_detail(event_id).await;
-        if signals.detail_generation.get_untracked() != generation
+        if signals.outbound_detail_generation.get_untracked() != generation
             || signals.selected_outbound_id.get_untracked() != Some(event_id)
         {
             return;
@@ -984,8 +1203,29 @@ fn select_outbound_event(signals: MonitorSignals, event_id: i64) {
             Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
             Err(error) => signals.error.set(Some(error.message)),
         }
-        signals.detail_loading.set(false);
+        signals.outbound_detail_loading.set(false);
     });
+}
+
+fn clear_inbound_selection(signals: MonitorSignals) {
+    signals
+        .inbound_detail_generation
+        .update(|value| *value += 1);
+    signals.selected_inbound_id.set(None);
+    signals.inbound_detail.set(None);
+    signals.inbound_detail_loading.set(false);
+    signals.reprocess_confirmation.set(None);
+}
+
+fn clear_outbound_selection(signals: MonitorSignals) {
+    signals
+        .outbound_detail_generation
+        .update(|value| *value += 1);
+    signals.selected_outbound_id.set(None);
+    signals.outbound_detail.set(None);
+    signals.outbound_detail_loading.set(false);
+    signals.replay_confirmation.set(None);
+    signals.discard_confirmation.set(None);
 }
 
 fn change_inbound_sort(signals: MonitorSignals, sort: InboundIntegrationSort) {
@@ -1185,5 +1425,29 @@ mod tests {
             processing_status_label(IntegrationOrderProcessingStatus::Processed),
             "Processed"
         );
+    }
+
+    #[test]
+    fn detail_refresh_reconciliation_rejects_changed_selection_or_newer_request() {
+        assert!(detail_refresh_is_current(Some(41), Some(41), Some(7), 7));
+        assert!(!detail_refresh_is_current(Some(41), Some(42), Some(7), 7));
+        assert!(!detail_refresh_is_current(Some(41), Some(41), Some(7), 8));
+        assert!(!detail_refresh_is_current(None, None, None, 7));
+    }
+
+    #[test]
+    fn detail_refresh_reconciliation_rejects_a_direction_switch() {
+        assert!(should_reconcile_detail(
+            MonitorTab::Inbound,
+            MonitorTab::Inbound
+        ));
+        assert!(!should_reconcile_detail(
+            MonitorTab::Outbound,
+            MonitorTab::Inbound
+        ));
+        assert!(!should_reconcile_detail(
+            MonitorTab::Mappings,
+            MonitorTab::Outbound
+        ));
     }
 }

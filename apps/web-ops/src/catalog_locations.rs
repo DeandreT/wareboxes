@@ -272,7 +272,7 @@ fn LocationCreate(
                 <div><p class="eyebrow">"Facility layout"</p><h2>"New location"</h2></div>
                 <button class="button quiet-action compact" type="button" on:click=move |_| on_cancel.run(())>"Cancel"</button>
             </div>
-            <div class="form-grid two">
+            <div class="catalog-form-grid two">
                 <label>
                     <span>"Facility"</span>
                     <select required prop:value=move || facility_id.get() on:change=move |event| {
@@ -427,7 +427,7 @@ fn LocationDetail(
                 </div>
                 <span class=location_status(&location).1>{location_status(&location).0}</span>
             </div>
-            <div class="form-grid two">
+            <div class="catalog-form-grid two">
                 <label>
                     <span>"Name"</span>
                     <input type="text" prop:value=move || name.get() on:input=move |event| name.set(event_target_value(&event))/>

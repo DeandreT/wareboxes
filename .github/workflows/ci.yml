@@ -48,6 +48,9 @@ jobs:
       - name: Architecture boundaries
         run: scripts/check-boundaries.sh
 
+      - name: Web operations visual contract
+        run: scripts/check-web-ops-css.sh
+
       - name: Public API contract drift
         run: >-
           cargo run --locked -p wareboxes-api

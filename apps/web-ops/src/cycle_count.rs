@@ -146,6 +146,8 @@ pub(crate) fn CycleCountWorkspace(
                 .collect_view()
         })
     };
+    let variance_access = control_access.clone();
+    let policy_access = control_access;
 
     view! {
         <section class="cycle-count-workspace">
@@ -161,10 +163,10 @@ pub(crate) fn CycleCountWorkspace(
             </header>
             <div class="cycle-count-toolbar">
                 <div class="segmented-control" role="tablist" aria-label="Cycle count views">
-                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Candidates).to_string() class:active=move || signals.mode.get()==ViewMode::Candidates on:click=move |_| { signals.mode.set(ViewMode::Candidates); signals.selected_work.set(None); }><ClipboardList size=13/>"To count"</button>
-                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Work).to_string() class:active=move || signals.mode.get()==ViewMode::Work on:click=move |_| { signals.mode.set(ViewMode::Work); signals.selected_candidate.set(None); }><ClipboardList size=13/>"Work"</button>
-                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Variances).to_string() class:active=move || signals.mode.get()==ViewMode::Variances on:click=move |_| { signals.mode.set(ViewMode::Variances); signals.selected_candidate.set(None); signals.selected_work.set(None); }><ClipboardList size=13/>"Variance review"</button>
-                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Policies).to_string() class:active=move || signals.mode.get()==ViewMode::Policies on:click=move |_| { signals.mode.set(ViewMode::Policies); signals.selected_candidate.set(None); signals.selected_work.set(None); }><ClipboardList size=13/>"Policies"</button>
+                    <button id="cycle-count-candidates-tab" type="button" role="tab" aria-controls="cycle-count-candidates-panel" aria-selected=move || (signals.mode.get()==ViewMode::Candidates).to_string() class:active=move || signals.mode.get()==ViewMode::Candidates on:click=move |_| { signals.mode.set(ViewMode::Candidates); signals.selected_work.set(None); }><ClipboardList size=13/>"To count"</button>
+                    <button id="cycle-count-work-tab" type="button" role="tab" aria-controls="cycle-count-work-panel" aria-selected=move || (signals.mode.get()==ViewMode::Work).to_string() class:active=move || signals.mode.get()==ViewMode::Work on:click=move |_| { signals.mode.set(ViewMode::Work); signals.selected_candidate.set(None); }><ClipboardList size=13/>"Work"</button>
+                    <button id="cycle-count-variances-tab" type="button" role="tab" aria-controls="cycle-count-variances-panel" aria-selected=move || (signals.mode.get()==ViewMode::Variances).to_string() class:active=move || signals.mode.get()==ViewMode::Variances on:click=move |_| { signals.mode.set(ViewMode::Variances); signals.selected_candidate.set(None); signals.selected_work.set(None); }><ClipboardList size=13/>"Variance review"</button>
+                    <button id="cycle-count-policies-tab" type="button" role="tab" aria-controls="cycle-count-policies-panel" aria-selected=move || (signals.mode.get()==ViewMode::Policies).to_string() class:active=move || signals.mode.get()==ViewMode::Policies on:click=move |_| { signals.mode.set(ViewMode::Policies); signals.selected_candidate.set(None); signals.selected_work.set(None); }><ClipboardList size=13/>"Policies"</button>
                 </div>
                 <Show when=move || matches!(signals.mode.get(), ViewMode::Candidates | ViewMode::Work)>
                     <label><span>"Facility"</span><select prop:value=move || option_value(signals.facility_id.get()) on:change=move |event| { signals.facility_id.set(parse_optional_id(&event_target_value(&event))); reset_and_load(signals); }><option value="">"All facilities"</option>{facility_options}</select></label>
@@ -177,31 +179,70 @@ pub(crate) fn CycleCountWorkspace(
                     <label><span>"Work status"</span><select prop:value=move || work_status_value(signals.work_status.get()) on:change=move |event| { signals.work_status.set(parse_work_status(&event_target_value(&event))); reset_work(signals); }><option value="">"Open work"</option><option value="pending">"Pending"</option><option value="claimed">"Claimed"</option><option value="completed">"Completed"</option><option value="cancelled">"Cancelled"</option></select></label>
                 </Show>
             </div>
-            {move || match signals.mode.get() {
-                ViewMode::Candidates | ViewMode::Work => view! {
-                    <div class="cycle-count-body split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
-                        <section class="cycle-count-master split-master">
-                            <Show when=move || signals.mode.get()==ViewMode::Candidates fallback=move || view! { <WorkTable signals select=select_work/> }>
-                                <CandidateTable signals select=select_candidate/>
-                            </Show>
-                        </section>
-                        <SplitPaneHandle layout/>
-                        <aside class="cycle-count-detail split-detail">
-                            {move || {
-                                if let Some(candidate)=signals.selected_candidate.get() {
-                                    view! { <PlanningPanel candidate signals submit retry/> }.into_any()
-                                } else if let Some(work)=signals.selected_work.get() {
-                                    view! { <WorkDetail work/> }.into_any()
-                                } else {
-                                    view! { <div class="cycle-count-empty"><ClipboardList size=24/><h2>"Cycle count detail"</h2><p>"Select stock to schedule a blind RF count, or select work to inspect execution and variance."</p></div> }.into_any()
-                                }
-                            }}
-                        </aside>
-                    </div>
-                }.into_any(),
-                ViewMode::Variances => view! { <CycleCountVarianceControl initial_page=initial_variances.clone() access=control_access.clone() on_unauthorized/> }.into_any(),
-                ViewMode::Policies => view! { <CycleCountPolicyControl initial_page=initial_policies.clone() access=control_access.clone() on_unauthorized/> }.into_any(),
-            }}
+            <div
+                id="cycle-count-candidates-panel"
+                class="cycle-count-body split-workspace"
+                role="tabpanel"
+                aria-labelledby="cycle-count-candidates-tab"
+                hidden=move || signals.mode.get() != ViewMode::Candidates
+                style=move || layout.style()
+                data-pane-mode=move || layout.mode_attribute()
+            >
+                <Show when=move || signals.mode.get() == ViewMode::Candidates>
+                    <section class="cycle-count-master split-master">
+                        <CandidateTable signals select=select_candidate/>
+                    </section>
+                    <SplitPaneHandle layout/>
+                    <aside class="cycle-count-detail split-detail">
+                        {move || signals.selected_candidate.get().map_or_else(
+                            || view! { <div class="cycle-count-empty"><ClipboardList size=24/><h2>"Cycle count detail"</h2><p>"Select stock to schedule a blind RF count."</p></div> }.into_any(),
+                            |candidate| view! { <PlanningPanel candidate signals submit retry/> }.into_any(),
+                        )}
+                    </aside>
+                </Show>
+            </div>
+            <div
+                id="cycle-count-work-panel"
+                class="cycle-count-body split-workspace"
+                role="tabpanel"
+                aria-labelledby="cycle-count-work-tab"
+                hidden=move || signals.mode.get() != ViewMode::Work
+                style=move || layout.style()
+                data-pane-mode=move || layout.mode_attribute()
+            >
+                <Show when=move || signals.mode.get() == ViewMode::Work>
+                    <section class="cycle-count-master split-master">
+                        <WorkTable signals select=select_work/>
+                    </section>
+                    <SplitPaneHandle layout/>
+                    <aside class="cycle-count-detail split-detail">
+                        {move || signals.selected_work.get().map_or_else(
+                            || view! { <div class="cycle-count-empty"><ClipboardList size=24/><h2>"Cycle count detail"</h2><p>"Select work to inspect execution and variance."</p></div> }.into_any(),
+                            |work| view! { <WorkDetail work/> }.into_any(),
+                        )}
+                    </aside>
+                </Show>
+            </div>
+            <div
+                id="cycle-count-variances-panel"
+                role="tabpanel"
+                aria-labelledby="cycle-count-variances-tab"
+                hidden=move || signals.mode.get() != ViewMode::Variances
+            >
+                <Show when=move || signals.mode.get() == ViewMode::Variances>
+                    <CycleCountVarianceControl initial_page=initial_variances.clone() access=variance_access.clone() on_unauthorized/>
+                </Show>
+            </div>
+            <div
+                id="cycle-count-policies-panel"
+                role="tabpanel"
+                aria-labelledby="cycle-count-policies-tab"
+                hidden=move || signals.mode.get() != ViewMode::Policies
+            >
+                <Show when=move || signals.mode.get() == ViewMode::Policies>
+                    <CycleCountPolicyControl initial_page=initial_policies.clone() access=policy_access.clone() on_unauthorized/>
+                </Show>
+            </div>
         </section>
     }
 }

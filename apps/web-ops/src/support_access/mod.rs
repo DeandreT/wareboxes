@@ -38,6 +38,8 @@ pub(super) struct Signals {
     selected: RwSignal<Option<SupportAccessResponse>>,
     tenant_filter: RwSignal<Option<i64>>,
     status_filter: RwSignal<Option<SupportAccessStatus>>,
+    applied_tenant_filter: RwSignal<Option<i64>>,
+    applied_status_filter: RwSignal<Option<SupportAccessStatus>>,
     loading: RwSignal<bool>,
     loaded: RwSignal<bool>,
     tenant_loading: RwSignal<bool>,
@@ -77,6 +79,8 @@ pub(crate) fn SupportAccessWorkspace(
         selected: RwSignal::new(None),
         tenant_filter: RwSignal::new(None),
         status_filter: RwSignal::new(None),
+        applied_tenant_filter: RwSignal::new(None),
+        applied_status_filter: RwSignal::new(None),
         loading: RwSignal::new(!has_initial),
         loaded: RwSignal::new(has_initial),
         tenant_loading: RwSignal::new(false),
@@ -110,11 +114,8 @@ pub(crate) fn SupportAccessWorkspace(
     };
     let apply = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
-        signals.selected.set(None);
-        signals
-            .events
-            .set(SupportAccessEventPage::new(Vec::new(), None));
-        refresh(signals);
+        clear_selection(signals);
+        apply_filters(signals);
     };
     let retry = move |_| {
         if let Some(command) = signals.retry.get_untracked() {
@@ -155,7 +156,7 @@ fn metrics(page: SupportAccessPage) -> AnyView {
         .iter()
         .filter(|value| value.status == SupportAccessStatus::Expired)
         .count();
-    view! { <div><span>"Pending"</span><strong>{pending}</strong></div><div><span>"Active now"</span><strong>{active}</strong></div><div><span>"Expired"</span><strong>{expired}</strong></div><div><span>"Loaded evidence"</span><strong>{page.items.len()}</strong></div> }.into_any()
+    view! { <div><span>"Pending visible"</span><strong>{pending}</strong></div><div><span>"Active visible"</span><strong>{active}</strong></div><div><span>"Expired visible"</span><strong>{expired}</strong></div><div><span>"Grants loaded"</span><strong>{page.items.len()}</strong></div> }.into_any()
 }
 
 fn grant_panel(signals: Signals) -> AnyView {
@@ -168,7 +169,7 @@ fn grant_panel(signals: Signals) -> AnyView {
     let content = if page.items.is_empty() {
         state("No support access matches these filters.", false)
     } else {
-        view! { <div class="table-scroll"><table class="dense-table"><thead><tr><th>"Tenant / requester"</th><th>"State"</th><th>"Exact scope"</th><th>"Permissions"</th><th>"Expires"</th><th></th></tr></thead><tbody>{page.items.into_iter().map(|grant| { let id=grant.support_access_grant_id; let selected=signals.selected.get().is_some_and(|value|value.support_access_grant_id==id); view! { <tr class:selected=selected><td><strong>{grant.tenant_name.clone()}</strong><small>{grant.requested_by_email.clone()}</small></td><td><span class=display::status_class(grant.status)>{display::status_label(grant.status)}</span></td><td>{display::scope_summary(&grant)}</td><td>{display::permission_summary(&grant)}</td><td>{display::short_timestamp(&grant.expires_at)}</td><td><button class="text-button" type="button" on:click=move |_| select_grant(signals,grant.clone())>"Inspect"</button></td></tr> } }).collect_view()}</tbody></table></div> }.into_any()
+        view! { <div class="table-scroll"><table class="dense-table"><caption class="sr-only">"Support access grants in the current filtered page"</caption><thead><tr><th>"Tenant / requester"</th><th>"State"</th><th>"Exact scope"</th><th>"Permissions"</th><th>"Expires"</th><th></th></tr></thead><tbody>{page.items.into_iter().map(|grant| { let id=grant.support_access_grant_id; let selected=signals.selected.get().is_some_and(|value|value.support_access_grant_id==id); view! { <tr class:selected=selected><td><strong>{grant.tenant_name.clone()}</strong><small>{grant.requested_by_email.clone()}</small></td><td><span class=display::status_class(grant.status)>{display::status_label(grant.status)}</span></td><td>{display::scope_summary(&grant)}</td><td>{display::permission_summary(&grant)}</td><td>{display::short_timestamp(&grant.expires_at)}</td><td><button class="text-button" type="button" on:click=move |_| select_grant(signals,grant.clone())>"Inspect"</button></td></tr> } }).collect_view()}</tbody></table></div> }.into_any()
     };
     view! { <section class="support-access-panel grant-list"><header><div><h2>"Governed grants"</h2><span>{format!("{count} loaded")}</span></div>{next.map(|cursor|view!{<button class="text-button" type="button" disabled=move || signals.loading.get() on:click=move |_| load_page(signals,Some(cursor.clone()),true)>"Load more"</button>})}</header>{content}</section> }.into_any()
 }
@@ -204,7 +205,26 @@ fn select_grant(signals: Signals, grant: SupportAccessResponse) {
     load_events(signals, id, None, false);
 }
 
+fn clear_selection(signals: Signals) {
+    signals.event_generation.update(|value| *value += 1);
+    signals.event_loading.set(false);
+    signals.selected.set(None);
+    signals
+        .events
+        .set(SupportAccessEventPage::new(Vec::new(), None));
+}
+
 fn refresh(signals: Signals) {
+    load_page(signals, None, false);
+}
+
+fn apply_filters(signals: Signals) {
+    signals
+        .applied_tenant_filter
+        .set(signals.tenant_filter.get_untracked());
+    signals
+        .applied_status_filter
+        .set(signals.status_filter.get_untracked());
     load_page(signals, None, false);
 }
 
@@ -213,15 +233,33 @@ fn load_page(signals: Signals, cursor: Option<OpaqueCursor>, append: bool) {
     let generation = signals.list_generation.get_untracked();
     signals.loading.set(true);
     signals.error.set(None);
+    let selected_id = if append {
+        None
+    } else {
+        signals
+            .selected
+            .get_untracked()
+            .map(|grant| grant.support_access_grant_id)
+    };
+    let restore_event_generation = selected_id.map(|_| {
+        clear_selection(signals);
+        signals.event_generation.get_untracked()
+    });
     let request = SupportAccessPageRequest {
-        tenant_id: signals.tenant_filter.get_untracked(),
-        status: signals.status_filter.get_untracked(),
+        tenant_id: signals.applied_tenant_filter.get_untracked(),
+        status: signals.applied_status_filter.get_untracked(),
         cursor,
         limit: wareboxes_api_contract::v1::PageLimit::default(),
     };
     leptos::task::spawn_local(async move {
         match api::support_access_page(&request).await {
             Ok(page) if signals.list_generation.get_untracked() == generation => {
+                let refreshed_selection = selected_id.and_then(|id| {
+                    page.items
+                        .iter()
+                        .find(|grant| grant.support_access_grant_id == id)
+                        .cloned()
+                });
                 if append {
                     signals.grants.update(|current| {
                         current.items.extend(page.items);
@@ -229,6 +267,17 @@ fn load_page(signals: Signals, cursor: Option<OpaqueCursor>, append: bool) {
                     });
                 } else {
                     signals.grants.set(page);
+                }
+                // A later row selection owns the detail pane; the list response
+                // may refresh its rows but must not replace that newer intent.
+                if let Some(grant) = refreshed_selection.filter(|_| {
+                    selection_can_be_restored(
+                        restore_event_generation,
+                        signals.event_generation.get_untracked(),
+                        signals.selected.get_untracked().is_some(),
+                    )
+                }) {
+                    select_grant(signals, grant);
                 }
             }
             Err(error) if signals.list_generation.get_untracked() == generation => {
@@ -363,17 +412,34 @@ async fn execute(command: &PendingCommand) -> Result<SupportAccessResponse, api:
 }
 
 fn refresh_grant(signals: Signals, grant: SupportAccessResponse) {
+    let tenant_id = signals.applied_tenant_filter.get_untracked();
+    let status = signals.applied_status_filter.get_untracked();
+    let matches = matches_filters(tenant_id, status, grant.tenant_id, grant.status);
     signals.grants.update(|page| {
-        if let Some(current) = page
-            .items
-            .iter_mut()
-            .find(|value| value.support_access_grant_id == grant.support_access_grant_id)
-        {
-            *current = grant;
-        } else {
+        page.items
+            .retain(|value| value.support_access_grant_id != grant.support_access_grant_id);
+        if matches {
             page.items.insert(0, grant);
         }
     });
+}
+
+fn matches_filters(
+    filter_tenant_id: Option<i64>,
+    filter_status: Option<SupportAccessStatus>,
+    tenant_id: i64,
+    status: SupportAccessStatus,
+) -> bool {
+    filter_tenant_id.is_none_or(|filter| filter == tenant_id)
+        && filter_status.is_none_or(|filter| filter == status)
+}
+
+fn selection_can_be_restored(
+    expected_event_generation: Option<u64>,
+    current_event_generation: u64,
+    has_newer_selection: bool,
+) -> bool {
+    !has_newer_selection && expected_event_generation == Some(current_event_generation)
 }
 
 fn handle_error(signals: Signals, error: api::ApiError) {
@@ -433,5 +499,35 @@ mod tests {
         ] {
             assert_eq!(parse_status(status_wire(Some(status))), Some(status));
         }
+    }
+
+    #[test]
+    fn reconciliation_respects_applied_tenant_and_status_filters() {
+        assert!(matches_filters(
+            Some(42),
+            Some(SupportAccessStatus::Active),
+            42,
+            SupportAccessStatus::Active,
+        ));
+        assert!(!matches_filters(
+            Some(7),
+            None,
+            42,
+            SupportAccessStatus::Active,
+        ));
+        assert!(!matches_filters(
+            None,
+            Some(SupportAccessStatus::Pending),
+            42,
+            SupportAccessStatus::Active,
+        ));
+    }
+
+    #[test]
+    fn list_reconciliation_never_replaces_newer_detail_intent() {
+        assert!(selection_can_be_restored(Some(8), 8, false));
+        assert!(!selection_can_be_restored(Some(8), 9, false));
+        assert!(!selection_can_be_restored(Some(8), 8, true));
+        assert!(!selection_can_be_restored(None, 8, false));
     }
 }

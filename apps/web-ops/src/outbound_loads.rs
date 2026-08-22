@@ -331,8 +331,8 @@ pub(crate) fn OutboundLoadsWorkspace(
             >
                 <section class="outbound-loads-queue split-master">
                     <header><h2>"Load queue"</h2><span>{move || format!("{} loaded", signals.entries.get().len())}</span></header>
-                    <div class="outbound-loads-table-scroll">
-                        <table><thead><tr>
+                    <div class="outbound-loads-table-scroll" aria-busy=move || signals.queue_pending.get().to_string()>
+                        <table><caption class="sr-only">"Outbound loads matching the active facility and state filters"</caption><thead><tr>
                             <SortableHeader label="Load" active=move || signals.sort.get().key == LoadSort::Reference direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Reference))/>
                             <SortableHeader label="State" active=move || signals.sort.get().key == LoadSort::Status direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Status))/>
                             <SortableHeader label="Progress" active=move || signals.sort.get().key == LoadSort::Progress direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Progress)) numeric=true/>
@@ -341,24 +341,32 @@ pub(crate) fn OutboundLoadsWorkspace(
                             <SortableHeader label="Depart" active=move || signals.sort.get().key == LoadSort::ScheduledDeparture direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::ScheduledDeparture))/>
                             <th><span class="sr-only">"Open detail"</span></th>
                         </tr></thead>
-                        <tbody>{move || signals.entries.get().into_iter().map(|entry| {
-                            let id = entry.outbound_load_id;
-                            let selected = signals.selected_id.get() == Some(id);
-                            view! { <tr class:selected=selected>
-                                <td><strong class="mono">{entry.load_reference}</strong><small>{entry.carrier_code}</small></td>
-                                <td><span class=format!("status-chip {}", status_class(entry.status))>{status_label(entry.status)}</span></td>
-                                <td><strong>{format!("{}/{} loaded", entry.progress.loaded_carton_count, entry.progress.planned_carton_count)}</strong><small>{format!("{} staged", entry.progress.staged_carton_count)}</small></td>
-                                <td>{entry.facility_name}</td><td>{entry.trailer_number.unwrap_or_else(|| "Not assigned".into())}</td>
-                                <td>{entry.scheduled_departure_at.as_deref().map(compact_timestamp).unwrap_or_else(|| "Not scheduled".into())}</td>
-                                <td><button type="button" class="icon-button" title="Open load detail" aria-label=format!("Open load {}", id) aria-pressed=selected on:click=move |_| select.run(id)><Icon icon=UiIcon::Search/></button></td>
-                            </tr> }
-                        }).collect_view()}</tbody></table>
+                        <tbody>{move || {
+                            let entries=signals.entries.get();
+                            if entries.is_empty() {
+                                let message=if signals.queue_pending.get() { "Loading outbound loads..." } else { "No outbound loads match the active filters." };
+                                view! { <tr><td colspan="7" class="table-empty-row" role="status" aria-live="polite">{message}</td></tr> }.into_any()
+                            } else {
+                                entries.into_iter().map(|entry| {
+                                    let id = entry.outbound_load_id;
+                                    let selected = signals.selected_id.get() == Some(id);
+                                    view! { <tr class:selected=selected>
+                                        <td><strong class="mono">{entry.load_reference}</strong><small>{entry.carrier_code}</small></td>
+                                        <td><span class=format!("status-chip {}", status_class(entry.status))>{status_label(entry.status)}</span></td>
+                                        <td><strong>{format!("{}/{} loaded", entry.progress.loaded_carton_count, entry.progress.planned_carton_count)}</strong><small>{format!("{} staged", entry.progress.staged_carton_count)}</small></td>
+                                        <td>{entry.facility_name}</td><td>{entry.trailer_number.unwrap_or_else(|| "Not assigned".into())}</td>
+                                        <td>{entry.scheduled_departure_at.as_deref().map(compact_timestamp).unwrap_or_else(|| "Not scheduled".into())}</td>
+                                        <td><button type="button" class="icon-button" title="Open load detail" aria-label=format!("Open load {}", id) aria-pressed=selected on:click=move |_| select.run(id)><Icon icon=UiIcon::Search/></button></td>
+                                    </tr> }
+                                }).collect_view().into_any()
+                            }
+                        }}</tbody></table>
                     </div>
                     {move || signals.next_cursor.get().map(|_| view! { <button class="button quiet-action outbound-loads-more" type="button" disabled=move || signals.queue_pending.get() on:click=move |_| load_more.run(())>"Load more"</button> })}
                 </section>
                 <SplitPaneHandle layout/>
                 <section class="outbound-loads-detail split-detail">
-                    <div class:error=move || signals.error.get() class="outbound-loads-status" role="status"><span>{move || signals.message.get()}</span>{move || signals.retry.get().map(|_| view! { <button type="button" class="button quiet-action compact" on:click=move |_| retry.run(())>"Retry exact command"</button> })}</div>
+                    <div class:error=move || signals.error.get() class="outbound-loads-status" role=move || if signals.error.get() { "alert" } else { "status" } aria-live="polite" aria-atomic="true"><span>{move || signals.message.get()}</span>{move || signals.retry.get().map(|_| view! { <button type="button" class="button quiet-action compact" on:click=move |_| retry.run(())>"Retry exact command"</button> })}</div>
                     {move || signals.detail.get().map(|load| detail_view(load, signals, drafts, can_supervise, release)).unwrap_or_else(|| view! { <div class="outbound-loads-empty"><Icon icon=UiIcon::Shipping/><h2>"No load selected"</h2></div> }.into_any())}
                 </section>
             </div>
@@ -398,8 +406,8 @@ fn detail_view(
             </header>
             <dl class="outbound-loads-facts"><div><dt>"Staging lane"</dt><dd>{load.staging_location_name}</dd></div><div><dt>"Dock"</dt><dd>{load.dock_location_name.unwrap_or_else(|| "Not assigned".into())}</dd></div><div><dt>"Trailer"</dt><dd>{if trailer.is_empty() { "Not assigned".into() } else { trailer.clone() }}</dd></div><div><dt>"Seal"</dt><dd>{if seal.is_empty() { "Not sealed".into() } else { seal.clone() }}</dd></div></dl>
             <div class="outbound-loads-membership">
-                <section><header><h3>"Shipments"</h3><span>{load.shipments.len()}</span></header><div class="outbound-loads-table-scroll"><table><thead><tr><th>"Stop"</th><th>"Order"</th><th>"Client"</th><th>"Shipment"</th><th>"Demand"</th></tr></thead><tbody>{load.shipments.into_iter().map(|shipment| view! { <tr><td>{shipment.shipment_sequence}</td><td class="mono">{shipment.order_key}</td><td>{shipment.inventory_owner_name}</td><td>{format!("#{} · {:?}", shipment.shipment_id, shipment.shipment_status)}</td><td>{format!("{} ship / {} ordered", shipment.demand.shipped_quantity, shipment.demand.ordered_quantity)}</td></tr> }).collect_view()}</tbody></table></div></section>
-                <section><header><h3>"Carton execution"</h3><span>{load.cartons.len()}</span></header><div class="outbound-loads-table-scroll"><table><thead><tr><th>"Seq"</th><th>"Carton"</th><th>"State"</th><th>"Qty"</th><th>"Position rev"</th></tr></thead><tbody>{load.cartons.into_iter().map(|carton| view! { <tr><td>{carton.load_sequence}</td><td class="mono">{carton.carton_barcode}</td><td>{position_label(&carton.state)}</td><td>{carton.packed_quantity}</td><td>{carton.position_revision.get()}</td></tr> }).collect_view()}</tbody></table></div></section>
+                <section><header><h3>"Shipments"</h3><span>{load.shipments.len()}</span></header><div class="outbound-loads-table-scroll"><table><caption class="sr-only">"Shipments assigned to this outbound load"</caption><thead><tr><th>"Stop"</th><th>"Order"</th><th>"Client"</th><th>"Shipment"</th><th>"Demand"</th></tr></thead><tbody>{load.shipments.into_iter().map(|shipment| view! { <tr><td>{shipment.shipment_sequence}</td><td class="mono">{shipment.order_key}</td><td>{shipment.inventory_owner_name}</td><td>{format!("#{} · {:?}", shipment.shipment_id, shipment.shipment_status)}</td><td>{format!("{} ship / {} ordered", shipment.demand.shipped_quantity, shipment.demand.ordered_quantity)}</td></tr> }).collect_view()}</tbody></table></div></section>
+                <section><header><h3>"Carton execution"</h3><span>{load.cartons.len()}</span></header><div class="outbound-loads-table-scroll"><table><caption class="sr-only">"Cartons assigned to this outbound load"</caption><thead><tr><th>"Seq"</th><th>"Carton"</th><th>"State"</th><th>"Qty"</th><th>"Position rev"</th></tr></thead><tbody>{load.cartons.into_iter().map(|carton| view! { <tr><td>{carton.load_sequence}</td><td class="mono">{carton.carton_barcode}</td><td>{position_label(&carton.state)}</td><td>{carton.packed_quantity}</td><td>{carton.position_revision.get()}</td></tr> }).collect_view()}</tbody></table></div></section>
             </div>
             {can_supervise.then(|| view! { <footer class="outbound-loads-actions">
                 {matches!(status, OutboundLoadStatus::Planned).then(|| view! { <button class="button primary-action" type="button" disabled=move || signals.command_pending.get() on:click=move |_| release.run(())>"Release to staging"</button> })}
@@ -445,7 +453,7 @@ fn dialog_view(
                 <div class="outbound-load-form-grid"><label><span>"Load reference"</span><input prop:value=move || drafts.reference.get() on:input=move |event| drafts.reference.set(event_target_value(&event))/></label><label><span>"Carrier code"</span><input prop:value=move || drafts.carrier.get() on:input=move |event| drafts.carrier.set(event_target_value(&event))/></label><label><span>"Staging lane"</span><select on:change=select_staging><option value="">"Select staging lane"</option>{locations.with_value(|all| all.iter().filter(|location| is_staging_location(location)).map(|location| view! { <option value=location.id>{format!("{} · {}", location.facility_name.clone().unwrap_or_default(), location.name.clone().unwrap_or_else(|| location.barcode.clone().unwrap_or_default()))}</option> }).collect_view())}</select></label><label><span>"Scheduled departure"</span><input type="datetime-local" prop:value=move || drafts.scheduled_at.get() on:input=move |event| drafts.scheduled_at.set(event_target_value(&event))/></label></div>
                 <div class="outbound-load-shipment-picker">
                     <header><h3>"Manifested shipments"</h3><span>{move || format!("{} selected", drafts.selected_shipments.get().len())}</span></header>
-                    <div class="outbound-loads-table-scroll"><table><thead><tr><th></th><th>"Order"</th><th>"Client"</th><th>"Facility"</th><th>"Carrier"</th><th>"Cartons"</th></tr></thead><tbody>
+                    <div class="outbound-loads-table-scroll" aria-busy=move || signals.shipping_pending.get().to_string()><table><caption class="sr-only">"Manifested shipments eligible for this outbound load"</caption><thead><tr><th><span class="sr-only">"Select"</span></th><th>"Order"</th><th>"Client"</th><th>"Facility"</th><th>"Carrier"</th><th>"Cartons"</th></tr></thead><tbody>
                         {move || {
                             signals.shipping_entries.get().into_iter().filter_map(|entry| {
                                 let shipment = entry.shipment?;

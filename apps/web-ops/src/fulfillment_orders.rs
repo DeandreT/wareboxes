@@ -718,7 +718,7 @@ fn CreateOrderPanel(
                     "Close"
                 </button>
             </div>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Order number"</span>
                     <input
@@ -844,8 +844,9 @@ fn CreateOrderPanel(
                 </div>
                 <div class="table-scroll order-lines-draft-scroll">
                     <table class="data-table order-lines-draft-table">
+                        <caption class="sr-only">"Draft fulfillment order lines"</caption>
                         <thead>
-                            <tr><th>"Line"</th><th>"Item"</th><th>"UOM"</th><th>"Qty"</th><th></th></tr>
+                            <tr><th>"Line"</th><th>"Item"</th><th>"UOM"</th><th>"Qty"</th><th><span class="sr-only">"Actions"</span></th></tr>
                         </thead>
                         <tbody>
                             {move || lines
@@ -854,6 +855,8 @@ fn CreateOrderPanel(
                                 .enumerate()
                                 .map(|(index, line)| {
                                     let item_id = line.item_id;
+                                    let quantity_label =
+                                        format!("Quantity for order line {}", line.line_key);
                                     view! {
                                         <tr>
                                             <td><strong>{line.line_key}</strong></td>
@@ -865,6 +868,7 @@ fn CreateOrderPanel(
                                             <td>
                                                 <input
                                                     class="line-quantity-input"
+                                                    aria-label=quantity_label
                                                     type="number"
                                                     min="1"
                                                     step="1"
@@ -937,7 +941,7 @@ fn CreateOrderPanel(
             </fieldset>
             <fieldset>
                 <legend>"Ship to"</legend>
-                <div class="form-grid two-column">
+                <div class="fulfillment-form-grid two-column">
                     <label>
                         <span>"Recipient name"</span>
                         <input

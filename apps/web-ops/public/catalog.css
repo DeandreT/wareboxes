@@ -304,7 +304,7 @@
   min-width: 520px;
 }
 
-.destructive-confirm {
+.catalog-workbench .destructive-confirm {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -807,12 +807,12 @@
   font-size: 10px;
 }
 
-.form-grid {
+.catalog-form-grid {
   display: grid;
   gap: 8px;
 }
 
-.form-grid.two {
+.catalog-form-grid.two {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -1224,14 +1224,13 @@
   display: none;
 }
 
-.mono,
-code {
-  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+.catalog-workbench .mono,
+.catalog-workbench code {
   letter-spacing: 0;
 }
 
 @media print {
-  body * {
+  body:has(:where(.catalog-workbench)) * {
     visibility: hidden;
   }
 

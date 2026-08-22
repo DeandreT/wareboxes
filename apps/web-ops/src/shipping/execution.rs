@@ -49,6 +49,7 @@ pub(super) fn ShipmentExecution(
                 </header>
                 <div class="table-scroll shipping-carton-scroll">
                     <table class="data-table shipping-carton-table">
+                        <caption class="sr-only">"Cartons assigned to the selected shipment"</caption>
                         <thead><tr><th>"#"</th><th>"Carton"</th><th>"Lines/qty"</th><th>"Weight"</th><th>"Dimensions"</th><th>"Tracking"</th><th>"Departure"</th></tr></thead>
                         <tbody>
                             {shipment.cartons.clone().into_iter().map(|carton| {

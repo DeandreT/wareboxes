@@ -101,7 +101,7 @@ pub(super) fn InboundRejectionConfirmation(
             <div class="evidence-summary">
                 <span><strong>"Expected load"</strong> {expected_load_scan}</span>
             </div>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Load scan"</span>
                     <input

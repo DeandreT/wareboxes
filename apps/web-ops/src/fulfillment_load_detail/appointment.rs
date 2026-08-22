@@ -165,7 +165,7 @@ pub(super) fn InboundAppointmentConfirmation(
                     <span><strong>"Current"</strong> {value.to_rfc3339()}</span>
                 })}
             </div>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Appointment (UTC)"</span>
                     <input

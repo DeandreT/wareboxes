@@ -261,8 +261,8 @@ pub(crate) fn ReplenishmentWorkspace(
 
         <form class="replenishment-toolbar" on:submit=apply_filters>
             <div class="segmented-control replenishment-tabs" role="tablist" aria-label="Replenishment views">
-                <button type="button" role="tab" class:active=move || tab.get() == ReplenishmentTab::Policies aria-selected=move || (tab.get() == ReplenishmentTab::Policies).to_string() on:click=move |_| tab.set(ReplenishmentTab::Policies)>"Policies"</button>
-                <button type="button" role="tab" class:active=move || tab.get() == ReplenishmentTab::Work aria-selected=move || (tab.get() == ReplenishmentTab::Work).to_string() on:click=move |_| tab.set(ReplenishmentTab::Work)>"Work queue"</button>
+                <button id="replenishment-policies-tab" type="button" role="tab" aria-controls="replenishment-policies-panel" class:active=move || tab.get() == ReplenishmentTab::Policies aria-selected=move || (tab.get() == ReplenishmentTab::Policies).to_string() on:click=move |_| tab.set(ReplenishmentTab::Policies)>"Policies"</button>
+                <button id="replenishment-work-tab" type="button" role="tab" aria-controls="replenishment-work-panel" class:active=move || tab.get() == ReplenishmentTab::Work aria-selected=move || (tab.get() == ReplenishmentTab::Work).to_string() on:click=move |_| tab.set(ReplenishmentTab::Work)>"Work queue"</button>
             </div>
             <div class="replenishment-filter-fields">
                 <label>
@@ -343,27 +343,41 @@ pub(crate) fn ReplenishmentWorkspace(
             })}
         </Show>
 
-        <Show when=move || tab.get() == ReplenishmentTab::Policies>
-            <PoliciesPanel
-                signals=policies
-                commands_locked
-                on_configure=open_configure
-                on_plan=open_plan
-                on_retire=open_retire
-                on_previous=policy_previous
-                on_next=policy_next
-                on_sort=policy_sort
-            />
-        </Show>
-        <Show when=move || tab.get() == ReplenishmentTab::Work>
-            <WorkQueuePanel
-                signals=work
-                on_previous=work_previous
-                on_next=work_next
-                on_cancel=open_cancellation
-                on_sort=work_sort
-            />
-        </Show>
+        <div
+            id="replenishment-policies-panel"
+            role="tabpanel"
+            aria-labelledby="replenishment-policies-tab"
+            hidden=move || tab.get() != ReplenishmentTab::Policies
+        >
+            <Show when=move || tab.get() == ReplenishmentTab::Policies>
+                <PoliciesPanel
+                    signals=policies
+                    commands_locked
+                    on_configure=open_configure
+                    on_plan=open_plan
+                    on_retire=open_retire
+                    on_previous=policy_previous
+                    on_next=policy_next
+                    on_sort=policy_sort
+                />
+            </Show>
+        </div>
+        <div
+            id="replenishment-work-panel"
+            role="tabpanel"
+            aria-labelledby="replenishment-work-tab"
+            hidden=move || tab.get() != ReplenishmentTab::Work
+        >
+            <Show when=move || tab.get() == ReplenishmentTab::Work>
+                <WorkQueuePanel
+                    signals=work
+                    on_previous=work_previous
+                    on_next=work_next
+                    on_cancel=open_cancellation
+                    on_sort=work_sort
+                />
+            </Show>
+            </div>
 
         <Show when=move || dialog.get().is_some()>
             {move || dialog.get().map(|mode| view! {

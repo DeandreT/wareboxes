@@ -246,6 +246,121 @@ pub(crate) enum Section {
 }
 
 impl Section {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Orders => "Orders",
+            Self::PickWaves => "Pick waves",
+            Self::Packing => "Packing",
+            Self::Shipping => "Shipping",
+            Self::OutboundLoads => "Outbound loads",
+            Self::Yard => "Yard",
+            Self::Labor => "Labor",
+            Self::CustomerPortal => "Client portal",
+            Self::Putaway => "Putaway",
+            Self::CycleCounts => "Cycle counts",
+            Self::CrossDock => "Cross-dock",
+            Self::Loads => "Inbound loads",
+            Self::PurchaseOrders => "Purchase orders",
+            Self::TransferOrders => "Transfer orders",
+            Self::InboundAsns => "Inbound ASNs",
+            Self::CustomerReturns => "Customer returns",
+            Self::VendorReturns => "Vendor returns",
+            Self::ValueAddedWork => "Value-added work",
+            Self::Catalog => "Master data",
+            Self::Inventory => "Inventory",
+            Self::InventoryHolds => "Quantity holds",
+            Self::InventoryDisposition => "Disposition",
+            Self::InventoryIntegrity => "Inventory control",
+            Self::Replenishment => "Replenishment",
+            Self::Slotting => "Slotting",
+            Self::WorkOrchestration => "Work orchestration",
+            Self::Automation => "Automation",
+            Self::ServiceAccounts => "Service accounts",
+            Self::FleetCells => "Data cells",
+            Self::CellMoves => "Cell moves",
+            Self::TenantLifecycle => "Tenant lifecycle",
+            Self::SupportAccess => "Support access",
+            Self::Access => "Access",
+            Self::Administration(area) => area.title(),
+        }
+    }
+
+    pub(crate) const fn group_label(self) -> &'static str {
+        if self.is_outbound() {
+            "Outbound"
+        } else if self.is_inbound() {
+            "Inbound"
+        } else if self.is_inventory() {
+            "Inventory"
+        } else if self.is_execution() {
+            "Execution"
+        } else if self.is_platform() {
+            "Platform"
+        } else if self.is_administration() {
+            "Administration"
+        } else {
+            "Workspace"
+        }
+    }
+
+    pub(crate) const fn is_outbound(self) -> bool {
+        matches!(
+            self,
+            Self::Orders
+                | Self::PickWaves
+                | Self::Packing
+                | Self::Shipping
+                | Self::OutboundLoads
+                | Self::Yard
+        )
+    }
+
+    pub(crate) const fn is_inbound(self) -> bool {
+        matches!(
+            self,
+            Self::Loads
+                | Self::PurchaseOrders
+                | Self::TransferOrders
+                | Self::InboundAsns
+                | Self::CustomerReturns
+                | Self::VendorReturns
+                | Self::CrossDock
+        )
+    }
+
+    pub(crate) const fn is_inventory(self) -> bool {
+        matches!(
+            self,
+            Self::Putaway
+                | Self::Inventory
+                | Self::InventoryHolds
+                | Self::InventoryDisposition
+                | Self::InventoryIntegrity
+                | Self::CycleCounts
+                | Self::Replenishment
+                | Self::Slotting
+        )
+    }
+
+    pub(crate) const fn is_execution(self) -> bool {
+        matches!(
+            self,
+            Self::Labor | Self::ValueAddedWork | Self::WorkOrchestration | Self::Automation
+        )
+    }
+
+    pub(crate) const fn is_platform(self) -> bool {
+        matches!(
+            self,
+            Self::FleetCells | Self::CellMoves | Self::TenantLifecycle | Self::SupportAccess
+        )
+    }
+
+    pub(crate) const fn is_administration(self) -> bool {
+        matches!(self, Self::ServiceAccounts | Self::Administration(_))
+    }
+
     fn bootstrap_section(self) -> Option<WorkspaceBootstrapSection> {
         match self {
             Self::Overview => Some(WorkspaceBootstrapSection::Overview),
@@ -301,46 +416,8 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <title>"Wareboxes"</title>
                 <link rel="icon" href="/favicon.svg"/>
                 <link rel="stylesheet" href="/pkg/wareboxes-web.css"/>
-                <link rel="stylesheet" href="/holds.css"/>
+                <link rel="stylesheet" href="/workbench.css"/>
                 <link rel="stylesheet" href="/presentation.css"/>
-                <link rel="stylesheet" href="/workspace-layout.css"/>
-                <link rel="stylesheet" href="/disposition.css"/>
-                <link rel="stylesheet" href="/inventory-integrity.css"/>
-                <link rel="stylesheet" href="/inventory-rollups.css"/>
-                <link rel="stylesheet" href="/fulfillment.css"/>
-                <link rel="stylesheet" href="/inbound-asns.css"/>
-                <link rel="stylesheet" href="/customer-returns.css"/>
-                <link rel="stylesheet" href="/purchase-orders.css"/>
-                <link rel="stylesheet" href="/transfer-orders.css"/>
-                <link rel="stylesheet" href="/pick-shortages.css"/>
-                <link rel="stylesheet" href="/order-allocation.css"/>
-                <link rel="stylesheet" href="/packing.css"/>
-                <link rel="stylesheet" href="/pick-waves.css"/>
-                <link rel="stylesheet" href="/pick-clusters/workspace.css"/>
-                <link rel="stylesheet" href="/pick-zones/workspace.css"/>
-                <link rel="stylesheet" href="/shipping.css"/>
-                <link rel="stylesheet" href="/shipping/carrier.css"/>
-                <link rel="stylesheet" href="/outbound-loads.css"/>
-                <link rel="stylesheet" href="/yard.css"/>
-                <link rel="stylesheet" href="/labor.css"/>
-                <link rel="stylesheet" href="/value-added-work.css"/>
-                <link rel="stylesheet" href="/vendor-returns.css"/>
-                <link rel="stylesheet" href="/customer-portal.css"/>
-                <link rel="stylesheet" href="/replenishment.css"/>
-                <link rel="stylesheet" href="/slotting.css"/>
-                <link rel="stylesheet" href="/work-orchestration/workspace.css"/>
-                <link rel="stylesheet" href="/automation/workspace.css"/>
-                <link rel="stylesheet" href="/service-accounts/workspace.css"/>
-                <link rel="stylesheet" href="/fleet-cells/workspace.css"/>
-                <link rel="stylesheet" href="/cell-moves/workspace.css"/>
-                <link rel="stylesheet" href="/tenant-lifecycle/workspace.css"/>
-                <link rel="stylesheet" href="/support-access/workspace.css"/>
-                <link rel="stylesheet" href="/putaway.css"/>
-                <link rel="stylesheet" href="/cycle-count.css"/>
-                <link rel="stylesheet" href="/cross-dock.css"/>
-                <link rel="stylesheet" href="/catalog.css"/>
-                <link rel="stylesheet" href="/administration.css"/>
-                <link rel="stylesheet" href="/integration-monitor.css"/>
                 <script src="/presentation-init.js"></script>
                 <AutoReload options=options.clone()/>
                 <HydrationScripts options/>
@@ -952,7 +1029,9 @@ async fn load_workspace(
             data.access = api::access().await?;
         }
         Section::Administration(_) if has_permission(session, "admin") => {}
-        Section::CustomerPortal if has_permission(session, "customer_portal") => {}
+        Section::CustomerPortal if has_permission(session, "customer_portal") => {
+            data.access = api::access().await?;
+        }
         Section::Orders
         | Section::PickWaves
         | Section::Packing
@@ -1299,7 +1378,10 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             }
             .into_any(),
             Section::CustomerPortal if has_permission(&session, "customer_portal") => view! {
-                <CustomerPortal on_unauthorized=session_expired_callback()/>
+                <CustomerPortal
+                    access=data.access
+                    on_unauthorized=session_expired_callback()
+                />
             }
             .into_any(),
             Section::Putaway if has_permission(&session, "wms") => view! {
@@ -2133,5 +2215,51 @@ mod tests {
             !Section::Administration(crate::administration::AdministrationArea::Users)
                 .supports_workspace_refresh()
         );
+    }
+
+    #[test]
+    fn navigation_sections_have_stable_labels_and_groups() {
+        assert_eq!(Section::Orders.label(), "Orders");
+        assert_eq!(Section::Orders.group_label(), "Outbound");
+        assert_eq!(Section::InboundAsns.group_label(), "Inbound");
+        assert_eq!(Section::InventoryHolds.group_label(), "Inventory");
+        assert_eq!(Section::Automation.group_label(), "Execution");
+        assert_eq!(Section::CellMoves.group_label(), "Platform");
+        assert_eq!(
+            Section::Administration(crate::administration::AdministrationArea::Integrations)
+                .group_label(),
+            "Administration"
+        );
+        assert_eq!(Section::Access.group_label(), "Workspace");
+    }
+
+    #[test]
+    fn visual_contract_defines_legacy_aliases_and_layered_feature_entrypoint() {
+        let base = include_str!("../style/main.css");
+        for token in [
+            "--border:",
+            "--border-subtle:",
+            "--border-strong:",
+            "--text:",
+            "--text-muted:",
+            "--selected-row:",
+            "--surface-muted:",
+            "--surface-sunken:",
+            "--warning:",
+            "--warning-soft:",
+            "--danger:",
+            "--danger-soft:",
+            "--danger-line:",
+            "--success:",
+            "--font-mono:",
+        ] {
+            assert!(base.contains(token), "missing visual token {token}");
+        }
+
+        let workbench = include_str!("../public/workbench.css");
+        assert!(workbench.contains("layer(features)"));
+        assert!(workbench.contains("layer(layouts)"));
+        assert!(workbench
+            .contains("@layer reset, tokens, base, features, components, layouts, utilities"));
     }
 }

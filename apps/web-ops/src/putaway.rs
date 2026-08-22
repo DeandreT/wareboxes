@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use lucide_leptos::{Boxes, ClipboardList, RefreshCw, RotateCcw};
+use lucide_leptos::{Boxes, ClipboardList, Eye, RefreshCw, RotateCcw};
 use wareboxes_api_contract::v1::{
     CreateLicensePlatePutawayTaskRequest, CreatePutawayTaskRequest, OpaqueCursor,
     PutawayCandidatePage, PutawayCandidateResponse, PutawayCandidateSort, PutawaySortDirection,
@@ -51,11 +51,14 @@ struct Signals {
     work_cursor: RwSignal<Option<OpaqueCursor>>,
     work_history: RwSignal<Vec<Option<OpaqueCursor>>>,
     work_generation: RwSignal<u64>,
-    loading: RwSignal<bool>,
+    candidate_loading: RwSignal<bool>,
+    work_loading: RwSignal<bool>,
     command_pending: RwSignal<bool>,
     retry: RwSignal<Option<PendingCreate>>,
     selected_candidate: RwSignal<Option<PutawayCandidateResponse>>,
     selected_work: RwSignal<Option<PutawayWorkResponse>>,
+    candidate_error: RwSignal<Option<String>>,
+    work_error: RwSignal<Option<String>>,
     error: RwSignal<Option<String>>,
     on_unauthorized: Callback<()>,
     toasts: ToastBus,
@@ -99,11 +102,14 @@ pub(crate) fn PutawayWorkspace(
         work_cursor: RwSignal::new(None),
         work_history: RwSignal::new(Vec::new()),
         work_generation: RwSignal::new(0),
-        loading: RwSignal::new(false),
+        candidate_loading: RwSignal::new(false),
+        work_loading: RwSignal::new(false),
         command_pending: RwSignal::new(false),
         retry: RwSignal::new(None),
         selected_candidate: RwSignal::new(None),
         selected_work: RwSignal::new(None),
+        candidate_error: RwSignal::new(None),
+        work_error: RwSignal::new(None),
         error: RwSignal::new(None),
         on_unauthorized,
         toasts: use_toast_bus(),
@@ -170,13 +176,13 @@ pub(crate) fn PutawayWorkspace(
                 <div class="putaway-header-actions">
                     <PaneControls layout master_label="putaway queue" detail_label="putaway detail"/>
                     <button type="button" class="icon-button" title="Reset filters" aria-label="Reset putaway filters" on:click=move |_| reset_filters.run(())><RotateCcw size=14/></button>
-                    <button type="button" class="icon-button" title="Refresh" aria-label="Refresh putaway" disabled=move || signals.loading.get() on:click=move |_| refresh.run(())><RefreshCw size=14/></button>
+                    <button type="button" class="icon-button" title="Refresh" aria-label="Refresh putaway" disabled=move || active_loading(signals) on:click=move |_| refresh.run(())><RefreshCw size=14/></button>
                 </div>
             </header>
             <div class="putaway-toolbar">
                 <div class="segmented-control" role="tablist" aria-label="Putaway views">
-                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Candidates).to_string() class:active=move || signals.mode.get()==ViewMode::Candidates on:click=move |_| { signals.mode.set(ViewMode::Candidates); signals.selected_work.set(None); }><Boxes size=13/>"To plan"</button>
-                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Work).to_string() class:active=move || signals.mode.get()==ViewMode::Work on:click=move |_| { signals.mode.set(ViewMode::Work); signals.selected_candidate.set(None); }><ClipboardList size=13/>"Work"</button>
+                    <button id="putaway-candidates-tab" type="button" role="tab" aria-controls="putaway-candidates-panel" aria-selected=move || (signals.mode.get()==ViewMode::Candidates).to_string() class:active=move || signals.mode.get()==ViewMode::Candidates on:click=move |_| { signals.mode.set(ViewMode::Candidates); signals.selected_work.set(None); }><Boxes size=13/>"To plan"</button>
+                    <button id="putaway-work-tab" type="button" role="tab" aria-controls="putaway-work-panel" aria-selected=move || (signals.mode.get()==ViewMode::Work).to_string() class:active=move || signals.mode.get()==ViewMode::Work on:click=move |_| { signals.mode.set(ViewMode::Work); signals.selected_candidate.set(None); }><ClipboardList size=13/>"Work"</button>
                 </div>
                 <label><span>"Facility"</span><select prop:value=move || option_value(signals.facility_id.get()) on:change=move |event| { signals.facility_id.set(parse_optional_id(&event_target_value(&event))); reset_and_load(signals); }><option value="">"All facilities"</option>{facility_options}</select></label>
                 <label><span>"Client"</span><select prop:value=move || option_value(signals.inventory_owner_id.get()) on:change=move |event| { signals.inventory_owner_id.set(parse_optional_id(&event_target_value(&event))); reset_and_load(signals); }><option value="">"All clients"</option>{owner_options}</select></label>
@@ -185,11 +191,20 @@ pub(crate) fn PutawayWorkspace(
                     <label><span>"Status"</span><select prop:value=move || status_value(signals.work_status.get()) on:change=move |event| { signals.work_status.set(parse_status(&event_target_value(&event))); reset_work(signals); }><option value="">"Open work"</option><option value="pending">"Pending"</option><option value="claimed">"Claimed"</option><option value="completed">"Completed"</option><option value="cancelled">"Cancelled"</option></select></label>
                 </Show>
             </div>
+            <Show when=move || active_read_error(signals).is_some()>
+                <div class="putaway-read-error" role="alert">
+                    <span>{move || active_read_error(signals).unwrap_or_default()}</span>
+                    <button type="button" class="button secondary-action compact" disabled=move || active_loading(signals) on:click=move |_| refresh.run(())>"Retry read"</button>
+                </div>
+            </Show>
             <div class="putaway-body split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
                 <section class="putaway-master split-master">
-                    <Show when=move || signals.mode.get()==ViewMode::Candidates fallback=move || view! { <WorkTable signals select=select_work/> }>
+                    <div id="putaway-candidates-panel" class="putaway-tab-panel" role="tabpanel" aria-labelledby="putaway-candidates-tab" hidden=move || signals.mode.get()!=ViewMode::Candidates>
                         <CandidateTable signals select=select_candidate/>
-                    </Show>
+                    </div>
+                    <div id="putaway-work-panel" class="putaway-tab-panel" role="tabpanel" aria-labelledby="putaway-work-tab" hidden=move || signals.mode.get()!=ViewMode::Work>
+                        <WorkTable signals select=select_work/>
+                    </div>
                 </section>
                 <SplitPaneHandle layout/>
                 <aside class="putaway-detail split-detail">
@@ -211,7 +226,7 @@ pub(crate) fn PutawayWorkspace(
 #[component]
 fn CandidateTable(signals: Signals, select: Callback<PutawayCandidateResponse>) -> impl IntoView {
     view! {
-        <div class="putaway-table-region">
+        <div class="putaway-table-region" aria-busy=move || signals.candidate_loading.get().to_string()>
             <table class="data-table putaway-table"><caption class="sr-only">"Receiving inventory eligible for directed putaway"</caption><thead><tr>
                 <SortableHeader label="Received" active=move || signals.candidate_sort.get()==PutawayCandidateSort::ReceivedAt direction=move || display_direction(signals.candidate_direction.get()) on_sort=Callback::new(move |_| candidate_sort(signals,PutawayCandidateSort::ReceivedAt))/>
                 <SortableHeader label="Workflow" active=move || signals.candidate_sort.get()==PutawayCandidateSort::Workflow direction=move || display_direction(signals.candidate_direction.get()) on_sort=Callback::new(move |_| candidate_sort(signals,PutawayCandidateSort::Workflow))/>
@@ -220,10 +235,25 @@ fn CandidateTable(signals: Signals, select: Callback<PutawayCandidateResponse>) 
                 <SortableHeader label="Source" active=move || signals.candidate_sort.get()==PutawayCandidateSort::Source direction=move || display_direction(signals.candidate_direction.get()) on_sort=Callback::new(move |_| candidate_sort(signals,PutawayCandidateSort::Source))/>
                 <SortableHeader label="Item / LPN" active=move || signals.candidate_sort.get()==PutawayCandidateSort::Item direction=move || display_direction(signals.candidate_direction.get()) on_sort=Callback::new(move |_| candidate_sort(signals,PutawayCandidateSort::Item))/>
                 <SortableHeader label="Qty" active=move || signals.candidate_sort.get()==PutawayCandidateSort::Quantity direction=move || display_direction(signals.candidate_direction.get()) on_sort=Callback::new(move |_| candidate_sort(signals,PutawayCandidateSort::Quantity)) numeric=true/>
+                <th class="icon-column"><span class="sr-only">"Open detail"</span></th>
             </tr></thead><tbody>
-                {move || signals.candidates.get().items.into_iter().map(|candidate| { let row=candidate.clone(); let selected=signals.selected_candidate.get().as_ref().is_some_and(|value| candidate_key(value)==candidate_key(&candidate)); let owner=candidate.inventory_owner_name.clone(); let facility=candidate.facility_name.clone(); let source_barcode=candidate.source_location.barcode.clone(); view! { <tr class:selected=selected on:click=move |_| select.run(row.clone())><td>{compact_time(&candidate.received_at)}</td><td><span class="status processing">{workflow_label(candidate.workflow)}</span></td><td>{owner}</td><td>{facility}</td><td><strong>{location_label(&candidate.source_location)}</strong><small class="cell-detail">{source_barcode}</small></td><td><strong>{candidate_item(&candidate)}</strong><small class="cell-detail">{candidate_trace(&candidate)}</small></td><td class="numeric strong">{format_quantity(candidate.available_quantity)}<small class="cell-detail">{candidate.uom.clone().unwrap_or_else(|| format!("{} balances",candidate.balance_count))}</small></td></tr> } }).collect_view()}
+                {move || {
+                    let rows=signals.candidates.get().items;
+                    if rows.is_empty() {
+                        let message=if signals.candidate_loading.get() {
+                            "Loading putaway candidates..."
+                        } else if signals.candidate_error.get().is_some() {
+                            "Putaway candidates are unavailable. Retry the read above."
+                        } else {
+                            "No receiving inventory matches the active filters."
+                        };
+                        view! { <tr><td colspan="8" class="table-empty-row" role="status" aria-live="polite">{message}</td></tr> }.into_any()
+                    } else {
+                        rows.into_iter().map(|candidate| { let row=candidate.clone(); let button_row=row.clone(); let selected=signals.selected_candidate.get().as_ref().is_some_and(|value| candidate_key(value)==candidate_key(&candidate)); let owner=candidate.inventory_owner_name.clone(); let facility=candidate.facility_name.clone(); let source_barcode=candidate.source_location.barcode.clone(); let detail_label=format!("View putaway candidate {}",candidate_item(&candidate)); view! { <tr class:selected=selected on:click=move |_| select.run(row.clone())><td>{compact_time(&candidate.received_at)}</td><td><span class="status processing">{workflow_label(candidate.workflow)}</span></td><td>{owner}</td><td>{facility}</td><td><strong>{location_label(&candidate.source_location)}</strong><small class="cell-detail">{source_barcode}</small></td><td><strong>{candidate_item(&candidate)}</strong><small class="cell-detail">{candidate_trace(&candidate)}</small></td><td class="numeric strong">{format_quantity(candidate.available_quantity)}<small class="cell-detail">{candidate.uom.clone().unwrap_or_else(|| format!("{} balances",candidate.balance_count))}</small></td><td class="icon-column"><button type="button" class="icon-button compact" title="View putaway candidate" aria-label=detail_label aria-pressed=selected on:click=move |event| { event.stop_propagation(); select.run(button_row.clone()); }><Eye size=13/></button></td></tr> } }).collect_view().into_any()
+                    }
+                }}
             </tbody></table>
-            <PageFooter label="positions" count=move || signals.candidates.get().items.len() loading=signals.loading history=signals.candidate_history has_more=Signal::derive(move || signals.candidates.get().has_more()) previous=Callback::new(move |_| previous_candidates(signals)) next=Callback::new(move |_| next_candidates(signals))/>
+            <PageFooter label="positions" count=move || signals.candidates.get().items.len() loading=signals.candidate_loading history=signals.candidate_history has_more=Signal::derive(move || signals.candidates.get().has_more()) previous=Callback::new(move |_| previous_candidates(signals)) next=Callback::new(move |_| next_candidates(signals))/>
         </div>
     }
 }
@@ -231,7 +261,7 @@ fn CandidateTable(signals: Signals, select: Callback<PutawayCandidateResponse>) 
 #[component]
 fn WorkTable(signals: Signals, select: Callback<PutawayWorkResponse>) -> impl IntoView {
     view! {
-        <div class="putaway-table-region"><table class="data-table putaway-table"><caption class="sr-only">"Directed putaway work across the active scope"</caption><thead><tr>
+        <div class="putaway-table-region" aria-busy=move || signals.work_loading.get().to_string()><table class="data-table putaway-table"><caption class="sr-only">"Directed putaway work across the active scope"</caption><thead><tr>
             <SortableHeader label="Priority" active=move || signals.work_sort.get()==PutawayWorkSort::Priority direction=move || display_direction(signals.work_direction.get()) on_sort=Callback::new(move |_| work_sort(signals,PutawayWorkSort::Priority)) numeric=true/>
             <SortableHeader label="Created" active=move || signals.work_sort.get()==PutawayWorkSort::CreatedAt direction=move || display_direction(signals.work_direction.get()) on_sort=Callback::new(move |_| work_sort(signals,PutawayWorkSort::CreatedAt))/>
             <SortableHeader label="Status" active=move || signals.work_sort.get()==PutawayWorkSort::Status direction=move || display_direction(signals.work_direction.get()) on_sort=Callback::new(move |_| work_sort(signals,PutawayWorkSort::Status))/>
@@ -240,9 +270,24 @@ fn WorkTable(signals: Signals, select: Callback<PutawayWorkResponse>) -> impl In
             <SortableHeader label="Source" active=move || signals.work_sort.get()==PutawayWorkSort::Source direction=move || display_direction(signals.work_direction.get()) on_sort=Callback::new(move |_| work_sort(signals,PutawayWorkSort::Source))/>
             <SortableHeader label="Destination" active=move || signals.work_sort.get()==PutawayWorkSort::Destination direction=move || display_direction(signals.work_direction.get()) on_sort=Callback::new(move |_| work_sort(signals,PutawayWorkSort::Destination))/>
             <SortableHeader label="Qty" active=move || signals.work_sort.get()==PutawayWorkSort::Quantity direction=move || display_direction(signals.work_direction.get()) on_sort=Callback::new(move |_| work_sort(signals,PutawayWorkSort::Quantity)) numeric=true/>
+            <th class="icon-column"><span class="sr-only">"Open detail"</span></th>
         </tr></thead><tbody>
-            {move || signals.work.get().items.into_iter().map(|work| { let row=work.clone(); let selected=signals.selected_work.get().as_ref().is_some_and(|value| value.task_id==work.task_id); view! { <tr class:selected=selected on:click=move |_| select.run(row.clone())><td class="numeric strong">{work.priority}</td><td>{compact_time(&work.created_at)}<small class="cell-detail">{format!("Task #{}",work.task_id)}</small></td><td><span class=work_status_class(work.status)>{work_status_label(work.status)}</span></td><td>{workflow_label(work.workflow)}</td><td>{work.inventory_owner_name}<small class="cell-detail">{work.facility_name}</small></td><td><strong>{location_label(&work.source_location)}</strong><small class="cell-detail">{work.source_location.barcode}</small></td><td><strong>{location_label(&work.destination_location)}</strong><small class="cell-detail">{work.destination_location.barcode}</small></td><td class="numeric strong">{format_quantity(work.planned_quantity)}<small class="cell-detail">{work.uom.clone().unwrap_or_else(|| format!("{} balances",work.balance_count))}</small></td></tr> } }).collect_view()}
-        </tbody></table><PageFooter label="tasks" count=move || signals.work.get().items.len() loading=signals.loading history=signals.work_history has_more=Signal::derive(move || signals.work.get().has_more()) previous=Callback::new(move |_| previous_work(signals)) next=Callback::new(move |_| next_work(signals))/></div>
+            {move || {
+                let rows=signals.work.get().items;
+                if rows.is_empty() {
+                    let message=if signals.work_loading.get() {
+                        "Loading putaway work..."
+                    } else if signals.work_error.get().is_some() {
+                        "Putaway work is unavailable. Retry the read above."
+                    } else {
+                        "No directed putaway work matches the active filters."
+                    };
+                    view! { <tr><td colspan="9" class="table-empty-row" role="status" aria-live="polite">{message}</td></tr> }.into_any()
+                } else {
+                    rows.into_iter().map(|work| { let row=work.clone(); let button_row=row.clone(); let selected=signals.selected_work.get().as_ref().is_some_and(|value| value.task_id==work.task_id); let detail_label=format!("View putaway task {}",work.task_id); view! { <tr class:selected=selected on:click=move |_| select.run(row.clone())><td class="numeric strong">{work.priority}</td><td>{compact_time(&work.created_at)}<small class="cell-detail">{format!("Task #{}",work.task_id)}</small></td><td><span class=work_status_class(work.status)>{work_status_label(work.status)}</span></td><td>{workflow_label(work.workflow)}</td><td>{work.inventory_owner_name}<small class="cell-detail">{work.facility_name}</small></td><td><strong>{location_label(&work.source_location)}</strong><small class="cell-detail">{work.source_location.barcode}</small></td><td><strong>{location_label(&work.destination_location)}</strong><small class="cell-detail">{work.destination_location.barcode}</small></td><td class="numeric strong">{format_quantity(work.planned_quantity)}<small class="cell-detail">{work.uom.clone().unwrap_or_else(|| format!("{} balances",work.balance_count))}</small></td><td class="icon-column"><button type="button" class="icon-button compact" title="View putaway task" aria-label=detail_label aria-pressed=selected on:click=move |event| { event.stop_propagation(); select.run(button_row.clone()); }><Eye size=13/></button></td></tr> } }).collect_view().into_any()
+                }
+            }}
+        </tbody></table><PageFooter label="tasks" count=move || signals.work.get().items.len() loading=signals.work_loading history=signals.work_history has_more=Signal::derive(move || signals.work.get().has_more()) previous=Callback::new(move |_| previous_work(signals)) next=Callback::new(move |_| next_work(signals))/></div>
     }
 }
 
@@ -435,6 +480,18 @@ fn refresh_active(signals: Signals) {
         ViewMode::Work => request_work(signals, signals.work_cursor.get_untracked()),
     }
 }
+fn active_loading(signals: Signals) -> bool {
+    match signals.mode.get() {
+        ViewMode::Candidates => signals.candidate_loading.get(),
+        ViewMode::Work => signals.work_loading.get(),
+    }
+}
+fn active_read_error(signals: Signals) -> Option<String> {
+    match signals.mode.get() {
+        ViewMode::Candidates => signals.candidate_error.get(),
+        ViewMode::Work => signals.work_error.get(),
+    }
+}
 fn reset_and_load(signals: Signals) {
     reset_candidates(signals);
     reset_work(signals);
@@ -487,7 +544,8 @@ fn previous_work(signals: Signals) {
 fn request_candidates(signals: Signals, cursor: Option<OpaqueCursor>) {
     let generation = signals.candidate_generation.get_untracked().wrapping_add(1);
     signals.candidate_generation.set(generation);
-    signals.loading.set(true);
+    signals.candidate_loading.set(true);
+    signals.candidate_error.set(None);
     leptos::task::spawn_local(async move {
         let result = api::putaway_candidates(
             signals.facility_id.get_untracked(),
@@ -501,22 +559,23 @@ fn request_candidates(signals: Signals, cursor: Option<OpaqueCursor>) {
         if signals.candidate_generation.get_untracked() != generation {
             return;
         }
-        signals.loading.set(false);
+        signals.candidate_loading.set(false);
         match result {
             Ok(page) => {
                 signals.candidate_cursor.set(cursor);
                 signals.candidates.set(page);
-                signals.error.set(None);
+                signals.candidate_error.set(None);
             }
             Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
-            Err(error) => signals.error.set(Some(error.message)),
+            Err(error) => signals.candidate_error.set(Some(error.message)),
         }
     });
 }
 fn request_work(signals: Signals, cursor: Option<OpaqueCursor>) {
     let generation = signals.work_generation.get_untracked().wrapping_add(1);
     signals.work_generation.set(generation);
-    signals.loading.set(true);
+    signals.work_loading.set(true);
+    signals.work_error.set(None);
     leptos::task::spawn_local(async move {
         let result = api::putaway_work(
             signals.facility_id.get_untracked(),
@@ -531,15 +590,15 @@ fn request_work(signals: Signals, cursor: Option<OpaqueCursor>) {
         if signals.work_generation.get_untracked() != generation {
             return;
         }
-        signals.loading.set(false);
+        signals.work_loading.set(false);
         match result {
             Ok(page) => {
                 signals.work_cursor.set(cursor);
                 signals.work.set(page);
-                signals.error.set(None);
+                signals.work_error.set(None);
             }
             Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
-            Err(error) => signals.error.set(Some(error.message)),
+            Err(error) => signals.work_error.set(Some(error.message)),
         }
     });
 }

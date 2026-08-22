@@ -5,7 +5,7 @@ use wareboxes_core::dto::WebSessionContext;
 use crate::administration::AdministrationArea;
 use crate::api;
 use crate::app::{Section, SessionState};
-use crate::components::{Icon, NavItem, UiIcon};
+use crate::components::{Icon, NavGroup, NavItem, UiIcon};
 use crate::preferences::DisplayOptionsMenu;
 use crate::toast::{use_toast_bus, ToastViewport};
 use crate::view_model::{has_permission, user_name};
@@ -103,312 +103,134 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
     };
 
     view! {
+        <a class="skip-link" href="#main-content">"Skip to workspace"</a>
         <div class="app-shell">
             <aside class="sidebar">
                 <a class="sidebar-brand" href="/" aria-label="Wareboxes overview">
                     <Brand/>
                 </a>
-                <nav aria-label="Operations">
-                    <p>"Operations"</p>
-                    <NavItem
-                        href="/"
-                        label="Overview"
-                        icon=UiIcon::Overview
-                        active=section == Section::Overview
-                    />
-                    {can_view_customer_portal.then(|| view! {
+                <nav aria-label="Primary">
+                    <div class="nav-primary">
                         <NavItem
-                            href="/portal"
-                            label="Client portal"
-                            icon=UiIcon::Clients
-                            active=section == Section::CustomerPortal
+                            href="/"
+                            label="Overview"
+                            icon=UiIcon::Overview
+                            active=section == Section::Overview
                         />
-                    })}
-                    {can_view_orders.then(|| {
-                        view! {
+                        {can_view_customer_portal.then(|| view! {
                             <NavItem
-                                href="/orders"
-                                label="Orders"
-                                icon=UiIcon::Orders
-                                active=section == Section::Orders
-                            />
-                            {can_supervise_wms.then(|| view! {
-                                <NavItem
-                                    href="/pick-waves"
-                                    label="Pick waves"
-                                    icon=UiIcon::Waves
-                                    active=section == Section::PickWaves
-                                />
-                            })}
-                        }
-                    })}
-                    {can_view_labor.then(|| view! {
-                        <NavItem
-                            href="/labor"
-                            label="Labor"
-                            icon=UiIcon::Employees
-                            active=section == Section::Labor
-                        />
-                    })}
-                    {can_view_inventory.then(|| {
-                        view! {
-                            <NavItem
-                                href="/packing"
-                                label="Packing"
-                                icon=UiIcon::Packing
-                                active=section == Section::Packing
-                            />
-                            <NavItem
-                                href="/shipping"
-                                label="Shipping"
-                                icon=UiIcon::Shipping
-                                active=section == Section::Shipping
-                            />
-                            <NavItem
-                                href="/outbound-loads"
-                                label="Outbound loads"
-                                icon=UiIcon::Shipping
-                                active=section == Section::OutboundLoads
-                            />
-                            <NavItem
-                                href="/yard"
-                                label="Yard"
-                                icon=UiIcon::Shipping
-                                active=section == Section::Yard
-                            />
-                            <NavItem
-                                href="/loads"
-                                label="Inbound loads"
-                                icon=UiIcon::Loads
-                                active=section == Section::Loads
-                            />
-                            <NavItem
-                                href="/purchase-orders"
-                                label="Purchase orders"
-                                icon=UiIcon::Orders
-                                active=section == Section::PurchaseOrders
-                            />
-                            <NavItem
-                                href="/transfer-orders"
-                                label="Transfer orders"
-                                icon=UiIcon::Inventory
-                                active=section == Section::TransferOrders
-                            />
-                            <NavItem
-                                href="/inbound-asns"
-                                label="Inbound ASNs"
-                                icon=UiIcon::Loads
-                                active=section == Section::InboundAsns
-                            />
-                            <NavItem
-                                href="/customer-returns"
-                                label="Customer returns"
-                                icon=UiIcon::Disposition
-                                active=section == Section::CustomerReturns
-                            />
-                            <NavItem
-                                href="/vendor-returns"
-                                label="Vendor returns"
-                                icon=UiIcon::Disposition
-                                active=section == Section::VendorReturns
-                            />
-                            <NavItem
-                                href="/value-added-work"
-                                label="Value-added work"
-                                icon=UiIcon::Inventory
-                                active=section == Section::ValueAddedWork
-                            />
-                            <NavItem
-                                href="/putaway"
-                                label="Putaway"
-                                icon=UiIcon::Putaway
-                                active=section == Section::Putaway
-                            />
-                            <NavItem
-                                href="/inventory"
-                                label="Inventory"
-                                icon=UiIcon::Inventory
-                                active=section == Section::Inventory
-                            />
-                            <NavItem
-                                href="/inventory/holds"
-                                label="Quantity holds"
-                                icon=UiIcon::Holds
-                                active=section == Section::InventoryHolds
-                            />
-                            <NavItem
-                                href="/inventory/disposition"
-                                label="Disposition"
-                                icon=UiIcon::Disposition
-                                active=section == Section::InventoryDisposition
-                            />
-                            <NavItem
-                                href="/inventory/control"
-                                label="Inventory control"
-                                icon=UiIcon::Inventory
-                                active=section == Section::InventoryIntegrity
-                            />
-                            <NavItem
-                                href="/catalog"
-                                label="Master data"
-                                icon=UiIcon::Catalog
-                                active=section == Section::Catalog
-                            />
-                            <NavItem
-                                href="/work-orchestration"
-                                label="Work orchestration"
-                                icon=UiIcon::Orchestration
-                                active=section == Section::WorkOrchestration
-                            />
-                        }
-                    })}
-                    {can_supervise_wms.then(|| {
-                        view! {
-                            <NavItem
-                                href="/cycle-counts"
-                                label="Cycle counts"
-                                icon=UiIcon::Inventory
-                                active=section == Section::CycleCounts
-                            />
-                            <NavItem
-                                href="/replenishment"
-                                label="Replenishment"
-                                icon=UiIcon::Replenishment
-                                active=section == Section::Replenishment
-                            />
-                            <NavItem
-                                href="/slotting"
-                                label="Slotting"
-                                icon=UiIcon::Inventory
-                                active=section == Section::Slotting
-                            />
-                            <NavItem
-                                href="/automation"
-                                label="Automation"
-                                icon=UiIcon::Orchestration
-                                active=section == Section::Automation
-                            />
-                            <NavItem
-                                href="/cross-dock"
-                                label="Cross-dock"
-                                icon=UiIcon::CrossDock
-                                active=section == Section::CrossDock
-                            />
-                        }
-                    })}
-                    {is_platform_administrator.then(|| view! {
-                        <p class="nav-group">"Platform"</p>
-                        <NavItem
-                            href="/platform/data-cells"
-                            label="Data cells"
-                            icon=UiIcon::Building
-                            active=section == Section::FleetCells
-                        />
-                        <NavItem
-                            href="/platform/cell-moves"
-                            label="Cell moves"
-                            icon=UiIcon::Orchestration
-                            active=section == Section::CellMoves
-                        />
-                        <NavItem
-                            href="/platform/tenants"
-                            label="Tenant lifecycle"
-                            icon=UiIcon::Building
-                            active=section == Section::TenantLifecycle
-                        />
-                        <NavItem
-                            href="/platform/support-access"
-                            label="Support access"
-                            icon=UiIcon::Access
-                            active=section == Section::SupportAccess
-                        />
-                    })}
-                    <p class="nav-group">"Context"</p>
-                    <NavItem
-                        href="/access"
-                        label="Access"
-                        icon=UiIcon::Access
-                        active=section == Section::Access
-                    />
-                    {can_administer.then(|| {
-                        view! {
-                            <p class="nav-group">"Administration"</p>
-                            <NavItem
-                                href="/administration/service-accounts"
-                                label="Service accounts"
-                                icon=UiIcon::Access
-                                active=section == Section::ServiceAccounts
-                            />
-                            <NavItem
-                                href="/administration/clients"
-                                label="Clients"
+                                href="/portal"
+                                label="Client portal"
                                 icon=UiIcon::Clients
-                                active=section
-                                    == Section::Administration(AdministrationArea::Clients)
+                                active=section == Section::CustomerPortal
                             />
-                            <NavItem
-                                href="/administration/employees"
-                                label="Employees"
-                                icon=UiIcon::Employees
-                                active=section
-                                    == Section::Administration(AdministrationArea::Employees)
-                            />
-                            <NavItem
-                                href="/administration/count-plans"
-                                label="Count plans"
-                                icon=UiIcon::Counts
-                                active=section
-                                    == Section::Administration(AdministrationArea::CountPlans)
-                            />
-                            <NavItem
-                                href="/administration/configuration"
-                                label="Configuration"
-                                icon=UiIcon::Counts
-                                active=section
-                                    == Section::Administration(AdministrationArea::Configuration)
-                            />
-                            <NavItem
-                                href="/administration/billing"
-                                label="3PL billing"
-                                icon=UiIcon::Counts
-                                active=section
-                                    == Section::Administration(AdministrationArea::Billing)
-                            />
-                            <NavItem
-                                href="/administration/integrations"
-                                label="Integrations"
-                                icon=UiIcon::Disposition
-                                active=section
-                                    == Section::Administration(AdministrationArea::Integrations)
-                            />
-                            <NavItem
-                                href="/administration/users"
-                                label="Users"
-                                icon=UiIcon::Users
-                                active=section
-                                    == Section::Administration(AdministrationArea::Users)
-                            />
-                            <NavItem
-                                href="/administration/roles"
-                                label="Roles"
-                                icon=UiIcon::Roles
-                                active=section
-                                    == Section::Administration(AdministrationArea::Roles)
-                            />
-                            <NavItem
-                                href="/administration/permissions"
-                                label="Permissions"
-                                icon=UiIcon::Permissions
-                                active=section
-                                    == Section::Administration(AdministrationArea::Permissions)
-                            />
-                        }
+                        })}
+                    </div>
+
+                    {(can_view_orders || can_view_inventory || can_supervise_wms).then(|| view! {
+                        <NavGroup label="Outbound" active=section.is_outbound()>
+                            {can_view_orders.then(|| view! {
+                                <NavItem href="/orders" label="Orders" icon=UiIcon::Orders active=section == Section::Orders/>
+                            })}
+                            {can_supervise_wms.then(|| view! {
+                                <NavItem href="/pick-waves" label="Pick waves" icon=UiIcon::Waves active=section == Section::PickWaves/>
+                            })}
+                            {can_view_inventory.then(|| view! {
+                                <NavItem href="/packing" label="Packing" icon=UiIcon::Packing active=section == Section::Packing/>
+                                <NavItem href="/shipping" label="Shipping" icon=UiIcon::Shipping active=section == Section::Shipping/>
+                                <NavItem href="/outbound-loads" label="Outbound loads" icon=UiIcon::Shipping active=section == Section::OutboundLoads/>
+                                <NavItem href="/yard" label="Yard" icon=UiIcon::Shipping active=section == Section::Yard/>
+                            })}
+                        </NavGroup>
                     })}
+
+                    {(can_view_inventory || can_supervise_wms).then(|| view! {
+                        <NavGroup label="Inbound" active=section.is_inbound()>
+                            {can_view_inventory.then(|| view! {
+                                <NavItem href="/loads" label="Inbound loads" icon=UiIcon::Loads active=section == Section::Loads/>
+                                <NavItem href="/purchase-orders" label="Purchase orders" icon=UiIcon::Orders active=section == Section::PurchaseOrders/>
+                                <NavItem href="/transfer-orders" label="Transfer orders" icon=UiIcon::Inventory active=section == Section::TransferOrders/>
+                                <NavItem href="/inbound-asns" label="Inbound ASNs" icon=UiIcon::Loads active=section == Section::InboundAsns/>
+                                <NavItem href="/customer-returns" label="Customer returns" icon=UiIcon::Disposition active=section == Section::CustomerReturns/>
+                                <NavItem href="/vendor-returns" label="Vendor returns" icon=UiIcon::Disposition active=section == Section::VendorReturns/>
+                            })}
+                            {can_supervise_wms.then(|| view! {
+                                <NavItem href="/cross-dock" label="Cross-dock" icon=UiIcon::CrossDock active=section == Section::CrossDock/>
+                            })}
+                        </NavGroup>
+                    })}
+
+                    {(can_view_inventory || can_supervise_wms).then(|| view! {
+                        <NavGroup label="Inventory" active=section.is_inventory()>
+                            {can_view_inventory.then(|| view! {
+                                <NavItem href="/inventory" label="Inventory" icon=UiIcon::Inventory active=section == Section::Inventory/>
+                                <NavItem href="/putaway" label="Putaway" icon=UiIcon::Putaway active=section == Section::Putaway/>
+                                <NavItem href="/inventory/holds" label="Quantity holds" icon=UiIcon::Holds active=section == Section::InventoryHolds/>
+                                <NavItem href="/inventory/disposition" label="Disposition" icon=UiIcon::Disposition active=section == Section::InventoryDisposition/>
+                                <NavItem href="/inventory/control" label="Inventory control" icon=UiIcon::Inventory active=section == Section::InventoryIntegrity/>
+                            })}
+                            {can_supervise_wms.then(|| view! {
+                                <NavItem href="/cycle-counts" label="Cycle counts" icon=UiIcon::Counts active=section == Section::CycleCounts/>
+                                <NavItem href="/replenishment" label="Replenishment" icon=UiIcon::Replenishment active=section == Section::Replenishment/>
+                            })}
+                            {can_view_inventory.then(|| view! {
+                                <NavItem href="/slotting" label="Slotting" icon=UiIcon::Inventory active=section == Section::Slotting/>
+                            })}
+                        </NavGroup>
+                    })}
+
+                    {(can_view_inventory || can_view_labor || can_supervise_wms).then(|| view! {
+                        <NavGroup label="Execution" active=section.is_execution()>
+                            {can_view_labor.then(|| view! {
+                                <NavItem href="/labor" label="Labor" icon=UiIcon::Employees active=section == Section::Labor/>
+                            })}
+                            {can_view_inventory.then(|| view! {
+                                <NavItem href="/value-added-work" label="Value-added work" icon=UiIcon::Inventory active=section == Section::ValueAddedWork/>
+                                <NavItem href="/work-orchestration" label="Work orchestration" icon=UiIcon::Orchestration active=section == Section::WorkOrchestration/>
+                            })}
+                            {can_supervise_wms.then(|| view! {
+                                <NavItem href="/automation" label="Automation" icon=UiIcon::Orchestration active=section == Section::Automation/>
+                            })}
+                        </NavGroup>
+                    })}
+
+                    {can_view_inventory.then(|| view! {
+                        <div class="nav-primary nav-primary-secondary">
+                            <NavItem href="/catalog" label="Master data" icon=UiIcon::Catalog active=section == Section::Catalog/>
+                        </div>
+                    })}
+
+                    {is_platform_administrator.then(|| view! {
+                        <NavGroup label="Platform" active=section.is_platform()>
+                            <NavItem href="/platform/data-cells" label="Data cells" icon=UiIcon::Building active=section == Section::FleetCells/>
+                            <NavItem href="/platform/cell-moves" label="Cell moves" icon=UiIcon::Orchestration active=section == Section::CellMoves/>
+                            <NavItem href="/platform/tenants" label="Tenant lifecycle" icon=UiIcon::Building active=section == Section::TenantLifecycle/>
+                            <NavItem href="/platform/support-access" label="Support access" icon=UiIcon::Access active=section == Section::SupportAccess/>
+                        </NavGroup>
+                    })}
+
+                    {can_administer.then(|| view! {
+                        <NavGroup label="Administration" active=section.is_administration()>
+                            <NavItem href="/administration/service-accounts" label="Service accounts" icon=UiIcon::Access active=section == Section::ServiceAccounts/>
+                            <NavItem href="/administration/clients" label="Clients" icon=UiIcon::Clients active=section == Section::Administration(AdministrationArea::Clients)/>
+                            <NavItem href="/administration/employees" label="Employees" icon=UiIcon::Employees active=section == Section::Administration(AdministrationArea::Employees)/>
+                            <NavItem href="/administration/count-plans" label="Count plans" icon=UiIcon::Counts active=section == Section::Administration(AdministrationArea::CountPlans)/>
+                            <NavItem href="/administration/configuration" label="Configuration" icon=UiIcon::Counts active=section == Section::Administration(AdministrationArea::Configuration)/>
+                            <NavItem href="/administration/billing" label="3PL billing" icon=UiIcon::Counts active=section == Section::Administration(AdministrationArea::Billing)/>
+                            <NavItem href="/administration/integrations" label="Integrations" icon=UiIcon::Disposition active=section == Section::Administration(AdministrationArea::Integrations)/>
+                            <NavItem href="/administration/users" label="Users" icon=UiIcon::Users active=section == Section::Administration(AdministrationArea::Users)/>
+                            <NavItem href="/administration/roles" label="Roles" icon=UiIcon::Roles active=section == Section::Administration(AdministrationArea::Roles)/>
+                            <NavItem href="/administration/permissions" label="Permissions" icon=UiIcon::Permissions active=section == Section::Administration(AdministrationArea::Permissions)/>
+                        </NavGroup>
+                    })}
+
+                    <div class="nav-primary nav-primary-secondary">
+                        <NavItem href="/access" label="Access & scope" icon=UiIcon::Access active=section == Section::Access/>
+                    </div>
                 </nav>
                 <div class="sidebar-scope">
-                    <span>"Active organization"</span>
-                    <strong>{tenant_name.clone()}</strong>
-                    <small>{scope_summary(&session)}</small>
+                    <span>"Active scope"</span>
+                    <strong>{scope_summary(&session)}</strong>
                     {session.active_support_access_id.map(|grant_id| view! {
                         <small>{format!("Read-only support grant #{grant_id}")}</small>
                     })}
@@ -417,41 +239,61 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
 
             <div class="app-region">
                 <header class="topbar">
-                    <div class="tenant-control">
-                        <Icon icon=UiIcon::Building/>
-                        <label for="tenant-selector">"Organization"</label>
-                        <select
-                            id="tenant-selector"
-                            prop:value=move || selected_tenant.get()
-                            disabled=move || switching_tenant.get() || tenant_count <= 1
-                            on:change=switch_tenant
-                        >
-                            {tenant_options}
-                        </select>
-                        {move || {
-                            tenant_error.get().map(|message| {
-                                view! {
-                                    <span class="tenant-switch-error" role="alert">
-                                        {message}
-                                    </span>
-                                }
-                            })
-                        }}
+                    <div class="workspace-context">
+                        <div class="page-context" aria-label="Current workspace">
+                            <span>{section.group_label()}</span>
+                            <strong>{section.label()}</strong>
+                        </div>
+                        <div class="tenant-control">
+                            <Icon icon=UiIcon::Building/>
+                            <label class="sr-only" for="tenant-selector">"Organization"</label>
+                            <select
+                                id="tenant-selector"
+                                aria-label="Active organization"
+                                prop:value=move || selected_tenant.get()
+                                disabled=move || switching_tenant.get() || tenant_count <= 1
+                                on:change=switch_tenant
+                            >
+                                {tenant_options}
+                            </select>
+                            {move || {
+                                tenant_error.get().map(|message| {
+                                    view! { <span class="tenant-switch-error" role="alert">{message}</span> }
+                                })
+                            }}
+                        </div>
                     </div>
                     <div class="identity">
                         <DisplayOptionsMenu/>
-                        <span class="avatar" aria-hidden="true">{initials}</span>
-                        <span class="identity-copy">
-                            <strong>{display_name}</strong>
-                            <small>{email}</small>
-                        </span>
-                        <button class="button quiet-action" type="button" on:click=sign_out>
-                            <Icon icon=UiIcon::SignOut/>
-                            <span>"Sign out"</span>
-                        </button>
+                        <details class="profile-menu">
+                            <summary class="profile-menu-trigger" aria-label="Account menu">
+                                <span class="avatar" aria-hidden="true">{initials}</span>
+                                <strong>{display_name.clone()}</strong>
+                                <span class="profile-menu-chevron" aria-hidden="true"></span>
+                            </summary>
+                            <section class="profile-menu-popover" aria-label="Account">
+                                <header>
+                                    <strong>{display_name}</strong>
+                                    <span>{email}</span>
+                                </header>
+                                <dl>
+                                    <div><dt>"Organization"</dt><dd>{tenant_name}</dd></div>
+                                    <div><dt>"Scope"</dt><dd>{scope_summary(&session)}</dd></div>
+                                </dl>
+                                <button class="button quiet-action" type="button" on:click=sign_out>
+                                    <Icon icon=UiIcon::SignOut/>
+                                    <span>"Sign out"</span>
+                                </button>
+                            </section>
+                        </details>
                     </div>
                 </header>
-                <main class="workspace">
+                <main
+                    id="main-content"
+                    class="workspace"
+                    tabindex="-1"
+                    aria-label=format!("{} workspace", section.label())
+                >
                     <ToastViewport/>
                     {children()}
                 </main>

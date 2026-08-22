@@ -265,7 +265,7 @@ fn UnloadingConfirmation(
                     <span><strong>"Expected seal"</strong> {expected_seal.get_value().unwrap_or_default()}</span>
                 </Show>
             </div>
-            <div class="form-grid three-column">
+            <div class="fulfillment-form-grid three-column">
                 <label>
                     <span>"Load scan"</span>
                     <input

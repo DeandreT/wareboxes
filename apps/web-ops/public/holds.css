@@ -6,7 +6,7 @@
   overflow: hidden;
 }
 
-.command-notice {
+.holds-workbench .command-notice {
   padding: 9px 12px;
   border-left: 3px solid var(--green);
   background: var(--green-soft);
@@ -15,7 +15,7 @@
   font-weight: 680;
 }
 
-.holds-position-grid {
+.holds-workbench .holds-position-grid {
   display: grid;
   min-height: 0;
   grid-template-columns: minmax(0, 1fr) 330px;
@@ -24,7 +24,7 @@
   overflow: hidden;
 }
 
-.position-browser {
+.holds-workbench .position-browser {
   display: grid;
   min-width: 0;
   min-height: 0;
@@ -32,26 +32,26 @@
   overflow: hidden;
 }
 
-.position-browser .table-scroll,
-.hold-ledger .table-scroll {
+.holds-workbench .position-browser .table-scroll,
+.holds-workbench .hold-ledger .table-scroll {
   min-height: 0;
   overflow: auto;
 }
 
-.workbench-title {
+.holds-workbench .workbench-title {
   min-height: 50px;
 }
 
-.balance-select-table {
+.holds-workbench .balance-select-table {
   min-width: 760px;
 }
 
-.balance-select-table .selected-row {
+.holds-workbench .balance-select-table .selected-row {
   background: var(--amber-soft);
   box-shadow: inset 3px 0 var(--accent);
 }
 
-.action-column {
+.holds-workbench .action-column {
   position: sticky;
   z-index: 2;
   right: 0;
@@ -61,20 +61,20 @@
   text-align: right;
 }
 
-.data-table th.action-column {
+.holds-workbench .data-table th.action-column {
   z-index: 3;
   background: var(--surface-raised);
 }
 
-.data-table tbody tr:hover .action-column {
+.holds-workbench .data-table tbody tr:hover .action-column {
   background: #f8faf9;
 }
 
-.balance-select-table .selected-row .action-column {
+.holds-workbench .balance-select-table .selected-row .action-column {
   background: var(--amber-soft);
 }
 
-.table-action {
+.holds-workbench .table-action {
   min-width: 68px;
   min-height: 28px;
   padding: 0 8px;
@@ -84,27 +84,27 @@
   font-size: 11px;
 }
 
-.table-action:hover {
+.holds-workbench .table-action:hover {
   border-color: #808b87;
   background: var(--surface-raised);
 }
 
-.table-action.danger {
+.holds-workbench .table-action.danger {
   border-color: #d7a9ac;
   color: #8c3035;
 }
 
-.table-action.inspection-action {
+.holds-workbench .table-action.inspection-action {
   border-color: #9ebcaf;
   color: #116348;
 }
 
-.table-action.inspection-action .ui-icon {
+.holds-workbench .table-action.inspection-action .ui-icon {
   width: 13px;
   height: 13px;
 }
 
-.uom-detail {
+.holds-workbench .uom-detail {
   display: inline;
   margin-left: 3px;
   color: var(--ink-soft);
@@ -112,7 +112,7 @@
   font-weight: 600;
 }
 
-.command-panel {
+.holds-workbench .command-panel {
   position: relative;
   top: auto;
   min-height: 0;
@@ -124,26 +124,26 @@
   box-shadow: 0 4px 14px rgb(23 27 29 / 4%);
 }
 
-.hold-form,
-.release-panel,
-.command-placeholder {
+.holds-workbench .hold-form,
+.holds-workbench .release-panel,
+.holds-workbench .command-placeholder {
   padding: 14px;
 }
 
-.hold-form {
+.holds-workbench .hold-form {
   display: grid;
   gap: 7px;
 }
 
-.command-panel-heading {
+.holds-workbench .command-panel-heading {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 4px;
 }
 
-.command-panel-heading .command-icon,
-.command-placeholder .command-icon {
+.holds-workbench .command-panel-heading .command-icon,
+.holds-workbench .command-placeholder .command-icon {
   display: grid;
   width: 32px;
   height: 32px;
@@ -154,19 +154,19 @@
   color: var(--green);
 }
 
-.command-panel-heading.danger .command-icon {
+.holds-workbench .command-panel-heading.danger .command-icon {
   border-color: #dfb8bb;
   background: var(--red-soft);
   color: var(--red);
 }
 
-.command-panel-heading h2,
-.command-placeholder h2 {
+.holds-workbench .command-panel-heading h2,
+.holds-workbench .command-placeholder h2 {
   margin: 0;
   font-size: 16px;
 }
 
-.position-facts {
+.holds-workbench .position-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 7px 0 9px;
@@ -174,7 +174,7 @@
   border-left: 1px solid var(--line);
 }
 
-.position-facts div {
+.holds-workbench .position-facts div {
   display: grid;
   min-width: 0;
   gap: 2px;
@@ -183,18 +183,18 @@
   border-bottom: 1px solid var(--line);
 }
 
-.position-facts .wide {
+.holds-workbench .position-facts .wide {
   grid-column: 1 / -1;
 }
 
-.position-facts dt {
+.holds-workbench .position-facts dt {
   color: var(--ink-soft);
   font-size: 9px;
   font-weight: 720;
   text-transform: uppercase;
 }
 
-.position-facts dd {
+.holds-workbench .position-facts dd {
   overflow: hidden;
   margin: 0;
   font-size: 11px;
@@ -203,18 +203,18 @@
   white-space: nowrap;
 }
 
-.hold-form > label,
-.reference-fields label {
+.holds-workbench .hold-form > label,
+.holds-workbench .reference-fields label {
   margin-top: 3px;
   color: #31383b;
   font-size: 11px;
   font-weight: 720;
 }
 
-.hold-form > input,
-.hold-form > select,
-.hold-form > textarea,
-.reference-fields input {
+.holds-workbench .hold-form > input,
+.holds-workbench .hold-form > select,
+.holds-workbench .hold-form > textarea,
+.holds-workbench .reference-fields input {
   width: 100%;
   min-height: var(--control-height);
   padding: 5px 8px;
@@ -225,28 +225,28 @@
   font-size: 12px;
 }
 
-.hold-form > textarea {
+.holds-workbench .hold-form > textarea {
   min-height: 64px;
   resize: vertical;
 }
 
-.inspection-panel > textarea {
+.holds-workbench .inspection-panel > textarea {
   min-height: 84px;
 }
 
-.hold-form > input:focus,
-.hold-form > select:focus,
-.hold-form > textarea:focus,
-.reference-fields input:focus {
+.holds-workbench .hold-form > input:focus,
+.holds-workbench .hold-form > select:focus,
+.holds-workbench .hold-form > textarea:focus,
+.holds-workbench .reference-fields input:focus {
   border-color: var(--blue);
 }
 
-.reference-fields {
+.holds-workbench .reference-fields {
   margin-top: 4px;
   border-top: 1px solid var(--line);
 }
 
-.reference-fields summary {
+.holds-workbench .reference-fields summary {
   padding: 8px 0 4px;
   color: var(--ink-soft);
   font-size: 11px;
@@ -254,23 +254,13 @@
   cursor: pointer;
 }
 
-.reference-fields > div {
+.holds-workbench .reference-fields > div {
   display: grid;
   grid-template-columns: 1fr 92px;
   gap: 4px 7px;
 }
 
-.inline-command-error {
-  margin-top: 5px;
-  padding: 8px 9px;
-  border-left: 3px solid var(--red);
-  background: var(--red-soft);
-  color: #70272b;
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.command-actions {
+.holds-workbench .command-actions {
   display: flex;
   justify-content: flex-end;
   gap: 7px;
@@ -279,24 +269,12 @@
   border-top: 1px solid var(--line);
 }
 
-.command-actions .primary-action {
+.holds-workbench .command-actions .primary-action {
   min-height: var(--control-height);
   margin-top: 0;
 }
 
-.danger-action {
-  min-height: var(--control-height);
-  padding: 0 12px;
-  border: 1px solid #a9363b;
-  background: var(--red);
-  color: #fff;
-}
-
-.danger-action:hover:not(:disabled) {
-  background: #9e3338;
-}
-
-.command-placeholder {
+.holds-workbench .command-placeholder {
   display: grid;
   min-height: 378px;
   align-content: center;
@@ -305,30 +283,30 @@
   text-align: center;
 }
 
-.command-placeholder .command-icon {
+.holds-workbench .command-placeholder .command-icon {
   margin-bottom: 12px;
 }
 
-.command-placeholder p:last-child {
+.holds-workbench .command-placeholder p:last-child {
   max-width: 240px;
   margin: 7px 0 0;
   font-size: 12px;
   line-height: 1.45;
 }
 
-.release-panel {
+.holds-workbench .release-panel {
   display: grid;
   gap: 8px;
 }
 
-.confirmation-copy {
+.holds-workbench .confirmation-copy {
   margin: 2px 0;
   color: var(--ink-soft);
   font-size: 12px;
   line-height: 1.45;
 }
 
-.hold-ledger {
+.holds-workbench .hold-ledger {
   display: grid;
   min-width: 0;
   min-height: 0;
@@ -336,17 +314,17 @@
   overflow: hidden;
 }
 
-.ledger-toolbar {
+.holds-workbench .ledger-toolbar {
   min-height: 52px;
 }
 
-.ledger-controls {
+.holds-workbench .ledger-controls {
   display: flex;
   align-items: center;
   gap: 9px;
 }
 
-.segmented-control {
+.holds-workbench .segmented-control {
   display: inline-flex;
   height: var(--control-height);
   border: 1px solid var(--line-strong);
@@ -354,7 +332,7 @@
   background: var(--surface-raised);
 }
 
-.segmented-control button {
+.holds-workbench .segmented-control button {
   min-width: 70px;
   padding: 0 9px;
   border: 0;
@@ -366,16 +344,16 @@
   cursor: pointer;
 }
 
-.segmented-control button:last-child {
+.holds-workbench .segmented-control button:last-child {
   border-right: 0;
 }
 
-.segmented-control button.active {
+.holds-workbench .segmented-control button.active {
   background: #30373a;
   color: #fff;
 }
 
-.hold-summary-strip {
+.holds-workbench .hold-summary-strip {
   display: flex;
   min-height: 34px;
   align-items: center;
@@ -387,68 +365,68 @@
   font-size: 10px;
 }
 
-.hold-summary-strip span {
+.holds-workbench .hold-summary-strip span {
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
 }
 
-.hold-summary-strip strong {
+.holds-workbench .hold-summary-strip strong {
   color: var(--ink);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-.holds-table {
+.holds-workbench .holds-table {
   min-width: 980px;
 }
 
-.reason-label {
+.holds-workbench .reason-label {
   font-weight: 680;
 }
 
 @media (max-width: 1100px) {
-  .balance-select-table {
+  .holds-workbench .balance-select-table {
     min-width: 420px;
   }
 
-  .position-owner-column,
-  .position-facility-column,
-  .hold-owner-column,
-  .hold-created-column {
+  .holds-workbench .position-owner-column,
+  .holds-workbench .position-facility-column,
+  .holds-workbench .hold-owner-column,
+  .holds-workbench .hold-created-column {
     display: none;
   }
 
-  .holds-table {
+  .holds-workbench .holds-table {
     min-width: 720px;
   }
 }
 
 @media (max-height: 820px) and (min-width: 1101px) {
-  .hold-form,
-  .release-panel,
-  .command-placeholder {
+  .holds-workbench .hold-form,
+  .holds-workbench .release-panel,
+  .holds-workbench .command-placeholder {
     padding: 8px 12px;
   }
 
-  .hold-form,
-  .release-panel {
+  .holds-workbench .hold-form,
+  .holds-workbench .release-panel {
     gap: 5px;
   }
 
-  .position-facts {
+  .holds-workbench .position-facts {
     margin: 4px 0 6px;
   }
 
-  .position-facts div {
+  .holds-workbench .position-facts div {
     padding: 4px 7px;
   }
 
-  .inspection-panel > textarea {
+  .holds-workbench .inspection-panel > textarea {
     min-height: 44px;
   }
 
-  .command-actions {
+  .holds-workbench .command-actions {
     margin-top: 2px;
     padding-top: 5px;
   }

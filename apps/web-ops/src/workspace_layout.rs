@@ -1,8 +1,8 @@
 use leptos::prelude::*;
 use lucide_leptos::{GripVertical, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen};
 
-const MIN_MASTER_WIDTH: i32 = 320;
-const MAX_MASTER_WIDTH: i32 = 1_100;
+const MIN_MASTER_WIDTH: i32 = 280;
+const MAX_MASTER_WIDTH: i32 = 760;
 const KEYBOARD_STEP: i32 = 24;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -212,6 +212,7 @@ pub fn SplitPaneHandle(layout: SplitPaneState) -> impl IntoView {
             aria-valuemin=MIN_MASTER_WIDTH
             aria-valuemax=MAX_MASTER_WIDTH
             aria-valuenow=move || layout.width.get()
+            aria-valuetext=move || format!("Preferred list pane width: {} pixels", layout.width.get())
             tabindex=move || if layout.mode() == PaneMode::Both { "0" } else { "-1" }
             on:pointerdown=move |event| layout.begin_drag(event)
             on:pointermove=move |event| layout.drag(event)

@@ -102,7 +102,7 @@ pub(super) fn InboundCancellationConfirmation(
             <div class="evidence-summary">
                 <span><strong>"Load"</strong> {reference}</span>
             </div>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Reason"</span>
                     <select

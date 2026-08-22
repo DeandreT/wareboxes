@@ -359,14 +359,19 @@ pub(super) fn PickShortageWorkbench(
                                     .into_iter()
                                     .map(|shortage| {
                                         let row_shortage = shortage.clone();
+                                        let button_shortage = shortage.clone();
                                         let shortage_id = shortage.shortage_id;
+                                        let detail_label = format!(
+                                            "View shortage details for order {} line {}",
+                                            shortage.order_key, shortage.order_line_id
+                                        );
                                         view! {
                                             <tr
                                                 class:active-row=move || selected_id == Some(shortage_id)
                                                 on:click=move |_| select_shortage(row_shortage.clone())
                                             >
                                                 <td>{compact_timestamp(&shortage.reported_at)}</td>
-                                                <td><strong>{shortage.order_key}</strong><small class="cell-detail">{format!("#{} / Line {}", shortage.order_id, shortage.order_line_id)}</small></td>
+                                                <td><button type="button" class="row-link" aria-label=detail_label on:click=move |event| { event.stop_propagation(); select_shortage(button_shortage.clone()); }>{shortage.order_key}</button><small class="cell-detail">{format!("#{} / Line {}", shortage.order_id, shortage.order_line_id)}</small></td>
                                                 <td><span class=shortage_status_class(shortage.status)>{shortage_status_label(shortage.status, shortage.resolution)}</span></td>
                                                 <td class="numeric strong">{format_quantity(shortage.quantities.short)}</td>
                                                 <td class="numeric">{format_quantity(shortage.remaining_to_allocate_quantity)}</td>

@@ -97,7 +97,7 @@
   margin: .15rem 0 0;
 }
 
-.history-marker {
+.vas-history-marker {
   background: var(--accent, #246c5a);
   border-radius: 50%;
   height: .5rem;
@@ -120,7 +120,7 @@
 }
 
 .vas-command-bar > div,
-.command-recovery {
+.vas-command-recovery {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
@@ -170,7 +170,7 @@
   min-width: 0;
 }
 
-.command-recovery .inline-command-error {
+.vas-command-recovery .inline-command-error {
   flex: 1 1 18rem;
   margin: 0;
 }

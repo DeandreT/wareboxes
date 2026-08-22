@@ -203,7 +203,7 @@ fn metrics(signals: Signals) -> AnyView {
         })
         .count();
     view! {
-        <section class="cell-move-metrics"><article><span>"Moves loaded"</span><strong>{movements.len()}</strong></article><article><span>"In progress"</span><strong>{in_progress}</strong></article><article><span>"Write fenced"</span><strong>{frozen}</strong></article><article><span>"Awaiting cutover proof"</span><strong>{awaiting_proof}</strong></article></section>
+        <section class="cell-move-metrics"><article><span>"Moves loaded"</span><strong>{movements.len()}</strong></article><article><span>"In progress loaded"</span><strong>{in_progress}</strong></article><article><span>"Write fenced loaded"</span><strong>{frozen}</strong></article><article><span>"Awaiting cutover proof loaded"</span><strong>{awaiting_proof}</strong></article></section>
     }
     .into_any()
 }
@@ -242,7 +242,7 @@ fn movement_panel(signals: Signals) -> AnyView {
         state("No tenant cell moves match these filters.", false)
     } else {
         view! {
-            <div class="table-scroll"><table class="dense-table"><thead><tr><th>"Tenant"</th><th>"Route"</th><th>"Status"</th><th>"Revision"</th><th></th></tr></thead><tbody>{page.items.into_iter().map(|movement| {
+            <div class="table-scroll"><table class="dense-table"><caption class="sr-only">"Tenant cell moves in the current filtered page"</caption><thead><tr><th>"Tenant"</th><th>"Route"</th><th>"Status"</th><th>"Revision"</th><th></th></tr></thead><tbody>{page.items.into_iter().map(|movement| {
                 let id = movement.tenant_cell_move_id;
                 let selected = signals.selected_id.get() == Some(id);
                 view! { <tr class:selected=selected><td><strong>{movement.tenant.name.clone()}</strong><small>{format!("{} · tenant #{}", movement.tenant.slug, movement.tenant.tenant_id)}</small></td><td><strong>{format!("{} → {}", movement.source_cell.key, movement.target_cell.key)}</strong><small>{format!("{} → {}", movement.source_cell.region, movement.target_cell.region)}</small></td><td><span class=display::status_class(movement.status)>{display::status_label(movement.status)}</span></td><td>{movement.revision.get()}</td><td><button class="text-button" type="button" on:click=move |_| load_detail(signals, id)>"Inspect"</button></td></tr> }

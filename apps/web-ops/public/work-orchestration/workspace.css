@@ -356,6 +356,13 @@
   display: grid;
 }
 
+.orchestration-plan-workspace {
+  display: grid;
+  min-width: 0;
+  align-items: start;
+  gap: 8px;
+}
+
 .orchestration-signal {
   display: grid;
   min-width: 0;
@@ -939,6 +946,12 @@
 .orchestration-dispatch-state .danger-action {
   border-color: var(--red);
   color: var(--danger-ink);
+}
+
+@media (min-width: 1900px) {
+  .orchestration-plan-workspace {
+    grid-template-columns: minmax(1080px, 1.65fr) minmax(520px, 1fr);
+  }
 }
 
 @media (max-width: 1500px) {

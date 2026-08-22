@@ -100,10 +100,7 @@ pub(crate) fn ServiceAccountsWorkspace(
     };
     let apply = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
-        signals.selected.set(None);
-        signals
-            .events
-            .set(ServiceAccountEventPage::new(Vec::new(), None));
+        clear_selection(signals);
         refresh(signals);
     };
     let retry = move |_| {
@@ -149,6 +146,7 @@ fn account_panel(signals: Signals) -> AnyView {
         view! {
             <div class="table-scroll">
                 <table class="dense-table">
+                    <caption class="sr-only">"Service accounts in the current filtered page"</caption>
                     <thead><tr><th>"Account"</th><th>"Scope"</th><th>"Permissions"</th><th>"Credentials"</th><th>"Last used"</th><th></th></tr></thead>
                     <tbody>
                         {page.items.into_iter().map(|account| {
@@ -250,6 +248,7 @@ fn credential_panel(
         view! {
             <div class="table-scroll">
                 <table class="dense-table">
+                    <caption class="sr-only">"Credentials issued to this service account"</caption>
                     <thead><tr><th>"Label / prefix"</th><th>"Created"</th><th>"Expiry"</th><th>"Last used"</th><th>"State"</th><th></th></tr></thead>
                     <tbody>{rows.clone().into_iter().map(|credential| {
                         let id = credential.credential_id;
@@ -317,12 +316,26 @@ fn event_panel(signals: Signals, account_id: i64) -> AnyView {
 }
 
 fn refresh(signals: Signals) {
+    let selected_id = signals
+        .selected
+        .get_untracked()
+        .map(|account| account.service_account_id);
+    load_accounts(signals, None, false);
+    load_options(signals);
+    if let Some(id) = selected_id {
+        load_detail(signals, id);
+    }
+}
+
+fn clear_selection(signals: Signals) {
+    signals.detail_generation.update(|value| *value += 1);
+    signals.event_generation.update(|value| *value += 1);
+    signals.detail_loading.set(false);
+    signals.events_loading.set(false);
     signals.selected.set(None);
     signals
         .events
         .set(ServiceAccountEventPage::new(Vec::new(), None));
-    load_accounts(signals, None, false);
-    load_options(signals);
 }
 
 fn load_accounts(signals: Signals, cursor: Option<OpaqueCursor>, append: bool) {
@@ -384,6 +397,7 @@ fn load_detail(signals: Signals, id: i64) {
     signals.detail_generation.update(|value| *value += 1);
     let generation = signals.detail_generation.get_untracked();
     signals.detail_loading.set(true);
+    signals.selected.set(None);
     signals.event_generation.update(|value| *value += 1);
     signals
         .events

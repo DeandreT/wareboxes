@@ -90,8 +90,8 @@ pub(crate) fn CrossDockWorkspace(
 
         <form class="cross-dock-toolbar" on:submit=apply>
             <div class="segmented-control" role="tablist" aria-label="Cross-dock views">
-                <button type="button" role="tab" class:active=move || tab.get() == CrossDockTab::Planning aria-selected=move || (tab.get() == CrossDockTab::Planning).to_string() on:click=move |_| tab.set(CrossDockTab::Planning)>"Planning"</button>
-                <button type="button" role="tab" class:active=move || tab.get() == CrossDockTab::Work aria-selected=move || (tab.get() == CrossDockTab::Work).to_string() on:click=move |_| tab.set(CrossDockTab::Work)>"Work queue"</button>
+                <button id="cross-dock-planning-tab" type="button" role="tab" aria-controls="cross-dock-planning-panel" class:active=move || tab.get() == CrossDockTab::Planning aria-selected=move || (tab.get() == CrossDockTab::Planning).to_string() on:click=move |_| tab.set(CrossDockTab::Planning)>"Planning"</button>
+                <button id="cross-dock-work-tab" type="button" role="tab" aria-controls="cross-dock-work-panel" class:active=move || tab.get() == CrossDockTab::Work aria-selected=move || (tab.get() == CrossDockTab::Work).to_string() on:click=move |_| tab.set(CrossDockTab::Work)>"Work queue"</button>
             </div>
             <label>
                 <span class="sr-only">"Facility"</span>
@@ -126,14 +126,15 @@ pub(crate) fn CrossDockWorkspace(
             <p class="inline-command-error cross-dock-error" role="alert">{move || error.get().unwrap_or_default()}</p>
         </Show>
 
-        <Show when=move || tab.get() == CrossDockTab::Planning>
-            <section class="cross-dock-panel" aria-label="Cross-dock planning options">
+        <section id="cross-dock-planning-panel" class="cross-dock-panel" role="tabpanel" aria-labelledby="cross-dock-planning-tab" hidden=move || tab.get() != CrossDockTab::Planning>
                 <header><h2>"Actionable demand"</h2><span>{move || options.get().map_or(0, |page| page.items.len())}</span></header>
-                <div class="cross-dock-table-scroll">
+                <div class="cross-dock-table-scroll" aria-busy=move || loading.get().to_string()>
                     <table>
+                        <caption class="sr-only">"Received stock eligible for cross-dock planning"</caption>
                         <thead><tr><th>"Order"</th><th>"Client"</th><th>"Item"</th><th>"Receipt"</th><th>"Source"</th><th class="numeric">"Available"</th><th class="numeric">"Demand"</th><th class="numeric">"Plan"</th><th aria-label="Actions"></th></tr></thead>
                         <tbody>
                             {move || match options.get() {
+                                Some(page) if page.items.is_empty() => view! { <tr><td colspan="9" class="empty-row" role="status" aria-live="polite">"No eligible received stock currently matches open order demand."</td></tr> }.into_any(),
                                 Some(page) => page.items.into_iter().map(|option| {
                                 let plan = option.clone();
                                 view! { <tr>
@@ -148,25 +149,22 @@ pub(crate) fn CrossDockWorkspace(
                                     <td><button type="button" class="button primary-action compact" disabled=move || loading.get() on:click=move |_| plan_target.set(Some(plan.clone()))><Icon icon=UiIcon::Add/><span>"Plan"</span></button></td>
                                 </tr> }
                             }).collect_view().into_any(),
-                                None => view! { <tr><td colspan="9" class="empty-row">"Loading planning options..."</td></tr> }.into_any(),
+                                None => view! { <tr><td colspan="9" class="empty-row" role="status" aria-live="polite">"Loading planning options..."</td></tr> }.into_any(),
                             }}
                         </tbody>
                     </table>
                 </div>
-                <Show when=move || options.get().is_some_and(|page| page.items.is_empty())>
-                    <p class="empty-state">"No eligible received stock currently matches open order demand."</p>
-                </Show>
-            </section>
-        </Show>
+        </section>
 
-        <Show when=move || tab.get() == CrossDockTab::Work>
-            <section class="cross-dock-panel" aria-label="Cross-dock work queue">
+        <section id="cross-dock-work-panel" class="cross-dock-panel" role="tabpanel" aria-labelledby="cross-dock-work-tab" hidden=move || tab.get() != CrossDockTab::Work>
                 <header><h2>"Execution work"</h2><span>{move || work.get().map_or(0, |page| page.items.len())}</span></header>
-                <div class="cross-dock-table-scroll">
+                <div class="cross-dock-table-scroll" aria-busy=move || loading.get().to_string()>
                     <table>
+                        <caption class="sr-only">"Cross-dock execution work matching the active filters"</caption>
                         <thead><tr><th>"Work"</th><th>"State"</th><th>"Order"</th><th>"Item"</th><th>"Route"</th><th class="numeric">"Qty"</th><th>"Client / facility"</th><th aria-label="Actions"></th></tr></thead>
                         <tbody>
                             {move || match work.get() {
+                                Some(page) if page.items.is_empty() => view! { <tr><td colspan="8" class="empty-row" role="status" aria-live="polite">"No cross-dock work matches these filters."</td></tr> }.into_any(),
                                 Some(page) => page.items.into_iter().map(|entry| {
                                 let cancel = StoredValue::new(entry.clone());
                                 let pending = entry.status == CrossDockWorkStatus::Pending;
@@ -181,14 +179,12 @@ pub(crate) fn CrossDockWorkspace(
                                     <td><Show when=move || pending><button type="button" class="button danger-action compact" on:click=move |_| cancel_target.set(Some(cancel.get_value()))>"Cancel"</button></Show></td>
                                 </tr> }
                             }).collect_view().into_any(),
-                                None => view! { <tr><td colspan="8" class="empty-row">"Loading cross-dock work..."</td></tr> }.into_any(),
+                                None => view! { <tr><td colspan="8" class="empty-row" role="status" aria-live="polite">"Loading cross-dock work..."</td></tr> }.into_any(),
                             }}
                         </tbody>
                     </table>
                 </div>
-                <Show when=move || work.get().is_some_and(|page| page.items.is_empty())><p class="empty-state">"No cross-dock work matches these filters."</p></Show>
-            </section>
-        </Show>
+        </section>
 
         <Show when=move || plan_target.get().is_some()>
             {move || plan_target.get().map(|target| view! { <PlanDialog target on_close=Callback::new(move |()| plan_target.set(None)) on_saved=refresh on_unauthorized/> })}

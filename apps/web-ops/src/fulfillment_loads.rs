@@ -670,7 +670,7 @@ fn CreateLoadPanel(
                     "Close"
                 </button>
             </div>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Facility"</span>
                     <select
@@ -788,7 +788,7 @@ fn CreateLoadPanel(
                 <div class="detail-section-title">
                     <div><h3>"Expected freight"</h3><span>{move || format!("{} lines", lines.get().len())}</span></div>
                 </div>
-                <div class="form-grid three-column inbound-line-entry">
+                <div class="fulfillment-form-grid three-column inbound-line-entry">
                     <label>
                         <span>"Item"</span>
                         <select required disabled=move || pending.get() || item_pending.get() || eligible_items.get().is_empty() prop:value=move || line_item_id.get() on:change=move |event| line_item_id.set(event_target_value(&event))>

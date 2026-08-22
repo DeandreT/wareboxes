@@ -52,6 +52,10 @@
   background: var(--surface);
 }
 
+.cross-dock-panel[hidden] {
+  display: none;
+}
+
 .cross-dock-panel > header {
   display: flex;
   align-items: center;

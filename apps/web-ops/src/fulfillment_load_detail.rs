@@ -35,6 +35,30 @@ pub(super) enum LoadDetailTab {
     Documents,
 }
 
+impl LoadDetailTab {
+    fn tab_id(self) -> &'static str {
+        match self {
+            Self::Header => "load-header-tab",
+            Self::Receiving => "load-receiving-tab",
+            Self::Freight => "load-freight-tab",
+            Self::Notes => "load-notes-tab",
+            Self::Activity => "load-activity-tab",
+            Self::Documents => "load-documents-tab",
+        }
+    }
+
+    fn panel_id(self) -> &'static str {
+        match self {
+            Self::Header => "load-header-panel",
+            Self::Receiving => "load-receiving-panel",
+            Self::Freight => "load-freight-panel",
+            Self::Notes => "load-notes-panel",
+            Self::Activity => "load-activity-panel",
+            Self::Documents => "load-documents-panel",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LoadCommandContext {
     pending: RwSignal<bool>,
@@ -76,6 +100,7 @@ pub fn LoadDetailPanel(
     let lifecycle_target = RwSignal::new(None::<LoadStatus>);
     let lifecycle_confirmation = NodeRef::<html::Section>::new();
     let load_id = load.id;
+    let receiving_visible = receiving_tab_visible(load.r#type, load.status);
     let toasts = use_toast_bus();
     let load = StoredValue::new(load);
     let catalog_items = StoredValue::new(catalog_items);
@@ -135,10 +160,7 @@ pub fn LoadDetailPanel(
                     (
                         LoadDetailTab::Receiving,
                         "Receiving",
-                        receiving_tab_visible(
-                            load.get_value().r#type,
-                            load.get_value().status,
-                        ),
+                        receiving_visible,
                     ),
                     (LoadDetailTab::Freight, "Freight", true),
                     (LoadDetailTab::Notes, "Notes", true),
@@ -150,8 +172,10 @@ pub fn LoadDetailPanel(
                     .map(|(value, label, _)| {
                         view! {
                             <button
+                                id=value.tab_id()
                                 type="button"
                                 role="tab"
+                                aria-controls=value.panel_id()
                                 aria-selected=move || (tab.get() == value).to_string()
                                 class:active=move || tab.get() == value
                                 on:click=move |_| tab.set(value)
@@ -173,7 +197,13 @@ pub fn LoadDetailPanel(
                 <p class="inline-command-error" role="alert">{move || command_error.get().unwrap_or_default()}</p>
             </Show>
 
-            <Show when=move || tab.get() == LoadDetailTab::Header>
+            <div
+                id="load-header-panel"
+                role="tabpanel"
+                aria-labelledby="load-header-tab"
+                hidden=move || tab.get() != LoadDetailTab::Header
+            >
+                <Show when=move || tab.get() == LoadDetailTab::Header>
                 <LoadHeaderForm
                     load=load.get_value()
                     locations=locations.get_value()
@@ -349,41 +379,73 @@ pub fn LoadDetailPanel(
                         on_unauthorized
                     />
                 </Show>
-            </Show>
+                </Show>
+            </div>
 
-            <Show when=move || tab.get() == LoadDetailTab::Receiving>
-                <ReceivingExecutionPanel
-                    load_id
-                    execution_barcode=load.get_value().execution_barcode
-                    seal_number=load.get_value().seal_number
-                    on_refreshed
-                    on_unauthorized
-                />
-            </Show>
+            {receiving_visible.then(|| {
+                view! {
+                    <div
+                        id="load-receiving-panel"
+                        role="tabpanel"
+                        aria-labelledby="load-receiving-tab"
+                        hidden=move || tab.get() != LoadDetailTab::Receiving
+                    >
+                        <Show when=move || tab.get() == LoadDetailTab::Receiving>
+                            <ReceivingExecutionPanel
+                                load_id
+                                execution_barcode=load.get_value().execution_barcode
+                                seal_number=load.get_value().seal_number
+                                on_refreshed
+                                on_unauthorized
+                            />
+                        </Show>
+                    </div>
+                }
+            })}
 
-            <Show when=move || tab.get() == LoadDetailTab::Freight>
-                <FreightPanel
-                    load=load.get_value()
-                    catalog_items=catalog_items.get_value()
-                    pending=command_pending
-                    error=command_error
-                    on_refreshed
-                    on_unauthorized
-                />
-            </Show>
+            <div
+                id="load-freight-panel"
+                role="tabpanel"
+                aria-labelledby="load-freight-tab"
+                hidden=move || tab.get() != LoadDetailTab::Freight
+            >
+                <Show when=move || tab.get() == LoadDetailTab::Freight>
+                    <FreightPanel
+                        load=load.get_value()
+                        catalog_items=catalog_items.get_value()
+                        pending=command_pending
+                        error=command_error
+                        on_refreshed
+                        on_unauthorized
+                    />
+                </Show>
+            </div>
 
-            <Show when=move || tab.get() == LoadDetailTab::Notes>
-                <NotesPanel
-                    load=load.get_value()
-                    pending=command_pending
-                    error=command_error
-                    on_refreshed
-                    on_unauthorized
-                />
-            </Show>
+            <div
+                id="load-notes-panel"
+                role="tabpanel"
+                aria-labelledby="load-notes-tab"
+                hidden=move || tab.get() != LoadDetailTab::Notes
+            >
+                <Show when=move || tab.get() == LoadDetailTab::Notes>
+                    <NotesPanel
+                        load=load.get_value()
+                        pending=command_pending
+                        error=command_error
+                        on_refreshed
+                        on_unauthorized
+                    />
+                </Show>
+            </div>
 
-            <Show when=move || tab.get() == LoadDetailTab::Activity>
-                <section class="detail-section">
+            <section
+                id="load-activity-panel"
+                class="detail-section"
+                role="tabpanel"
+                aria-labelledby="load-activity-tab"
+                hidden=move || tab.get() != LoadDetailTab::Activity
+            >
+                <Show when=move || tab.get() == LoadDetailTab::Activity>
                     <div class="detail-section-title">
                         <h3>"Load activity"</h3>
                         <span>{format!("{} events", load.get_value().activity.len())}</span>
@@ -410,18 +472,25 @@ pub fn LoadDetailPanel(
                     {load.get_value().activity.is_empty().then(|| {
                         view! { <p class="empty-state">"No load activity has been recorded."</p> }
                     })}
-                </section>
-            </Show>
+                </Show>
+            </section>
 
-            <Show when=move || tab.get() == LoadDetailTab::Documents>
-                <DocumentsPanel
-                    load=load.get_value()
-                    pending=command_pending
-                    error=command_error
-                    on_refreshed
-                    on_unauthorized
-                />
-            </Show>
+            <div
+                id="load-documents-panel"
+                role="tabpanel"
+                aria-labelledby="load-documents-tab"
+                hidden=move || tab.get() != LoadDetailTab::Documents
+            >
+                <Show when=move || tab.get() == LoadDetailTab::Documents>
+                    <DocumentsPanel
+                        load=load.get_value()
+                        pending=command_pending
+                        error=command_error
+                        on_refreshed
+                        on_unauthorized
+                    />
+                </Show>
+            </div>
         </div>
     }
 }
@@ -526,7 +595,7 @@ fn LoadHeaderForm(
 
     view! {
         <form class="fulfillment-form detail-form" on:submit=submit>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Reference"</span>
                     <input
@@ -729,7 +798,7 @@ fn ArrivalConfirmation(
                 <span><strong>"Load"</strong> {load.reference_number.unwrap_or_else(|| format!("#{}", load_id))}</span>
                 <span><strong>"Assigned location"</strong> {receiving_location}</span>
             </div>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Load scan"</span>
                     <input
@@ -989,7 +1058,7 @@ fn InboundFreightPanel(
                             "Close"
                         </button>
                     </div>
-                    <div class="form-grid three-column">
+                    <div class="fulfillment-form-grid three-column">
                         <label>
                             <span>"Item"</span>
                             <select

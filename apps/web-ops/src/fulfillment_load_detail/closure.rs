@@ -109,7 +109,7 @@ pub(super) fn LoadClosureConfirmation(
                 <span><strong>"Load"</strong> {reference} " · " <span class="mono">{execution_barcode}</span></span>
                 <span><strong>"Assigned dock"</strong> {receiving_location}</span>
             </div>
-            <div class="form-grid two-column">
+            <div class="fulfillment-form-grid two-column">
                 <label>
                     <span>"Load scan"</span>
                     <input

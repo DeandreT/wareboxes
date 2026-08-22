@@ -75,25 +75,6 @@
   box-shadow: inset 3px 0 var(--accent);
 }
 
-.row-link {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--blue);
-  font: inherit;
-  font-weight: 760;
-  cursor: pointer;
-}
-
-.row-link:hover {
-  text-decoration: underline;
-}
-
-.row-link:focus-visible {
-  outline: 2px solid var(--blue);
-  outline-offset: 2px;
-}
-
 .fulfillment-list > .inline-command-error,
 .fulfillment-detail-content > .inline-command-error {
   margin: 0;
@@ -166,16 +147,6 @@
   font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.text-button {
-  padding: 3px;
-  border: 0;
-  background: transparent;
-  color: var(--blue);
-  font-size: 11px;
-  font-weight: 720;
-  cursor: pointer;
 }
 
 .detail-facts {
@@ -285,24 +256,24 @@
   text-transform: uppercase;
 }
 
-.form-grid {
+.fulfillment-form-grid {
   display: grid;
   gap: 7px 8px;
 }
 
-.form-grid.two-column {
+.fulfillment-form-grid.two-column {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.form-grid.three-column {
+.fulfillment-form-grid.three-column {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.form-grid .wide {
+.fulfillment-form-grid .wide {
   grid-column: 1 / -1;
 }
 
-.form-grid label,
+.fulfillment-form-grid label,
 .fulfillment-form > label,
 .confirmation-panel label,
 .note-entry label {
@@ -314,8 +285,8 @@
   font-weight: 700;
 }
 
-.form-grid input,
-.form-grid select,
+.fulfillment-form-grid input,
+.fulfillment-form-grid select,
 .fulfillment-form textarea,
 .confirmation-panel input,
 .confirmation-panel select,
@@ -333,8 +304,8 @@
   font-size: 11px;
 }
 
-.form-grid input:focus,
-.form-grid select:focus,
+.fulfillment-form-grid input:focus,
+.fulfillment-form-grid select:focus,
 .fulfillment-form textarea:focus,
 .confirmation-panel input:focus,
 .confirmation-panel select:focus,
@@ -351,7 +322,7 @@
   resize: vertical;
 }
 
-.form-grid .checkbox-label {
+.fulfillment-form-grid .checkbox-label {
   display: flex;
   min-height: var(--control-height);
   align-items: center;
@@ -359,7 +330,7 @@
   gap: 7px;
 }
 
-.checkbox-label input {
+.fulfillment-form-grid .checkbox-label input {
   width: 15px;
   height: 15px;
 }
@@ -575,22 +546,6 @@
   margin: 0;
   padding: 10px;
   font-size: 10px;
-}
-
-.danger-action {
-  min-height: var(--control-height);
-  padding: 0 12px;
-  border: 1px solid #c95a60;
-  border-radius: 4px;
-  background: #9e3338;
-  color: #fff;
-  font-weight: 720;
-  cursor: pointer;
-}
-
-.danger-action:hover:not(:disabled) {
-  border-color: #dc6f74;
-  background: #872b30;
 }
 
 .confirmation-panel {

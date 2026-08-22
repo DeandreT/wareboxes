@@ -172,7 +172,7 @@ pub fn InventoryRollupsWorkbench(
         <section class="data-section inventory-rollups">
             {move || match state.get() {
                 RollupState::Loading => view! {
-                    <div class="rollup-state" aria-live="polite">
+                    <div class="rollup-state" role="status" aria-live="polite">
                         <span class="loading-line" aria-hidden="true"></span>
                         <strong>{format!("Loading {}", kind.label())}</strong>
                     </div>
@@ -372,6 +372,7 @@ fn LocationRollupTable(
     view! {
         <div class="table-scroll">
             <table class="data-table rollup-table location-rollup-table">
+                <caption class="sr-only">"Inventory summarized by client, item, and location"</caption>
                 <thead><tr>
                     <RollupHeader label="Client" key=RollupSort::Client sort on_sort/>
                     <RollupHeader label="Item" key=RollupSort::Item sort on_sort/>
@@ -431,6 +432,7 @@ fn FacilityRollupTable(
     view! {
         <div class="table-scroll">
             <table class="data-table rollup-table facility-rollup-table">
+                <caption class="sr-only">"Inventory summarized by client, item, and facility"</caption>
                 <thead><tr>
                     <RollupHeader label="Client" key=RollupSort::Client sort on_sort/>
                     <RollupHeader label="Item" key=RollupSort::Item sort on_sort/>
@@ -473,6 +475,7 @@ fn ItemRollupTable(
     view! {
         <div class="table-scroll">
             <table class="data-table rollup-table item-rollup-table">
+                <caption class="sr-only">"Inventory summarized by client and item"</caption>
                 <thead><tr>
                     <RollupHeader label="Client" key=RollupSort::Client sort on_sort/>
                     <RollupHeader label="Item" key=RollupSort::Item sort on_sort/>

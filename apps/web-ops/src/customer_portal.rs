@@ -5,6 +5,7 @@ use wareboxes_api_contract::v1::{
     CustomerPortalDocumentType, CustomerPortalOrderStatus, CustomerPortalShipmentStatus,
     CustomerPortalWorkspaceResponse,
 };
+use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
 use crate::api;
 use crate::components::{Icon, UiIcon};
@@ -19,6 +20,7 @@ use crate::components::{Icon, UiIcon};
 )]
 struct Signals {
     workspace: RwSignal<CustomerPortalWorkspaceResponse>,
+    scope_options: RwSignal<PortalScopeOptions>,
     owner_filter: RwSignal<Option<i64>>,
     facility_filter: RwSignal<Option<i64>>,
     search_draft: RwSignal<String>,
@@ -30,10 +32,37 @@ struct Signals {
     on_unauthorized: Callback<()>,
 }
 
+#[derive(Clone, Default, PartialEq, Eq)]
+struct PortalScopeOptions {
+    owners: BTreeMap<i64, String>,
+    facilities: BTreeMap<i64, String>,
+}
+
+impl From<AccessScopeWorkspace> for PortalScopeOptions {
+    fn from(access: AccessScopeWorkspace) -> Self {
+        Self {
+            owners: access
+                .inventory_owners
+                .into_iter()
+                .map(|owner| (owner.id, owner.name))
+                .collect(),
+            facilities: access
+                .facilities
+                .into_iter()
+                .map(|facility| (facility.id, facility.name))
+                .collect(),
+        }
+    }
+}
+
 #[component]
-pub(crate) fn CustomerPortal(on_unauthorized: Callback<()>) -> impl IntoView {
+pub(crate) fn CustomerPortal(
+    access: AccessScopeWorkspace,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
     let signals = Signals {
         workspace: RwSignal::new(empty_workspace()),
+        scope_options: RwSignal::new(access.into()),
         owner_filter: RwSignal::new(None),
         facility_filter: RwSignal::new(None),
         search_draft: RwSignal::new(String::new()),
@@ -61,7 +90,7 @@ pub(crate) fn CustomerPortal(on_unauthorized: Callback<()>) -> impl IntoView {
     let report_path = move || api::customer_portal_inventory_report_path(&filters(signals));
 
     view! {
-        <section class="customer-portal">
+        <section class="customer-portal" aria-busy=move || signals.loading.get()>
             <header class="portal-toolbar">
                 <div class="portal-heading">
                     <span class="portal-heading-icon"><Icon icon=UiIcon::Clients/></span>
@@ -75,14 +104,14 @@ pub(crate) fn CustomerPortal(on_unauthorized: Callback<()>) -> impl IntoView {
                         <span>"Client"</span>
                         <select prop:value=move ||option_value(signals.owner_filter.get()) on:change=move |event|signals.owner_filter.set(parse_id(&event_target_value(&event)))>
                             <option value="">"All clients"</option>
-                            {move ||owner_options(signals.workspace.get())}
+                            {move ||owner_options(signals.scope_options.get())}
                         </select>
                     </label>
                     <label class="portal-field">
                         <span>"Facility"</span>
                         <select prop:value=move ||option_value(signals.facility_filter.get()) on:change=move |event|signals.facility_filter.set(parse_id(&event_target_value(&event)))>
                             <option value="">"All facilities"</option>
-                            {move ||facility_options(signals.workspace.get())}
+                            {move ||facility_options(signals.scope_options.get())}
                         </select>
                     </label>
                     <form class="portal-search" on:submit=move |event|{event.prevent_default();apply_search(())}>
@@ -100,9 +129,12 @@ pub(crate) fn CustomerPortal(on_unauthorized: Callback<()>) -> impl IntoView {
                 <div class="portal-actions">
                     <a class="button secondary-action compact" href=report_path><Icon icon=UiIcon::Download/>"Inventory CSV"</a>
                     <button class="icon-button" type="button" title="Refresh portal" aria-label="Refresh portal" disabled=move ||signals.loading.get() on:click=move |_|load(signals)><Icon icon=UiIcon::Refresh/></button>
+                    <Show when=move || signals.loading.get() && !signals.workspace.get().generated_at.is_empty()>
+                        <span class="sr-only" role="status">"Refreshing client portal data"</span>
+                    </Show>
                 </div>
             </header>
-            {move ||if signals.loading.get()&&signals.workspace.get().generated_at.is_empty(){view!{<div class="portal-state"><span class="loading-line"></span><h2>"Loading customer visibility"</h2></div>}.into_any()}else if let Some(message)=signals.error.get(){view!{<div class="portal-state error"><h2>"Portal data unavailable"</h2><p>{message}</p><button class="button secondary-action" type="button" on:click=move |_|load(signals)>"Try again"</button></div>}.into_any()}else{portal_body(signals).into_any()}}
+            {move ||if signals.loading.get()&&signals.workspace.get().generated_at.is_empty(){view!{<div class="portal-state" role="status"><span class="loading-line"></span><h2>"Loading customer visibility"</h2></div>}.into_any()}else if let Some(message)=signals.error.get(){view!{<div class="portal-state error" role="alert"><h2>"Portal data unavailable"</h2><p>{message}</p><button class="button secondary-action" type="button" on:click=move |_|load(signals)>"Try again"</button></div>}.into_any()}else{portal_body(signals).into_any()}}
         </section>
     }
 }
@@ -112,11 +144,11 @@ fn portal_body(signals: Signals) -> AnyView {
         <div class="portal-body">
             {move ||metrics(signals.workspace.get())}
             <div class="portal-grid">
-                <section class="portal-panel inventory-panel"><header><div><h2>"Inventory availability"</h2><span>{move ||format!("{} grouped positions",signals.workspace.get().inventory.len())}</span></div></header><div class="portal-table-scroll"><table><thead><tr><th>"Item"</th><th>"Lot / expiry"</th><th>"Client / facility"</th><th>"Status"</th><th class="numeric">"On hand"</th><th class="numeric">"Committed"</th><th class="numeric">"Available"</th></tr></thead><tbody>{move ||signals.workspace.get().inventory.into_iter().map(|line|view!{<tr><td><strong>{line.primary_sku.unwrap_or_else(||format!("Item #{}",line.item_id))}</strong><small>{line.item_description.unwrap_or_else(||"No description".into())}</small></td><td>{line.lot.unwrap_or_else(||"Untracked".into())}<small>{line.expiration.as_deref().map(short_timestamp).unwrap_or_else(||"No expiry".into())}</small></td><td>{line.inventory_owner_name}<small>{line.facility_name}</small></td><td><span class="status-badge neutral">{title_case(&line.status)}</span></td><td class="numeric">{line.on_hand}</td><td class="numeric">{line.reserved+line.held}</td><td class="numeric"><strong>{line.available}</strong></td></tr>}).collect_view()}</tbody></table>{move ||signals.workspace.get().inventory.is_empty().then(||view!{<p class="portal-empty">"No inventory matches the current scope and filters."</p>})}</div></section>
+                <section class="portal-panel inventory-panel"><header><div><h2>"Inventory availability"</h2><span>{move ||format!("{} grouped positions",signals.workspace.get().inventory.len())}</span></div></header><div class="portal-table-scroll"><table><caption class="sr-only">"Inventory availability in the current client portal view"</caption><thead><tr><th>"Item"</th><th>"Lot / expiry"</th><th>"Client / facility"</th><th>"Status"</th><th class="numeric">"On hand"</th><th class="numeric">"Committed"</th><th class="numeric">"Available"</th></tr></thead><tbody>{move ||signals.workspace.get().inventory.into_iter().map(|line|view!{<tr><td><strong>{line.primary_sku.unwrap_or_else(||format!("Item #{}",line.item_id))}</strong><small>{line.item_description.unwrap_or_else(||"No description".into())}</small></td><td>{line.lot.unwrap_or_else(||"Untracked".into())}<small>{line.expiration.as_deref().map(short_timestamp).unwrap_or_else(||"No expiry".into())}</small></td><td>{line.inventory_owner_name}<small>{line.facility_name}</small></td><td><span class="status-badge neutral">{title_case(&line.status)}</span></td><td class="numeric">{line.on_hand}</td><td class="numeric">{line.reserved+line.held}</td><td class="numeric"><strong>{line.available}</strong></td></tr>}).collect_view()}</tbody></table>{move ||signals.workspace.get().inventory.is_empty().then(||view!{<p class="portal-empty">"No inventory matches the current scope and filters."</p>})}</div></section>
                 <div class="portal-columns">
-                    <section class="portal-panel"><header><div><h2>"Order status"</h2><span>{move ||format!("{} orders",signals.workspace.get().orders.len())}</span></div></header><div class="portal-table-scroll"><table><thead><tr><th>"Order"</th><th>"State"</th><th>"Destination"</th><th>"Facility"</th><th class="numeric">"Units"</th><th>"Ship by"</th></tr></thead><tbody>{move ||signals.workspace.get().orders.into_iter().map(|order|view!{<tr><td><strong>{order.order_key}</strong><small>{order.inventory_owner_name}</small></td><td><span class=order_status_class(order.status)>{order_status(order.status)}</span></td><td>{order.destination_company.unwrap_or_else(||"Recipient".into())}<small>{destination(&order.destination_city,&order.destination_region,&order.destination_country)}</small></td><td>{order.facility_name.unwrap_or_else(||"Not assigned".into())}</td><td class="numeric">{order.ordered_quantity}</td><td>{order.ship_by.as_deref().map(short_timestamp).unwrap_or_else(||"Not scheduled".into())}</td></tr>}).collect_view()}</tbody></table>{move ||signals.workspace.get().orders.is_empty().then(||view!{<p class="portal-empty">"No orders match the current view."</p>})}</div></section>
+                    <section class="portal-panel"><header><div><h2>"Order status"</h2><span>{move ||format!("{} orders",signals.workspace.get().orders.len())}</span></div></header><div class="portal-table-scroll"><table><caption class="sr-only">"Orders in the current client portal view"</caption><thead><tr><th>"Order"</th><th>"State"</th><th>"Destination"</th><th>"Facility"</th><th class="numeric">"Units"</th><th>"Ship by"</th></tr></thead><tbody>{move ||signals.workspace.get().orders.into_iter().map(|order|view!{<tr><td><strong>{order.order_key}</strong><small>{order.inventory_owner_name}</small></td><td><span class=order_status_class(order.status)>{order_status(order.status)}</span></td><td>{order.destination_company.unwrap_or_else(||"Recipient".into())}<small>{destination(&order.destination_city,&order.destination_region,&order.destination_country)}</small></td><td>{order.facility_name.unwrap_or_else(||"Not assigned".into())}</td><td class="numeric">{order.ordered_quantity}</td><td>{order.ship_by.as_deref().map(short_timestamp).unwrap_or_else(||"Not scheduled".into())}</td></tr>}).collect_view()}</tbody></table>{move ||signals.workspace.get().orders.is_empty().then(||view!{<p class="portal-empty">"No orders match the current view."</p>})}</div></section>
                     <div class="portal-side-stack">
-                        <section class="portal-panel"><header><div><h2>"Shipments"</h2><span>{move ||format!("{} shipments",signals.workspace.get().shipments.len())}</span></div></header><div class="portal-table-scroll"><table><thead><tr><th>"Shipment"</th><th>"State"</th><th>"Carrier"</th><th>"Tracking"</th><th class="numeric">"Cartons"</th><th>"Updated"</th></tr></thead><tbody>{move ||signals.workspace.get().shipments.into_iter().map(|shipment|{let updated=shipment.departed_at.clone().or(shipment.manifested_at.clone()).unwrap_or(shipment.created_at.clone());view!{<tr><td><strong>{format!("Shipment #{}",shipment.shipment_id)}</strong><small>{format!("{} · {}",shipment.order_key,shipment.facility_name)}</small></td><td><span class=shipment_status_class(shipment.status)>{shipment_status(shipment.status)}</span></td><td>{shipment.carrier.unwrap_or_else(||"Not manifested".into())}<small>{shipment.service.unwrap_or_default()}</small></td><td>{if shipment.tracking_numbers.is_empty(){"Pending".into()}else{shipment.tracking_numbers.join(", ")}}</td><td class="numeric">{shipment.carton_count}</td><td>{short_timestamp(&updated)}</td></tr>}}).collect_view()}</tbody></table>{move ||signals.workspace.get().shipments.is_empty().then(||view!{<p class="portal-empty">"No shipments match the current view."</p>})}</div></section>
+                        <section class="portal-panel"><header><div><h2>"Shipments"</h2><span>{move ||format!("{} shipments",signals.workspace.get().shipments.len())}</span></div></header><div class="portal-table-scroll"><table><caption class="sr-only">"Shipments in the current client portal view"</caption><thead><tr><th>"Shipment"</th><th>"State"</th><th>"Carrier"</th><th>"Tracking"</th><th class="numeric">"Cartons"</th><th>"Updated"</th></tr></thead><tbody>{move ||signals.workspace.get().shipments.into_iter().map(|shipment|{let updated=shipment.departed_at.clone().or(shipment.manifested_at.clone()).unwrap_or(shipment.created_at.clone());view!{<tr><td><strong>{format!("Shipment #{}",shipment.shipment_id)}</strong><small>{format!("{} · {}",shipment.order_key,shipment.facility_name)}</small></td><td><span class=shipment_status_class(shipment.status)>{shipment_status(shipment.status)}</span></td><td>{shipment.carrier.unwrap_or_else(||"Not manifested".into())}<small>{shipment.service.unwrap_or_default()}</small></td><td>{if shipment.tracking_numbers.is_empty(){"Pending".into()}else{shipment.tracking_numbers.join(", ")}}</td><td class="numeric">{shipment.carton_count}</td><td>{short_timestamp(&updated)}</td></tr>}}).collect_view()}</tbody></table>{move ||signals.workspace.get().shipments.is_empty().then(||view!{<p class="portal-empty">"No shipments match the current view."</p>})}</div></section>
                         <section class="portal-panel"><header><div><h2>"Shipment documents"</h2><span>{move ||format!("{} files",signals.workspace.get().documents.len())}</span></div></header><div class="portal-documents">{move ||signals.workspace.get().documents.into_iter().map(|document|view!{<article><div class="portal-document-icon"><Icon icon=UiIcon::Print/></div><div><strong>{document.file_name}</strong><span>{format!("{} · {} · {}",document_type(document.document_type),document.order_key,short_timestamp(&document.generated_at))}</span><small>{format!("{} bytes · SHA-256 {}…",document.content_length,&document.content_sha256[..12.min(document.content_sha256.len())])}</small></div><a class="button secondary-action compact" href=document.download_path><Icon icon=UiIcon::Download/>"Download"</a></article>}).collect_view()}<Show when=move ||signals.workspace.get().documents.is_empty()><p class="portal-empty">"No shipment documents are available in this scope."</p></Show></div></section>
                     </div>
                 </div>
@@ -151,7 +183,7 @@ fn metrics(workspace: CustomerPortalWorkspaceResponse) -> AnyView {
             )
         })
         .count();
-    view!{<section class="portal-metrics"><article><span>"On hand"</span><strong>{on_hand}</strong><small>"units in visible facilities"</small></article><article><span>"Available"</span><strong>{available}</strong><small>"after commitments and holds"</small></article><article><span>"Active orders"</span><strong>{active_orders}</strong><small>"open fulfillment demand"</small></article><article><span>"In transit"</span><strong>{in_transit}</strong><small>"manifested or departing"</small></article></section>}.into_any()
+    view!{<section class="portal-metrics" aria-label="Current view totals"><article><span>"On hand"</span><strong>{on_hand}</strong><small>"units in the current view"</small></article><article><span>"Available"</span><strong>{available}</strong><small>"visible after commitments"</small></article><article><span>"Active orders"</span><strong>{active_orders}</strong><small>"in the current view"</small></article><article><span>"In transit"</span><strong>{in_transit}</strong><small>"visible shipments moving"</small></article></section>}.into_any()
 }
 
 fn load(signals: Signals) {
@@ -164,6 +196,7 @@ fn load(signals: Signals) {
     leptos::task::spawn_local(async move {
         match api::customer_portal_workspace(filters(signals)).await {
             Ok(workspace) if signals.generation.get_untracked() == generation => {
+                record_scope_options(signals.scope_options, &workspace);
                 signals.workspace.set(workspace);
                 signals.error.set(None)
             }
@@ -205,36 +238,55 @@ fn text_filter(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
 }
-fn owner_options(workspace: CustomerPortalWorkspaceResponse) -> AnyView {
-    let mut values = BTreeMap::new();
-    for line in workspace.inventory {
-        values.insert(line.inventory_owner_id, line.inventory_owner_name);
-    }
-    for order in workspace.orders {
-        values.insert(order.inventory_owner_id, order.inventory_owner_name);
-    }
-    for shipment in workspace.shipments {
-        values.insert(shipment.inventory_owner_id, shipment.inventory_owner_name);
-    }
-    values
+fn owner_options(options: PortalScopeOptions) -> AnyView {
+    options
+        .owners
         .into_iter()
         .map(|(id, name)| view! {<option value=id>{name}</option>})
         .collect_view()
         .into_any()
 }
-fn facility_options(workspace: CustomerPortalWorkspaceResponse) -> AnyView {
-    let mut values = BTreeMap::new();
-    for line in workspace.inventory {
-        values.insert(line.facility_id, line.facility_name);
-    }
-    for shipment in workspace.shipments {
-        values.insert(shipment.facility_id, shipment.facility_name);
-    }
-    values
+fn facility_options(options: PortalScopeOptions) -> AnyView {
+    options
+        .facilities
         .into_iter()
         .map(|(id, name)| view! {<option value=id>{name}</option>})
         .collect_view()
         .into_any()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn record_scope_options(
+    options: RwSignal<PortalScopeOptions>,
+    workspace: &CustomerPortalWorkspaceResponse,
+) {
+    options.update(|known| {
+        for line in &workspace.inventory {
+            known
+                .owners
+                .insert(line.inventory_owner_id, line.inventory_owner_name.clone());
+            known
+                .facilities
+                .insert(line.facility_id, line.facility_name.clone());
+        }
+        for order in &workspace.orders {
+            known
+                .owners
+                .insert(order.inventory_owner_id, order.inventory_owner_name.clone());
+            if let (Some(id), Some(name)) = (order.facility_id, order.facility_name.as_ref()) {
+                known.facilities.insert(id, name.clone());
+            }
+        }
+        for shipment in &workspace.shipments {
+            known.owners.insert(
+                shipment.inventory_owner_id,
+                shipment.inventory_owner_name.clone(),
+            );
+            known
+                .facilities
+                .insert(shipment.facility_id, shipment.facility_name.clone());
+        }
+    });
 }
 fn short_timestamp(value: &str) -> String {
     value
@@ -307,6 +359,8 @@ fn document_type(value: CustomerPortalDocumentType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wareboxes_api_contract::web::access::AccessScopeResource;
+
     #[test]
     fn status_and_search_labels_are_customer_safe() {
         assert_eq!(
@@ -318,5 +372,29 @@ mod tests {
             "Partially departed"
         );
         assert_eq!(text_filter("  SO-1 "), Some("SO-1"));
+    }
+
+    #[test]
+    fn filter_options_come_from_authorized_scope_not_filtered_rows() {
+        let options = PortalScopeOptions::from(AccessScopeWorkspace {
+            facilities: vec![AccessScopeResource {
+                id: 7,
+                name: "Reno DC".into(),
+            }],
+            inventory_owners: vec![AccessScopeResource {
+                id: 11,
+                name: "Northstar".into(),
+            }],
+            owner_facilities: Vec::new(),
+        });
+
+        assert_eq!(
+            options.facilities.get(&7).map(String::as_str),
+            Some("Reno DC")
+        );
+        assert_eq!(
+            options.owners.get(&11).map(String::as_str),
+            Some("Northstar")
+        );
     }
 }

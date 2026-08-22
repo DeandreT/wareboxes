@@ -357,7 +357,7 @@ fn ItemCreate(
                     on:input=move |event| description.set(event_target_value(&event))
                 />
             </label>
-            <div class="form-grid two">
+            <div class="catalog-form-grid two">
                 <label>
                     <span>"Packaging unit"</span>
                     <select
@@ -379,7 +379,7 @@ fn ItemCreate(
             </div>
             <fieldset class="catalog-fieldset">
                 <legend>"Physical dimensions"</legend>
-                <div class="form-grid dimension-grid">
+                <div class="catalog-form-grid dimension-grid">
                     <label><span>"Length"</span><input type="number" min="0" step="1" prop:value=move || length.get() on:input=move |event| length.set(event_target_value(&event))/></label>
                     <label><span>"Width"</span><input type="number" min="0" step="1" prop:value=move || width.get() on:input=move |event| width.set(event_target_value(&event))/></label>
                     <label><span>"Height"</span><input type="number" min="0" step="1" prop:value=move || height.get() on:input=move |event| height.set(event_target_value(&event))/></label>
@@ -638,7 +638,7 @@ fn ItemDetail(store: CatalogStore, item: Item, can_supervise: bool) -> impl Into
             </div>
 
             <form class="catalog-form compact-form" on:submit=save>
-                <div class="form-grid two">
+                <div class="catalog-form-grid two">
                     <label>
                         <span>"Description"</span>
                         <input type="text" required prop:value=move || description.get() on:input=move |event| description.set(event_target_value(&event))/>

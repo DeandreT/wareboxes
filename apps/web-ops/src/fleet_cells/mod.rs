@@ -33,6 +33,8 @@ pub(super) struct Signals {
     selected: RwSignal<Option<DataCellResponse>>,
     status: RwSignal<Option<DataCellStatus>>,
     region: RwSignal<String>,
+    applied_status: RwSignal<Option<DataCellStatus>>,
+    applied_region: RwSignal<String>,
     loading: RwSignal<bool>,
     loaded: RwSignal<bool>,
     detail_loading: RwSignal<bool>,
@@ -61,6 +63,8 @@ pub(crate) fn FleetCellsWorkspace(
         selected: RwSignal::new(None),
         status: RwSignal::new(None),
         region: RwSignal::new(String::new()),
+        applied_status: RwSignal::new(None),
+        applied_region: RwSignal::new(String::new()),
         loading: RwSignal::new(!has_initial),
         loaded: RwSignal::new(has_initial),
         detail_loading: RwSignal::new(false),
@@ -91,7 +95,7 @@ pub(crate) fn FleetCellsWorkspace(
     let apply = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
         invalidate_detail(signals);
-        refresh(signals);
+        apply_filters(signals);
     };
     let retry = move |_| {
         if let Some(command) = signals.retry.get_untracked() {
@@ -127,7 +131,7 @@ fn metrics(signals: Signals) -> AnyView {
         .filter(|cell| cell.status == DataCellStatus::Active)
         .map(|cell| u64::from(cell.available_tenant_slots))
         .sum();
-    view! { <section class="fleet-cell-metrics"><article><span>"Active cells"</span><strong>{active}</strong></article><article><span>"Draining"</span><strong>{draining}</strong></article><article><span>"Tenant placements"</span><strong>{placements}</strong></article><article><span>"Open slots loaded"</span><strong>{open}</strong></article></section> }.into_any()
+    view! { <section class="fleet-cell-metrics"><article><span>"Active cells loaded"</span><strong>{active}</strong></article><article><span>"Draining loaded"</span><strong>{draining}</strong></article><article><span>"Tenant placements loaded"</span><strong>{placements}</strong></article><article><span>"Open slots loaded"</span><strong>{open}</strong></article></section> }.into_any()
 }
 
 fn cell_panel(signals: Signals) -> AnyView {
@@ -140,7 +144,7 @@ fn cell_panel(signals: Signals) -> AnyView {
     let content = if page.items.is_empty() {
         state("No data cells match these filters.", false)
     } else {
-        view! { <div class="table-scroll"><table class="dense-table"><thead><tr><th>"Cell"</th><th>"Region / residency"</th><th>"Status"</th><th>"Capacity"</th><th></th></tr></thead><tbody>{page.items.into_iter().map(|cell|{let id=cell.data_cell_id;let selected=signals.selected.get().is_some_and(|value|value.data_cell_id==id);view!{<tr class:selected=selected><td><strong>{cell.name.clone()}</strong><small>{format!("{} · {}",cell.key,display::mode_label(cell.mode))}</small></td><td>{cell.region.clone()}<small>{cell.residency.clone()}</small></td><td><span class=display::status_class(cell.status)>{display::status_label(cell.status)}</span></td><td>{display::capacity(&cell)}</td><td><button class="text-button" type="button" on:click=move |_|load_detail(signals,id)>"Inspect"</button></td></tr>}}).collect_view()}</tbody></table></div>}.into_any()
+        view! { <div class="table-scroll"><table class="dense-table"><caption class="sr-only">"Data cells in the current filtered page"</caption><thead><tr><th>"Cell"</th><th>"Region / residency"</th><th>"Status"</th><th>"Capacity"</th><th></th></tr></thead><tbody>{page.items.into_iter().map(|cell|{let id=cell.data_cell_id;let selected=signals.selected.get().is_some_and(|value|value.data_cell_id==id);view!{<tr class:selected=selected><td><strong>{cell.name.clone()}</strong><small>{format!("{} · {}",cell.key,display::mode_label(cell.mode))}</small></td><td>{cell.region.clone()}<small>{cell.residency.clone()}</small></td><td><span class=display::status_class(cell.status)>{display::status_label(cell.status)}</span></td><td>{display::capacity(&cell)}</td><td><button class="text-button" type="button" on:click=move |_|load_detail(signals,id)>"Inspect"</button></td></tr>}}).collect_view()}</tbody></table></div>}.into_any()
     };
     view! { <section class="fleet-cell-panel fleet-cell-list"><header><div><h2>"Registry"</h2><span>{format!("{count} loaded")}</span></div>{next.map(|cursor|view!{<button class="text-button" type="button" disabled=move || signals.loading.get() on:click=move |_|load_page(signals,Some(cursor.clone()),true)>"Load more"</button>})}</header>{content}</section> }.into_any()
 }
@@ -177,10 +181,27 @@ fn status_button(
 fn invalidate_detail(signals: Signals) {
     signals.detail_generation.update(|value| *value += 1);
     signals.event_generation.update(|value| *value += 1);
+    signals.detail_loading.set(false);
+    signals.events_loading.set(false);
     signals.selected.set(None);
     signals.events.set(DataCellEventPage::new(Vec::new(), None));
 }
 fn refresh(signals: Signals) {
+    let selected_id = signals
+        .selected
+        .get_untracked()
+        .map(|cell| cell.data_cell_id);
+    load_page(signals, None, false);
+    if let Some(id) = selected_id {
+        load_detail(signals, id);
+    }
+}
+
+fn apply_filters(signals: Signals) {
+    signals.applied_status.set(signals.status.get_untracked());
+    signals
+        .applied_region
+        .set(signals.region.get_untracked().trim().to_owned());
     load_page(signals, None, false);
 }
 fn load_page(signals: Signals, cursor: Option<OpaqueCursor>, append: bool) {
@@ -188,9 +209,9 @@ fn load_page(signals: Signals, cursor: Option<OpaqueCursor>, append: bool) {
     let generation = signals.list_generation.get_untracked();
     signals.loading.set(true);
     signals.error.set(None);
-    let region = signals.region.get_untracked().trim().to_owned();
+    let region = signals.applied_region.get_untracked();
     let request = DataCellPageRequest {
-        status: signals.status.get_untracked(),
+        status: signals.applied_status.get_untracked(),
         region: (!region.is_empty()).then_some(region),
         cursor,
         limit: wareboxes_api_contract::v1::PageLimit::default(),
@@ -222,6 +243,7 @@ fn load_detail(signals: Signals, id: i64) {
     signals.detail_generation.update(|value| *value += 1);
     let generation = signals.detail_generation.get_untracked();
     signals.detail_loading.set(true);
+    signals.selected.set(None);
     signals.event_generation.update(|value| *value += 1);
     signals.events.set(DataCellEventPage::new(Vec::new(), None));
     leptos::task::spawn_local(async move {
@@ -313,17 +335,26 @@ async fn execute(command: &PendingCommand) -> Result<DataCellResponse, api::ApiE
     }
 }
 fn refresh_cell(signals: Signals, cell: DataCellResponse) {
+    let status = signals.applied_status.get_untracked();
+    let region = signals.applied_region.get_untracked();
+    let matches = matches_filters(status, &region, cell.status, &cell.region);
     signals.cells.update(|page| {
-        if let Some(existing) = page
-            .items
-            .iter_mut()
-            .find(|candidate| candidate.data_cell_id == cell.data_cell_id)
-        {
-            *existing = cell;
-        } else {
+        page.items
+            .retain(|candidate| candidate.data_cell_id != cell.data_cell_id);
+        if matches {
             page.items.insert(0, cell);
         }
     });
+}
+
+fn matches_filters(
+    filter_status: Option<DataCellStatus>,
+    filter_region: &str,
+    cell_status: DataCellStatus,
+    cell_region: &str,
+) -> bool {
+    filter_status.is_none_or(|status| status == cell_status)
+        && (filter_region.trim().is_empty() || filter_region.trim() == cell_region)
 }
 fn handle_read_error(signals: Signals, error: api::ApiError) {
     if error.unauthorized {
@@ -350,5 +381,38 @@ fn parse_status(value: &str) -> Option<DataCellStatus> {
         "draining" => Some(DataCellStatus::Draining),
         "retired" => Some(DataCellStatus::Retired),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconciliation_respects_applied_status_and_region_filters() {
+        assert!(matches_filters(
+            Some(DataCellStatus::Active),
+            "us-west",
+            DataCellStatus::Active,
+            "us-west"
+        ));
+        assert!(!matches_filters(
+            Some(DataCellStatus::Draining),
+            "us-west",
+            DataCellStatus::Active,
+            "us-west"
+        ));
+        assert!(!matches_filters(
+            None,
+            "eu-central",
+            DataCellStatus::Active,
+            "us-west"
+        ));
+        assert!(matches_filters(
+            None,
+            "  ",
+            DataCellStatus::Retired,
+            "us-west"
+        ));
     }
 }

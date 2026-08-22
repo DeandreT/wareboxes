@@ -156,8 +156,8 @@
   text-align: right;
 }
 
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.replenishment-policy-table .mono,
+.replenishment-work-table .mono {
   font-size: 10px;
 }
 

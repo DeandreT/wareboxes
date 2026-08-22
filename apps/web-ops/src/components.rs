@@ -1,9 +1,10 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 use lucide_leptos::{
-    ArrowLeft, ArrowRightLeft, ArrowUpFromLine, Boxes, Building2, ClipboardList, Download,
-    LayoutDashboard, LockKeyhole, LockKeyholeOpen, LogOut, PackageOpen, Plus, Printer, RefreshCw,
-    RotateCcw, ScanBarcode, Search, ShieldCheck, Trash2, TriangleAlert, Truck, X,
+    ArrowLeft, ArrowRightLeft, ArrowUpFromLine, Boxes, Building2, ClipboardList, Download, Factory,
+    KeyRound, LayoutDashboard, ListChecks, LockKeyhole, LockKeyholeOpen, LogOut, PackageOpen,
+    PackageSearch, Plus, Printer, RefreshCw, RotateCcw, ScanBarcode, Search, ShieldCheck,
+    ShieldUser, Trash2, TriangleAlert, Truck, Warehouse, X,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,17 +56,17 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Add => view! { <Plus size=16/> }.into_any(),
                 UiIcon::Alert => view! { <TriangleAlert size=16/> }.into_any(),
                 UiIcon::Back => view! { <ArrowLeft size=16/> }.into_any(),
-                UiIcon::Building => view! { <Building2 size=16/> }.into_any(),
-                UiIcon::Catalog => view! { <Boxes size=16/> }.into_any(),
+                UiIcon::Building => view! { <Factory size=16/> }.into_any(),
+                UiIcon::Catalog => view! { <PackageSearch size=16/> }.into_any(),
                 UiIcon::Clients => view! { <Building2 size=16/> }.into_any(),
                 UiIcon::Close => view! { <X size=16/> }.into_any(),
-                UiIcon::Counts => view! { <ClipboardList size=16/> }.into_any(),
+                UiIcon::Counts => view! { <ListChecks size=16/> }.into_any(),
                 UiIcon::CrossDock => view! { <ArrowRightLeft size=16/> }.into_any(),
                 UiIcon::Disposition => view! { <ArrowRightLeft size=16/> }.into_any(),
                 UiIcon::Download => view! { <Download size=16/> }.into_any(),
-                UiIcon::Employees => view! { <ShieldCheck size=16/> }.into_any(),
+                UiIcon::Employees => view! { <ShieldUser size=16/> }.into_any(),
                 UiIcon::Holds => view! { <LockKeyhole size=16/> }.into_any(),
-                UiIcon::Inventory => view! { <Boxes size=16/> }.into_any(),
+                UiIcon::Inventory => view! { <Warehouse size=16/> }.into_any(),
                 UiIcon::Loads => view! { <ClipboardList size=16/> }.into_any(),
                 UiIcon::Orders => view! { <ClipboardList size=16/> }.into_any(),
                 UiIcon::Orchestration => view! { <ClipboardList size=16/> }.into_any(),
@@ -79,16 +80,29 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Reverse => view! { <RotateCcw size=16/> }.into_any(),
                 UiIcon::Release => view! { <PackageOpen size=16/> }.into_any(),
                 UiIcon::Remove => view! { <Trash2 size=16/> }.into_any(),
-                UiIcon::Roles => view! { <ShieldCheck size=16/> }.into_any(),
+                UiIcon::Roles => view! { <KeyRound size=16/> }.into_any(),
                 UiIcon::Scan => view! { <ScanBarcode size=16/> }.into_any(),
                 UiIcon::Search => view! { <Search size=16/> }.into_any(),
                 UiIcon::Shipping => view! { <Truck size=16/> }.into_any(),
                 UiIcon::SignOut => view! { <LogOut size=16/> }.into_any(),
                 UiIcon::Unlock => view! { <LockKeyholeOpen size=16/> }.into_any(),
-                UiIcon::Users => view! { <ShieldCheck size=16/> }.into_any(),
-                UiIcon::Waves => view! { <ClipboardList size=16/> }.into_any(),
+                UiIcon::Users => view! { <ShieldUser size=16/> }.into_any(),
+                UiIcon::Waves => view! { <ListChecks size=16/> }.into_any(),
             }}
         </span>
+    }
+}
+
+#[component]
+pub fn NavGroup(label: &'static str, active: bool, children: Children) -> impl IntoView {
+    view! {
+        <details class="nav-section" class:contains-active=active open=active>
+            <summary>
+                <span>{label}</span>
+                <span class="nav-section-chevron" aria-hidden="true"></span>
+            </summary>
+            <div class="nav-section-items">{children()}</div>
+        </details>
     }
 }
 

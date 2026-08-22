@@ -4,7 +4,7 @@
   min-width: 0;
   height: calc(100vh - 76px);
   min-height: 620px;
-  grid-template-rows: 42px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--line);
   background: var(--surface-subtle);
@@ -126,10 +126,29 @@
 .yard-command-error { position: absolute; z-index: 145; right: 12px; bottom: 12px; display: flex; max-width: 620px; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--danger-line); border-radius: 4px; background: var(--red-soft); color: var(--danger-ink); box-shadow: 0 9px 24px rgb(0 0 0 / 14%); font-size: 9px; }
 
 @media (max-width: 1250px) {
+  .yard-toolbar { flex-wrap: wrap; }
+  .yard-heading { flex-basis: 220px; }
   .yard-toolbar > label { min-width: 110px; }
-  .yard-toolbar .secondary-action { display: none; }
   .yard-board { grid-template-columns: minmax(600px, 1.3fr) minmax(340px, .7fr); }
   .yard-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .yard-facts div:nth-child(3n) { border-right: 1px solid var(--line); }
   .yard-facts div:nth-child(2n) { border-right: 0; }
+}
+
+@media (max-width: 1150px) {
+  .yard-board {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(440px, 1fr) minmax(320px, auto);
+    overflow-y: auto;
+  }
+
+  .yard-queue {
+    min-height: 440px;
+    border-right: 0;
+  }
+
+  .yard-detail {
+    min-height: 320px;
+    border-top: 1px solid var(--line);
+  }
 }

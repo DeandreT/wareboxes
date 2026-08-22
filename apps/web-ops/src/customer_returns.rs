@@ -99,6 +99,15 @@ pub(crate) fn CustomerReturnsWorkspace(
             on_unauthorized,
         );
     };
+    let clear_detail = move || {
+        detail_generation.update(|value| *value = value.wrapping_add(1));
+        selected_id.set(None);
+        selected.set(None);
+        detail_loading.set(false);
+        detail_error.set(None);
+        plan_open.set(false);
+        cancel_open.set(false);
+    };
     let refresh = move |_| {
         request_page(
             signals,
@@ -130,6 +139,7 @@ pub(crate) fn CustomerReturnsWorkspace(
         }
         let mut history = cursor_history.get_untracked();
         if let Some(cursor) = history.pop() {
+            clear_detail();
             request_page(signals, cursor, history);
         }
     };
@@ -140,6 +150,7 @@ pub(crate) fn CustomerReturnsWorkspace(
         if let Some(cursor) = page.get_untracked().and_then(|value| value.next_cursor) {
             let mut history = cursor_history.get_untracked();
             history.push(current_cursor.get_untracked());
+            clear_detail();
             request_page(signals, Some(cursor), history);
         }
     };
@@ -148,8 +159,8 @@ pub(crate) fn CustomerReturnsWorkspace(
         <div class="inbound-asn-workspace customer-return-workspace split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
             <h1 class="sr-only">"Customer returns"</h1>
             <section class="data-section inbound-asn-list split-master">
-                <form class="inbound-asn-toolbar" on:submit=move |event| { event.prevent_default(); request_page(signals, None, Vec::new()); }>
-                    <div class="toolbar-summary"><strong>{move || page.get().map_or(0, |value| value.items.len())}</strong><span>"returns"</span><PaneControls layout master_label="Return table" detail_label="Return detail"/></div>
+                <form class="inbound-asn-toolbar" on:submit=move |event| { event.prevent_default(); clear_detail(); request_page(signals, None, Vec::new()); }>
+                    <div class="toolbar-summary"><strong>{move || page.get().map_or(0, |value| value.items.len())}</strong><span>"returns loaded"</span><PaneControls layout master_label="Return table" detail_label="Return detail"/></div>
                     <SearchField label="Search returns".to_owned() placeholder="Return or customer reference" value=search/>
                     <label><span class="sr-only">"Client"</span><select prop:value=move || owner.get() on:change=move |event| owner.set(event_target_value(&event))><option value="">"All clients"</option>{access.inventory_owners.clone().into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
                     <label><span class="sr-only">"Facility"</span><select prop:value=move || facility.get() on:change=move |event| facility.set(event_target_value(&event))><option value="">"All facilities"</option>{access.facilities.clone().into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
@@ -158,17 +169,17 @@ pub(crate) fn CustomerReturnsWorkspace(
                     <button class="icon-button" type="button" title="Refresh returns" aria-label="Refresh returns" disabled=move || loading.get() on:click=refresh><Icon icon=UiIcon::Refresh/></button>
                     <button class="button primary-action compact" type="button" on:click=move |_| { create_open.set(true); layout.show_detail(); }><Icon icon=UiIcon::Add/><span>"New return"</span></button>
                 </form>
-                <div class="table-scroll"><table class="dense-table inbound-asn-table"><thead><tr><th>"Return"</th><th>"Customer ref"</th><th>"Status"</th><th>"Execution"</th><th class="numeric">"Authorized"</th><th class="numeric">"Quarantined"</th><th class="numeric">"Open"</th><th>"Due"</th><th>"Client"</th><th>"Facility"</th></tr></thead><tbody>{move || page.get().map(|current| current.items.into_iter().map(|entry| { let return_id=entry.customer_return_id; view! { <tr class:active-row=move || selected_id.get()==Some(return_id) && !create_open.get()><td><button type="button" class="row-link" on:click=move |_| open_detail(return_id)>{entry.number}</button></td><td>{entry.customer_reference}</td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td>{entry.execution_status.map(execution_label).unwrap_or("Not planned")}</td><td class="numeric">{format_quantity(entry.total_authorized_quantity)}</td><td class="numeric">{format_quantity(entry.total_rejected_quantity)}</td><td class="numeric"><strong>{format_quantity(entry.total_remaining_quantity)}</strong></td><td>{entry.expected_at.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td></tr> } }).collect_view())}</tbody></table><Show when=move || !loading.get() && page.get().is_some_and(|value| value.items.is_empty())><p class="empty-state">"No customer returns match these filters."</p></Show></div>
-                <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
+                <div class="table-scroll" aria-busy=move || loading.get().to_string()><table class="dense-table inbound-asn-table"><caption class="sr-only">"Customer returns in the current filtered page"</caption><thead><tr><th>"Return"</th><th>"Customer ref"</th><th>"Status"</th><th>"Execution"</th><th class="numeric">"Authorized"</th><th class="numeric">"Quarantined"</th><th class="numeric">"Open"</th><th>"Due"</th><th>"Client"</th><th>"Facility"</th></tr></thead><tbody>{move || page.get().map(|current| current.items.into_iter().map(|entry| { let return_id=entry.customer_return_id; view! { <tr class:active-row=move || selected_id.get()==Some(return_id) && !create_open.get()><td><button type="button" class="row-link" on:click=move |_| open_detail(return_id)>{entry.number}</button></td><td>{entry.customer_reference}</td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td>{entry.execution_status.map(execution_label).unwrap_or("Not planned")}</td><td class="numeric">{format_quantity(entry.total_authorized_quantity)}</td><td class="numeric">{format_quantity(entry.total_rejected_quantity)}</td><td class="numeric"><strong>{format_quantity(entry.total_remaining_quantity)}</strong></td><td>{entry.expected_at.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td></tr> } }).collect_view())}</tbody></table><Show when=move || !loading.get() && page.get().is_some_and(|value| value.items.is_empty())><p class="empty-state">"No customer returns match these filters."</p></Show></div>
+                <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error" role="alert">{message}</p> })}</Show>
                 <footer class="table-pagination"><span>{move || page.get().map_or_else(|| "No records".into(), |value| format!("{} records on this page", value.items.len()))}</span><div><button class="button quiet-action compact" type="button" disabled=move || loading.get() || cursor_history.get().is_empty() on:click=previous>"Previous"</button><button class="button quiet-action compact" type="button" disabled=move || loading.get() || page.get().and_then(|value| value.next_cursor).is_none() on:click=next>"Next"</button></div></footer>
             </section>
             <SplitPaneHandle layout/>
-            <section class="data-section inbound-asn-detail split-detail">
+            <section class="data-section inbound-asn-detail split-detail" aria-busy=move || detail_loading.get().to_string()>
                 <Show when=move || create_open.get() fallback=move || view! { <Show when=move || selected.get().is_some() fallback=move || view! { <div class="detail-empty"><h2>"Return details"</h2><p>"Select a return to inspect authorization, quarantine progress, and its inbound load."</p></div> }>{move || selected.get().map(|detail| view! { <ReturnDetail detail=detail.clone() on_plan=Callback::new(move |_| plan_open.set(true)) on_cancel=Callback::new(move |_| cancel_open.set(true))/> })}</Show> }>
                     <CreateReturnPanel access=access.clone() on_close=Callback::new(move |_| create_open.set(false)) on_created=created on_unauthorized/>
                 </Show>
-                <Show when=move || detail_loading.get()><div class="panel-loading">"Loading return..."</div></Show>
-                <Show when=move || detail_error.get().is_some()>{move || detail_error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
+                <Show when=move || detail_loading.get()><div class="panel-loading" role="status" aria-live="polite">"Loading return..."</div></Show>
+                <Show when=move || detail_error.get().is_some()>{move || detail_error.get().map(|message| view! { <p class="inline-command-error" role="alert">{message}</p> })}</Show>
             </section>
         </div>
         <Show when=move || plan_open.get() && selected.get().is_some()>{move || selected.get().map(|detail| view! { <PlanReturnDialog detail locations=scoped_locations.get_value() on_close=Callback::new(move |_| plan_open.set(false)) on_planned=planned on_unauthorized/> })}</Show>
@@ -365,7 +376,10 @@ fn CreateReturnPanel(
                     toasts.success(format!("Return {} authorized.", result.number));
                     on_created.run(result.customer_return_id);
                 }
-                Err(value) if value.unauthorized => on_unauthorized.run(()),
+                Err(value) if value.unauthorized => {
+                    pending.set(false);
+                    on_unauthorized.run(());
+                }
                 Err(value) => {
                     pending.set(false);
                     if !value.ambiguous_outcome {
@@ -377,7 +391,7 @@ fn CreateReturnPanel(
             }
         });
     };
-    view! { <form class="inbound-asn-form" on:submit=submit><header class="detail-heading"><div><span class="eyebrow">"Returns intake"</span><h2>"New customer return"</h2></div><button class="text-button" type="button" on:click=move |_|on_close.run(())>"Close"</button></header><div class="form-grid two-column"><label><span>"Client"</span><select required disabled=move || !lines.get().is_empty() prop:value=move ||owner.get() on:change=move |event|{owner.set(event_target_value(&event));lines.set(Vec::new());}>{access.inventory_owners.into_iter().map(|item|view!{<option value=item.id>{item.name}</option>}).collect_view()}</select></label><label><span>"Facility"</span><select required prop:value=move ||facility.get() on:change=move |event|facility.set(event_target_value(&event))>{access.facilities.into_iter().map(|item|view!{<option value=item.id>{item.name}</option>}).collect_view()}</select></label><label><span>"Return number"</span><input required maxlength="120" prop:value=move ||number.get() on:input=move |event|number.set(event_target_value(&event))/></label><label><span>"Customer reference"</span><input required maxlength="200" placeholder="Order or authorization" prop:value=move ||reference.get() on:input=move |event|reference.set(event_target_value(&event))/></label><label class="full-width"><span>"Expected arrival"</span><input type="datetime-local" prop:value=move ||expected.get() on:input=move |event|expected.set(event_target_value(&event))/></label></div><section class="asn-line-builder"><div class="detail-section-heading"><h3>"Authorized items"</h3><span>{move ||format!("{} lines",lines.get().len())}</span></div><div class="asn-line-inputs return-line-inputs"><select aria-label="Item" prop:value=move ||item_id.get() on:change=move |event|item_id.set(event_target_value(&event))><option value="">"Choose item"</option>{move ||items.get().into_iter().map(|item|view!{<option value=item.item_id>{item.description.unwrap_or_else(||format!("Item #{}",item.item_id))}</option>}).collect_view()}</select><input aria-label="Quantity" type="number" min="1" placeholder="Qty" prop:value=move ||quantity.get() on:input=move |event|quantity.set(event_target_value(&event))/><select aria-label="Reason" on:change=move |event|reason.set(parse_reason(&event_target_value(&event)))><option value="customer_request">"Customer request"</option><option value="damaged">"Damaged"</option><option value="refused_delivery">"Refused delivery"</option><option value="recall">"Recall"</option><option value="warranty">"Warranty"</option><option value="other">"Other"</option></select><input aria-label="Note" placeholder="Reason note" prop:value=move ||note.get() on:input=move |event|note.set(event_target_value(&event))/><input aria-label="Lot" placeholder="Lot (optional)" prop:value=move ||lot.get() on:input=move |event|lot.set(event_target_value(&event))/><input aria-label="Serial" placeholder="Serial (optional)" prop:value=move ||serial.get() on:input=move |event|serial.set(event_target_value(&event))/><button class="button secondary-action compact" type="button" on:click=add_line>"Add line"</button></div><div class="table-scroll"><table class="dense-table"><tbody>{move ||lines.get().into_iter().enumerate().map(|(index,line)|view!{<tr><td><strong>{line.description}</strong><small>{line.uom}</small></td><td>{reason_label(line.reason)}</td><td>{identity_label(line.lot.as_deref(),line.serial.as_deref())}</td><td class="numeric">{format_quantity(line.quantity)}</td><td><button class="icon-button danger" type="button" title="Remove line" aria-label="Remove line" on:click=move |_|lines.update(|values|{values.remove(index);})><Icon icon=UiIcon::Remove/></button></td></tr>}).collect_view()}</tbody></table></div></section><Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error">{message}</p>})}</Show><footer class="detail-actions"><button class="button quiet-action" type="button" on:click=move |_|on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move ||pending.get()>{move ||if pending.get(){"Authorizing..."}else{"Authorize return"}}</button></footer></form> }
+    view! { <form class="inbound-asn-form" on:submit=submit><header class="detail-heading"><div><span class="eyebrow">"Returns intake"</span><h2>"New customer return"</h2></div><button class="text-button" type="button" on:click=move |_|on_close.run(())>"Close"</button></header><div class="fulfillment-form-grid two-column"><label><span>"Client"</span><select required disabled=move || !lines.get().is_empty() prop:value=move ||owner.get() on:change=move |event|{owner.set(event_target_value(&event));lines.set(Vec::new());}>{access.inventory_owners.into_iter().map(|item|view!{<option value=item.id>{item.name}</option>}).collect_view()}</select></label><label><span>"Facility"</span><select required prop:value=move ||facility.get() on:change=move |event|facility.set(event_target_value(&event))>{access.facilities.into_iter().map(|item|view!{<option value=item.id>{item.name}</option>}).collect_view()}</select></label><label><span>"Return number"</span><input required maxlength="120" prop:value=move ||number.get() on:input=move |event|number.set(event_target_value(&event))/></label><label><span>"Customer reference"</span><input required maxlength="200" placeholder="Order or authorization" prop:value=move ||reference.get() on:input=move |event|reference.set(event_target_value(&event))/></label><label class="full-width"><span>"Expected arrival"</span><input type="datetime-local" prop:value=move ||expected.get() on:input=move |event|expected.set(event_target_value(&event))/></label></div><section class="asn-line-builder"><div class="detail-section-heading"><h3>"Authorized items"</h3><span>{move ||format!("{} lines",lines.get().len())}</span></div><div class="asn-line-inputs return-line-inputs"><select aria-label="Item" prop:value=move ||item_id.get() on:change=move |event|item_id.set(event_target_value(&event))><option value="">"Choose item"</option>{move ||items.get().into_iter().map(|item|view!{<option value=item.item_id>{item.description.unwrap_or_else(||format!("Item #{}",item.item_id))}</option>}).collect_view()}</select><input aria-label="Quantity" type="number" min="1" placeholder="Qty" prop:value=move ||quantity.get() on:input=move |event|quantity.set(event_target_value(&event))/><select aria-label="Reason" on:change=move |event|reason.set(parse_reason(&event_target_value(&event)))><option value="customer_request">"Customer request"</option><option value="damaged">"Damaged"</option><option value="refused_delivery">"Refused delivery"</option><option value="recall">"Recall"</option><option value="warranty">"Warranty"</option><option value="other">"Other"</option></select><input aria-label="Note" placeholder="Reason note" prop:value=move ||note.get() on:input=move |event|note.set(event_target_value(&event))/><input aria-label="Lot" placeholder="Lot (optional)" prop:value=move ||lot.get() on:input=move |event|lot.set(event_target_value(&event))/><input aria-label="Serial" placeholder="Serial (optional)" prop:value=move ||serial.get() on:input=move |event|serial.set(event_target_value(&event))/><button class="button secondary-action compact" type="button" on:click=add_line>"Add line"</button></div><div class="table-scroll"><table class="dense-table"><caption class="sr-only">"Authorized return lines in this draft"</caption><thead><tr><th>"Item"</th><th>"Reason"</th><th>"Identity"</th><th class="numeric">"Quantity"</th><th><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{move ||lines.get().into_iter().enumerate().map(|(index,line)|view!{<tr><td><strong>{line.description}</strong><small>{line.uom}</small></td><td>{reason_label(line.reason)}</td><td>{identity_label(line.lot.as_deref(),line.serial.as_deref())}</td><td class="numeric">{format_quantity(line.quantity)}</td><td><button class="icon-button danger" type="button" title="Remove line" aria-label="Remove line" on:click=move |_|lines.update(|values|{values.remove(index);})><Icon icon=UiIcon::Remove/></button></td></tr>}).collect_view()}</tbody></table></div></section><Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error" role="alert">{message}</p>})}</Show><footer class="detail-actions"><button class="button quiet-action" type="button" on:click=move |_|on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move ||pending.get()>{move ||if pending.get(){"Authorizing..."}else{"Authorize return"}}</button></footer></form> }
 }
 
 #[component]
@@ -442,7 +456,10 @@ fn PlanReturnDialog(
                     toasts.success(format!("Return load {} planned.", result.execution_barcode));
                     on_planned.run(result);
                 }
-                Err(value) if value.unauthorized => on_unauthorized.run(()),
+                Err(value) if value.unauthorized => {
+                    pending.set(false);
+                    on_unauthorized.run(());
+                }
                 Err(value) => {
                     pending.set(false);
                     if !value.ambiguous_outcome {
@@ -454,7 +471,7 @@ fn PlanReturnDialog(
             }
         });
     };
-    view! {<div class="inbound-asn-dialog-backdrop" role="presentation"><form class="inbound-asn-dialog" role="dialog" aria-modal="true" aria-labelledby="return-plan-title" on:submit=submit><header><div><span class="eyebrow">"Quarantine-bound receiving"</span><h2 id="return-plan-title">{format!("Plan load from {}",detail.summary.number)}</h2></div><button type="button" class="icon-button" title="Close" aria-label="Close" on:click=move |_|on_close.run(())><Icon icon=UiIcon::Close/></button></header><p>"All physical stock received against this load is forced into quarantine for inspection."</p><div class="form-grid two-column"><label class="full-width"><span>"Receiving dock"</span><select required prop:value=move ||dock.get() on:change=move |event|dock.set(event_target_value(&event))><option value="">"Choose dock"</option>{docks.into_iter().map(|location|{let label=location.name.or(location.barcode).unwrap_or_else(||format!("Dock #{}",location.id));view!{<option value=location.id>{label}</option>}}).collect_view()}</select></label><label><span>"Carrier"</span><input prop:value=move ||carrier.get() on:input=move |event|carrier.set(event_target_value(&event))/></label><label><span>"Trailer"</span><input prop:value=move ||trailer.get() on:input=move |event|trailer.set(event_target_value(&event))/></label><label><span>"Seal"</span><input prop:value=move ||seal.get() on:input=move |event|seal.set(event_target_value(&event))/></label></div><Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error">{message}</p>})}</Show><footer><button class="button quiet-action" type="button" on:click=move |_|on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move ||pending.get()>{move ||if pending.get(){"Planning..."}else{"Plan return load"}}</button></footer></form></div>}
+    view! {<div class="inbound-asn-dialog-backdrop" role="presentation"><form class="inbound-asn-dialog" role="dialog" aria-modal="true" aria-labelledby="return-plan-title" on:submit=submit><header><div><span class="eyebrow">"Quarantine-bound receiving"</span><h2 id="return-plan-title">{format!("Plan load from {}",detail.summary.number)}</h2></div><button type="button" class="icon-button" title="Close" aria-label="Close" on:click=move |_|on_close.run(())><Icon icon=UiIcon::Close/></button></header><p>"All physical stock received against this load is forced into quarantine for inspection."</p><div class="fulfillment-form-grid two-column"><label class="full-width"><span>"Receiving dock"</span><select required prop:value=move ||dock.get() on:change=move |event|dock.set(event_target_value(&event))><option value="">"Choose dock"</option>{docks.into_iter().map(|location|{let label=location.name.or(location.barcode).unwrap_or_else(||format!("Dock #{}",location.id));view!{<option value=location.id>{label}</option>}}).collect_view()}</select></label><label><span>"Carrier"</span><input prop:value=move ||carrier.get() on:input=move |event|carrier.set(event_target_value(&event))/></label><label><span>"Trailer"</span><input prop:value=move ||trailer.get() on:input=move |event|trailer.set(event_target_value(&event))/></label><label><span>"Seal"</span><input prop:value=move ||seal.get() on:input=move |event|seal.set(event_target_value(&event))/></label></div><Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error" role="alert">{message}</p>})}</Show><footer><button class="button quiet-action" type="button" on:click=move |_|on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move ||pending.get()>{move ||if pending.get(){"Planning..."}else{"Plan return load"}}</button></footer></form></div>}
 }
 
 #[component]
@@ -503,7 +520,10 @@ fn CancelReturnDialog(
                     toasts.success("Customer return cancelled.");
                     on_cancelled.run(result);
                 }
-                Err(value) if value.unauthorized => on_unauthorized.run(()),
+                Err(value) if value.unauthorized => {
+                    pending.set(false);
+                    on_unauthorized.run(());
+                }
                 Err(value) => {
                     pending.set(false);
                     if !value.ambiguous_outcome {
@@ -515,7 +535,7 @@ fn CancelReturnDialog(
             }
         });
     };
-    view! {<div class="inbound-asn-dialog-backdrop" role="presentation"><form class="inbound-asn-dialog asn-cancel-dialog" role="dialog" aria-modal="true" aria-labelledby="return-cancel-title" on:submit=submit><header><div><span class="eyebrow">"Terminal authorization action"</span><h2 id="return-cancel-title">{format!("Cancel {}",detail.summary.number)}</h2></div><button type="button" class="icon-button" title="Close" aria-label="Close" on:click=move |_|on_close.run(())><Icon icon=UiIcon::Close/></button></header><div class="form-grid"><label><span>"Reason"</span><select on:change=move |event|reason.set(parse_cancellation(&event_target_value(&event)))><option value="customer_cancelled">"Customer cancelled"</option><option value="duplicate_authorization">"Duplicate authorization"</option><option value="return_window_expired">"Return window expired"</option><option value="other">"Other"</option></select></label><label><span>"Note"</span><textarea maxlength="500" placeholder="Optional unless reason is Other" prop:value=move ||note.get() on:input=move |event|note.set(event_target_value(&event))></textarea></label></div><Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error">{message}</p>})}</Show><footer><button class="button quiet-action" type="button" on:click=move |_|on_close.run(())>"Go back"</button><button class="button danger-action" type="submit" disabled=move ||pending.get()>{move ||if pending.get(){"Cancelling..."}else{"Cancel return"}}</button></footer></form></div>}
+    view! {<div class="inbound-asn-dialog-backdrop" role="presentation"><form class="inbound-asn-dialog asn-cancel-dialog" role="dialog" aria-modal="true" aria-labelledby="return-cancel-title" on:submit=submit><header><div><span class="eyebrow">"Terminal authorization action"</span><h2 id="return-cancel-title">{format!("Cancel {}",detail.summary.number)}</h2></div><button type="button" class="icon-button" title="Close" aria-label="Close" on:click=move |_|on_close.run(())><Icon icon=UiIcon::Close/></button></header><div class="fulfillment-form-grid"><label><span>"Reason"</span><select on:change=move |event|reason.set(parse_cancellation(&event_target_value(&event)))><option value="customer_cancelled">"Customer cancelled"</option><option value="duplicate_authorization">"Duplicate authorization"</option><option value="return_window_expired">"Return window expired"</option><option value="other">"Other"</option></select></label><label><span>"Note"</span><textarea maxlength="500" placeholder="Optional unless reason is Other" prop:value=move ||note.get() on:input=move |event|note.set(event_target_value(&event))></textarea></label></div><Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error" role="alert">{message}</p>})}</Show><footer><button class="button quiet-action" type="button" on:click=move |_|on_close.run(())>"Go back"</button><button class="button danger-action" type="submit" disabled=move ||pending.get()>{move ||if pending.get(){"Cancelling..."}else{"Cancel return"}}</button></footer></form></div>}
 }
 
 fn request_page(
@@ -547,7 +567,12 @@ fn request_page(
                 signals.loading.set(false);
             }
             Ok(_) => {}
-            Err(value) if value.unauthorized => signals.on_unauthorized.run(()),
+            Err(value) if value.unauthorized => {
+                if signals.generation.get_untracked() == request_generation {
+                    signals.loading.set(false);
+                }
+                signals.on_unauthorized.run(());
+            }
             Err(value) if signals.generation.get_untracked() == request_generation => {
                 signals.error.set(Some(value.message));
                 signals.loading.set(false);
@@ -569,6 +594,7 @@ fn request_detail(
     generation.set(request_generation);
     loading.set(true);
     error.set(None);
+    selected.set(None);
     leptos::task::spawn_local(async move {
         match api::customer_return_detail(return_id).await {
             Ok(value)
@@ -579,7 +605,14 @@ fn request_detail(
                 loading.set(false);
             }
             Ok(_) => {}
-            Err(value) if value.unauthorized => on_unauthorized.run(()),
+            Err(value) if value.unauthorized => {
+                if generation.get_untracked() == request_generation
+                    && selected_id.get_untracked() == Some(return_id)
+                {
+                    loading.set(false);
+                }
+                on_unauthorized.run(());
+            }
             Err(value) if generation.get_untracked() == request_generation => {
                 error.set(Some(value.message));
                 loading.set(false);

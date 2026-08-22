@@ -167,9 +167,9 @@
 }
 
 .tenant-lifecycle-state,
-.empty-detail {
+.tenant-lifecycle-workspace .empty-detail {
   align-content: center;
-  color: var(--text-muted, #aab3b5);
+  color: var(--ink-soft);
   display: grid;
   gap: 0.6rem;
   justify-items: center;
@@ -260,10 +260,4 @@
 
 .tenant-lifecycle-form-grid small {
   color: var(--text-muted, #aab3b5);
-}
-
-.danger-action {
-  background: #9e3f45;
-  border-color: #bc575e;
-  color: white;
 }

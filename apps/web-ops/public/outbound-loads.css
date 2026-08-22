@@ -119,7 +119,7 @@
 .outbound-loads-facts div:last-child { border-right: 0; }
 .outbound-loads-facts dt { color: var(--ink-soft); font-size: 8px; font-weight: 760; text-transform: uppercase; }
 .outbound-loads-facts dd { overflow: hidden; margin: 3px 0 0; font-size: 10px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
-.outbound-loads-membership { display: grid; gap: 8px; padding: 8px; }
+.outbound-loads-membership { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: 8px; padding: 8px; }
 .outbound-loads-membership section { min-width: 0; border: 1px solid var(--line); background: var(--surface); }
 .outbound-loads-actions { position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 7px; padding: 7px 9px; border-top: 1px solid var(--line); background: var(--surface-raised); }
 .outbound-loads-empty { display: grid; place-items: center; align-content: center; min-height: 100%; padding: 30px; color: var(--ink-soft); text-align: center; }

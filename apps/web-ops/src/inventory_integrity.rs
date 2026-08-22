@@ -214,8 +214,10 @@ pub fn InventoryIntegrityWorkbench(
 
                         <div class="integrity-tabs" role="tablist" aria-label="Inventory controls">
                             <button
+                                id="integrity-journal-tab"
                                 type="button"
                                 role="tab"
+                                aria-controls="integrity-journal-panel"
                                 aria-selected=move || (tab.get() == IntegrityTab::Journal).to_string()
                                 class:active=move || tab.get() == IntegrityTab::Journal
                                 on:click=move |_| tab.set(IntegrityTab::Journal)
@@ -223,8 +225,10 @@ pub fn InventoryIntegrityWorkbench(
                                 "Journal"
                             </button>
                             <button
+                                id="integrity-aging-tab"
                                 type="button"
                                 role="tab"
+                                aria-controls="integrity-aging-panel"
                                 aria-selected=move || (tab.get() == IntegrityTab::Aging).to_string()
                                 class:active=move || tab.get() == IntegrityTab::Aging
                                 on:click=move |_| tab.set(IntegrityTab::Aging)
@@ -233,8 +237,10 @@ pub fn InventoryIntegrityWorkbench(
                             </button>
                             {can_manage_recalls.then(|| view! {
                                 <button
+                                    id="integrity-recall-tab"
                                     type="button"
                                     role="tab"
+                                    aria-controls="integrity-recall-panel"
                                     aria-selected=move || (tab.get() == IntegrityTab::Recall).to_string()
                                     class:active=move || tab.get() == IntegrityTab::Recall
                                     on:click=move |_| tab.set(IntegrityTab::Recall)
@@ -243,8 +249,10 @@ pub fn InventoryIntegrityWorkbench(
                                 </button>
                             })}
                             <button
+                                id="integrity-reconciliation-tab"
                                 type="button"
                                 role="tab"
+                                aria-controls="integrity-reconciliation-panel"
                                 aria-selected=move || {
                                     (tab.get() == IntegrityTab::Reconciliation).to_string()
                                 }
@@ -254,8 +262,10 @@ pub fn InventoryIntegrityWorkbench(
                                 "Reconciliation"
                             </button>
                             <button
+                                id="integrity-move-planning-tab"
                                 type="button"
                                 role="tab"
+                                aria-controls="integrity-move-planning-panel"
                                 aria-selected=move || {
                                     (tab.get() == IntegrityTab::MovePlanning).to_string()
                                 }
@@ -266,47 +276,76 @@ pub fn InventoryIntegrityWorkbench(
                             </button>
                         </div>
 
-                        {move || match tab.get() {
-                            IntegrityTab::Journal => {
-                                view! { <read_views::JournalView access=access.get_value() on_unauthorized/> }.into_any()
-                            }
-                            IntegrityTab::Aging => {
-                                view! {
-                                    <aging::AgingView
-                                        access=access.get_value()
-                                        on_unauthorized
-                                        on_recall=open_recall
-                                        can_manage_recalls
-                                    />
-                                }
-                                .into_any()
-                            }
-                            IntegrityTab::Recall => {
-                                view! { <recall::RecallView access=access.get_value() on_unauthorized target=recall_target/> }.into_any()
-                            }
-                            IntegrityTab::Reconciliation => {
-                                view! { <read_views::ReconciliationView on_unauthorized/> }.into_any()
-                            }
-                            IntegrityTab::MovePlanning => {
-                                view! {
-                                    <MovePlanner
-                                        balances=data.balances.clone()
-                                        initial_cursor=data.balance_next_cursor.clone()
-                                        locations=data.locations.clone()
-                                        selected_balance_id
-                                        selected_balance
-                                        destination_location_id
-                                        quantity
-                                        instructions
-                                        pending=task_pending
-                                        error=task_error
-                                        on_submit=Callback::new(create_task)
-                                        on_unauthorized
-                                    />
-                                }
-                                    .into_any()
-                            }
-                        }}
+                        <div
+                            id="integrity-journal-panel"
+                            role="tabpanel"
+                            aria-labelledby="integrity-journal-tab"
+                            hidden=move || tab.get() != IntegrityTab::Journal
+                        >
+                            <Show when=move || tab.get() == IntegrityTab::Journal>
+                                <read_views::JournalView access=access.get_value() on_unauthorized/>
+                            </Show>
+                        </div>
+                        <div
+                            id="integrity-aging-panel"
+                            role="tabpanel"
+                            aria-labelledby="integrity-aging-tab"
+                            hidden=move || tab.get() != IntegrityTab::Aging
+                        >
+                            <Show when=move || tab.get() == IntegrityTab::Aging>
+                                <aging::AgingView
+                                    access=access.get_value()
+                                    on_unauthorized
+                                    on_recall=open_recall
+                                    can_manage_recalls
+                                />
+                            </Show>
+                        </div>
+                        {can_manage_recalls.then(|| view! {
+                            <div
+                                id="integrity-recall-panel"
+                                role="tabpanel"
+                                aria-labelledby="integrity-recall-tab"
+                                hidden=move || tab.get() != IntegrityTab::Recall
+                            >
+                                <Show when=move || tab.get() == IntegrityTab::Recall>
+                                    <recall::RecallView access=access.get_value() on_unauthorized target=recall_target/>
+                                </Show>
+                            </div>
+                        })}
+                        <div
+                            id="integrity-reconciliation-panel"
+                            role="tabpanel"
+                            aria-labelledby="integrity-reconciliation-tab"
+                            hidden=move || tab.get() != IntegrityTab::Reconciliation
+                        >
+                            <Show when=move || tab.get() == IntegrityTab::Reconciliation>
+                                <read_views::ReconciliationView on_unauthorized/>
+                            </Show>
+                        </div>
+                        <div
+                            id="integrity-move-planning-panel"
+                            role="tabpanel"
+                            aria-labelledby="integrity-move-planning-tab"
+                            hidden=move || tab.get() != IntegrityTab::MovePlanning
+                        >
+                            <Show when=move || tab.get() == IntegrityTab::MovePlanning>
+                                <MovePlanner
+                                    balances=data.balances.clone()
+                                    initial_cursor=data.balance_next_cursor.clone()
+                                    locations=data.locations.clone()
+                                    selected_balance_id
+                                    selected_balance
+                                    destination_location_id
+                                    quantity
+                                    instructions
+                                    pending=task_pending
+                                    error=task_error
+                                    on_submit=Callback::new(create_task)
+                                    on_unauthorized
+                                />
+                            </Show>
+                        </div>
                     }
                         .into_any()
                 }

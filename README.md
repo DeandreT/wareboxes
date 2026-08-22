@@ -11,7 +11,8 @@ in [`ROADMAP.md`](ROADMAP.md).
 - `apps/server`: API and SSR process composition root
 - `apps/worker`: background delivery process composition root
 - `apps/edge-agent`: durable local bridge for automation and facility devices
-- `apps/web-ops`: Leptos SSR operations web application
+- `apps/web-ops`: Leptos SSR operations web application; see its
+  [visual-system contract](apps/web-ops/STYLE_GUIDE.md)
 - `apps/rf-android`: native Android warehouse execution client
 - `crates/api`: Axum routes, authentication, and Leptos SSR integration
 - `crates/application`: transport-independent workflow contracts and orchestration

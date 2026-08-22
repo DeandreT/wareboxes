@@ -1,5 +1,27 @@
 use super::*;
 
+impl OrderDetailTab {
+    fn tab_id(self) -> &'static str {
+        match self {
+            Self::Header => "order-header-tab",
+            Self::Lines => "order-lines-tab",
+            Self::Fulfillment => "order-fulfillment-tab",
+            Self::Holds => "order-holds-tab",
+            Self::Activity => "order-activity-tab",
+        }
+    }
+
+    fn panel_id(self) -> &'static str {
+        match self {
+            Self::Header => "order-header-panel",
+            Self::Lines => "order-lines-panel",
+            Self::Fulfillment => "order-fulfillment-panel",
+            Self::Holds => "order-holds-panel",
+            Self::Activity => "order-activity-panel",
+        }
+    }
+}
+
 #[component]
 pub(super) fn OrderDetailPanel(
     order: Order,
@@ -282,8 +304,10 @@ pub(super) fn OrderDetailPanel(
                     .map(|(value, label)| {
                         view! {
                             <button
+                                id=value.tab_id()
                                 type="button"
                                 role="tab"
+                                aria-controls=value.panel_id()
                                 aria-selected=move || (tab.get() == value).to_string()
                                 class:active=move || tab.get() == value
                                 on:click=move |_| tab.set(value)
@@ -302,9 +326,16 @@ pub(super) fn OrderDetailPanel(
                 <p class="inline-command-error" role="alert">{move || load_error.get().unwrap_or_default()}</p>
             </Show>
 
-            <Show when=move || tab.get() == OrderDetailTab::Header>
-                <form class="fulfillment-form detail-form" on:submit=save>
-                    <div class="form-grid two-column">
+            <form
+                id="order-header-panel"
+                class="fulfillment-form detail-form"
+                role="tabpanel"
+                aria-labelledby="order-header-tab"
+                hidden=move || tab.get() != OrderDetailTab::Header
+                on:submit=save
+            >
+                <Show when=move || tab.get() == OrderDetailTab::Header>
+                    <div class="fulfillment-form-grid two-column">
                         <label>
                             <span>"Order number"</span>
                             <input
@@ -333,7 +364,7 @@ pub(super) fn OrderDetailPanel(
                     </div>
                     <fieldset>
                         <legend>"Ship to"</legend>
-                        <div class="form-grid two-column">
+                        <div class="fulfillment-form-grid two-column">
                             <label>
                                 <span>"Recipient name"</span>
                                 <input
@@ -531,11 +562,17 @@ pub(super) fn OrderDetailPanel(
                             on_unauthorized
                         />
                     </Show>
-                </form>
-            </Show>
+                </Show>
+            </form>
 
-            <Show when=move || tab.get() == OrderDetailTab::Lines>
-                <div class="detail-section">
+            <div
+                id="order-lines-panel"
+                class="detail-section"
+                role="tabpanel"
+                aria-labelledby="order-lines-tab"
+                hidden=move || tab.get() != OrderDetailTab::Lines
+            >
+                <Show when=move || tab.get() == OrderDetailTab::Lines>
                     <div class="detail-section-title">
                         <div>
                             <h3>"Demand lines"</h3>
@@ -563,6 +600,7 @@ pub(super) fn OrderDetailPanel(
                     <Show when=move || !line_editor_open.get()>
                     <div class="table-scroll">
                         <table class="data-table detail-table order-demand-lines-table">
+                            <caption class="sr-only">"Demand lines on this fulfillment order"</caption>
                             <thead>
                                 <tr>
                                     <th>"Line"</th><th>"Item"</th><th>"Description"</th>
@@ -597,11 +635,17 @@ pub(super) fn OrderDetailPanel(
                         })}
                     </div>
                     </Show>
-                </div>
-            </Show>
+                </Show>
+            </div>
 
-            <Show when=move || tab.get() == OrderDetailTab::Fulfillment>
-                <div class="detail-section-stack">
+            <div
+                id="order-fulfillment-panel"
+                class="detail-section-stack"
+                role="tabpanel"
+                aria-labelledby="order-fulfillment-tab"
+                hidden=move || tab.get() != OrderDetailTab::Fulfillment
+            >
+                <Show when=move || tab.get() == OrderDetailTab::Fulfillment>
                     <OrderAllocationPanel
                         order_id
                         facilities=facilities.get_value()
@@ -623,6 +667,7 @@ pub(super) fn OrderDetailPanel(
                         </div>
                         <div class="table-scroll">
                             <table class="data-table detail-table">
+                                <caption class="sr-only">"Reservations for this fulfillment order"</caption>
                                 <thead>
                                     <tr>
                                         <th>"Item"</th><th>"Facility"</th><th>"UOM"</th><th>"State"</th>
@@ -700,11 +745,17 @@ pub(super) fn OrderDetailPanel(
                             })}
                         </div>
                     </section>
-                </div>
-            </Show>
+                </Show>
+            </div>
 
-            <Show when=move || tab.get() == OrderDetailTab::Holds>
-                <div class="detail-section-stack">
+            <div
+                id="order-holds-panel"
+                class="detail-section-stack"
+                role="tabpanel"
+                aria-labelledby="order-holds-tab"
+                hidden=move || tab.get() != OrderDetailTab::Holds
+            >
+                <Show when=move || tab.get() == OrderDetailTab::Holds>
                     <section class="detail-section">
                         <div class="detail-section-title">
                             <h3>"Order holds"</h3>
@@ -716,6 +767,7 @@ pub(super) fn OrderDetailPanel(
                         </div>
                         <div class="table-scroll">
                             <table class="data-table detail-table order-holds-table">
+                                <caption class="sr-only">"Holds on this fulfillment order"</caption>
                                 <thead>
                                     <tr>
                                         <th>"Hold"</th><th>"Placed"</th><th>"State"</th>
@@ -832,11 +884,17 @@ pub(super) fn OrderDetailPanel(
                             </div>
                         </section>
                     </Show>
-                </div>
-            </Show>
+                </Show>
+            </div>
 
-            <Show when=move || tab.get() == OrderDetailTab::Activity>
-                <div class="detail-section">
+            <div
+                id="order-activity-panel"
+                class="detail-section"
+                role="tabpanel"
+                aria-labelledby="order-activity-tab"
+                hidden=move || tab.get() != OrderDetailTab::Activity
+            >
+                <Show when=move || tab.get() == OrderDetailTab::Activity>
                     <div class="detail-section-title">
                         <h3>"Order activity"</h3>
                         <span>{format!("{} events", order.activity.len())}</span>
@@ -860,8 +918,8 @@ pub(super) fn OrderDetailPanel(
                     {order.activity.is_empty().then(|| {
                         view! { <p class="empty-state">"No activity has been recorded."</p> }
                     })}
-                </div>
-            </Show>
+                </Show>
+            </div>
         </div>
     }
 }

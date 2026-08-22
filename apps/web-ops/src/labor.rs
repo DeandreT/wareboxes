@@ -211,7 +211,7 @@ pub(crate) fn LaborWorkspace(
             {move || {
                 if signals.loading.get() && !signals.loaded.get() {
                     view! {
-                        <div class="labor-state">
+                        <div class="labor-state" role="status" aria-live="polite">
                             <span class="loading-line"></span>
                             <h2>"Loading the labor floor"</h2>
                             <p>"Reconciling attendance, activity, standards, and equipment."</p>
@@ -328,6 +328,7 @@ fn attendance_panel(
             <header><h2>"Attendance"</h2><span class="labor-panel-count">{move || format!("{} intervals", signals.workspace.get().attendance.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
+                    <caption class="sr-only">"Employee attendance intervals in the selected reporting window"</caption>
                     <thead><tr><th>"Employee"</th><th>"Facility"</th><th>"State"</th><th>"Clock in"</th><th class="numeric">"Paid"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead>
                     <tbody>
                         {move || {
@@ -370,6 +371,7 @@ fn activity_panel(
             <header><h2>"Labor activity"</h2><span class="labor-panel-count">{move || format!("{} records", signals.workspace.get().activities.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
+                    <caption class="sr-only">"Labor activity in the selected reporting window"</caption>
                     <thead><tr><th>"Employee / activity"</th><th>"Client"</th><th>"State"</th><th>"Started"</th><th class="numeric">"Qty / actual"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead>
                     <tbody>
                         {move || {
@@ -417,6 +419,7 @@ fn summary_panel(workspace: &LaborWorkspaceResponse) -> AnyView {
             <header><h2>"Performance by employee"</h2><span class="labor-panel-count">{format!("{} employees", workspace.summaries.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
+                    <caption class="sr-only">"Labor performance summarized by employee"</caption>
                     <thead><tr><th>"Employee"</th><th class="numeric">"Paid"</th><th class="numeric">"Direct"</th><th class="numeric">"Indirect"</th><th class="numeric">"Exceptions"</th><th class="numeric">"Expected"</th><th class="numeric">"Utilization"</th><th class="numeric">"Efficiency"</th></tr></thead>
                     <tbody>
                         {if workspace.summaries.is_empty() {
@@ -457,7 +460,7 @@ fn qualification_panel(
                 {if workspace.skills.is_empty() {
                     view! { <p class="labor-inline-empty">"No skills configured."</p> }.into_any()
                 } else {
-                    view! { <table><thead><tr><th>"Code"</th><th>"Skill"</th><th>"Requirement"</th></tr></thead><tbody>{workspace.skills.into_iter().map(|row| view! {
+                    view! { <table><caption class="sr-only">"Skills available for labor qualification"</caption><thead><tr><th>"Code"</th><th>"Skill"</th><th>"Requirement"</th></tr></thead><tbody>{workspace.skills.into_iter().map(|row| view! {
                         <tr><td><code>{row.code}</code></td><td>{row.name}</td><td>{if row.certification_required { "Certificate" } else { "Training" }}</td></tr>
                     }).collect_view()}</tbody></table> }.into_any()
                 }}
@@ -467,7 +470,7 @@ fn qualification_panel(
                 {if workspace.certifications.is_empty() {
                     view! { <p class="labor-inline-empty">"No certifications in scope."</p> }.into_any()
                 } else {
-                    view! { <table><thead><tr><th>"Employee"</th><th>"Skill / facility"</th><th>"Expires"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{workspace.certifications.into_iter().map(|row| {
+                    view! { <table><caption class="sr-only">"Employee skill certifications"</caption><thead><tr><th>"Employee"</th><th>"Skill / facility"</th><th>"Expires"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{workspace.certifications.into_iter().map(|row| {
                         let active = row.revoked_at.is_none();
                         let target = ActionTarget::Revoke(row.clone());
                         let facility = scope_name(&access.get_value().facilities, row.facility_id);
@@ -492,7 +495,7 @@ fn equipment_panel(
                 {if workspace.equipment_assets.is_empty() {
                     view! { <p class="labor-inline-empty">"No equipment assets in scope."</p> }.into_any()
                 } else {
-                    view! { <table><thead><tr><th>"Asset"</th><th>"Facility / class"</th><th>"State"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{workspace.equipment_assets.into_iter().map(|row| {
+                    view! { <table><caption class="sr-only">"Warehouse equipment readiness"</caption><thead><tr><th>"Asset"</th><th>"Facility / class"</th><th>"State"</th><th class="labor-action-column"><span class="sr-only">"Actions"</span></th></tr></thead><tbody>{workspace.equipment_assets.into_iter().map(|row| {
                         let mutable = row.status != EquipmentStatus::Retired;
                         let target = ActionTarget::Equipment(row.clone());
                         let facility = scope_name(&access.get_value().facilities, row.facility_id);
@@ -516,6 +519,7 @@ fn standards_panel(
             <header><h2>"Labor standards"</h2><span class="labor-panel-count">{format!("{} effective definitions", workspace.standards.len())}</span></header>
             <div class="labor-table-scroll">
                 <table>
+                    <caption class="sr-only">"Effective labor standards in the active scope"</caption>
                     <thead><tr><th>"Code / standard"</th><th>"Facility"</th><th>"Client"</th><th>"Activity"</th><th>"Basis"</th><th class="numeric">"Setup"</th><th class="numeric">"Rate"</th><th>"Effective"</th></tr></thead>
                     <tbody>
                         {if workspace.standards.is_empty() {

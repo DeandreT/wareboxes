@@ -2,9 +2,9 @@
   display: grid;
   min-width: 0;
   grid-template-columns:
-    minmax(0, min(var(--split-master-width), calc(100% - 368px)))
-    8px
-    minmax(360px, 1fr);
+    minmax(0, min(var(--split-master-width), calc(100% - 332px)))
+    12px
+    minmax(320px, 1fr);
 }
 
 .split-workspace > .split-master {
@@ -20,11 +20,11 @@
 }
 
 .split-workspace[data-pane-mode="master"] {
-  grid-template-columns: minmax(0, 1fr) 28px 0;
+  grid-template-columns: minmax(0, 1fr) 32px 0;
 }
 
 .split-workspace[data-pane-mode="detail"] {
-  grid-template-columns: 0 28px minmax(0, 1fr);
+  grid-template-columns: 0 32px minmax(0, 1fr);
 }
 
 .split-workspace[data-pane-mode="master"] > .split-detail,
@@ -36,7 +36,7 @@
   position: relative;
   z-index: 2;
   display: grid;
-  width: 8px;
+  width: 12px;
   min-height: 0;
   place-items: center;
   border: 0;
@@ -64,7 +64,7 @@
 
 .split-pane-handle.collapsed {
   align-items: start;
-  width: 28px;
+  width: 32px;
   padding-top: 5px;
   overflow: visible;
   cursor: default;
@@ -75,9 +75,9 @@
   z-index: 3;
   top: 5px;
   display: grid;
-  width: 26px;
-  height: 30px;
-  min-height: 30px;
+  width: 30px;
+  height: 32px;
+  min-height: 32px;
   padding: 0;
   place-items: center;
   border: 1px solid var(--line-strong);

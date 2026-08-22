@@ -396,6 +396,17 @@
 
 .shipping-qa-configure {
   justify-self: start;
+  min-height: var(--control-height);
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  text-decoration: none;
+}
+
+.shipping-qa-configure:hover {
+  background: var(--blue-soft);
+  text-decoration: none;
 }
 
 .shipping-qa-cancel {

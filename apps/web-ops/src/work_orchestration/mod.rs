@@ -267,8 +267,10 @@ pub(crate) fn WorkOrchestrationWorkspace(
                 {move || display::resource_signal_panel(signals, can_supervise, resource)}
             </section>
 
-            {move || display::plan_panel(signals, access)}
-            {move || display::plan_detail(signals, access, drafts, can_supervise)}
+            <div class="orchestration-plan-workspace">
+                {move || display::plan_panel(signals, access)}
+                {move || display::plan_detail(signals, access, drafts, can_supervise)}
+            </div>
 
             {move || signals.dialog.get().map(|dialog| {
                 forms::command_dialog(signals, drafts, access, locations, dialog)

@@ -336,7 +336,7 @@
 
 .billing-workbench {
   display: grid;
-  gap: 1rem;
+  gap: 8px;
 }
 
 .billing-toolbar {
@@ -346,33 +346,33 @@
 .billing-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.75rem;
+  gap: 6px;
 }
 
 .billing-metrics article {
   display: grid;
   gap: 0.2rem;
-  padding: 0.85rem 1rem;
+  padding: 7px 9px;
   border: 1px solid var(--line);
-  border-radius: 0.55rem;
-  background: var(--surface-raised);
+  border-radius: 3px;
+  background: var(--surface);
 }
 
 .billing-metrics span {
   color: var(--ink-soft);
-  font-size: 0.75rem;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
 .billing-metrics strong {
-  font-size: 1.5rem;
+  font-size: 18px;
   font-variant-numeric: tabular-nums;
 }
 
 .billing-split {
-  grid-template-columns: minmax(34rem, 1.15fr) minmax(28rem, 0.85fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(24rem, 0.85fr);
 }
 
 .billing-runs {
@@ -383,14 +383,14 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
-  margin: 0.65rem 0 1rem;
+  margin: 6px 0 8px;
 }
 
 .billing-command-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
-  padding-top: 1rem;
+  gap: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--line);
 }
 
@@ -405,16 +405,16 @@
 .billing-run-summary {
   display: flex;
   align-items: baseline;
-  gap: 1rem;
-  margin-bottom: 1rem;
+  gap: 8px;
+  margin-bottom: 8px;
   font-variant-numeric: tabular-nums;
 }
 
 .billing-run-summary strong {
-  font-size: 1.5rem;
+  font-size: 18px;
 }
 
-.warning-text {
+.billing-workbench .warning-text {
   color: var(--warning-ink);
   font-weight: 700;
 }
@@ -431,7 +431,7 @@
   white-space: pre;
 }
 
-.mono-value {
+.billing-workbench .mono-value {
   overflow-wrap: anywhere;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.75rem;
@@ -445,7 +445,7 @@
 }
 
 .configuration-split {
-  min-height: 420px;
+  min-height: 280px;
 }
 
 .configuration-workbench .admin-table {
@@ -484,6 +484,32 @@
   margin: 0;
 }
 
+.configuration-simulator .admin-form-grid > label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.configuration-simulator .admin-form-grid > label > :is(input, select) {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--control-ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.configuration-simulator .admin-form-actions {
+  grid-column: 1 / -1;
+}
+
 .configuration-detail p,
 .configuration-rollback p {
   margin: 0;
@@ -493,9 +519,56 @@
 }
 
 .configuration-dialog {
-  width: min(900px, calc(100vw - 48px));
-  max-height: calc(100vh - 48px);
-  overflow: auto;
+  /* The shared modal width lives in a later cascade layer, so the scoped
+     minimum preserves the wider rule editor without changing that contract. */
+  min-width: min(900px, calc(100vw - 48px));
+  max-width: calc(100vw - 48px);
+}
+
+.configuration-dialog > form {
+  display: grid;
+  gap: 8px;
+}
+
+.configuration-dialog fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.configuration-dialog label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.configuration-dialog input:not([type="checkbox"]):not([type="radio"]),
+.configuration-dialog select,
+.configuration-dialog textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--control-ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.configuration-dialog input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+.configuration-dialog select:focus-visible,
+.configuration-dialog textarea:focus-visible {
+  border-color: var(--blue);
+}
+
+.configuration-dialog > form > footer {
+  margin-top: 0;
 }
 
 .configuration-rule-editor {
