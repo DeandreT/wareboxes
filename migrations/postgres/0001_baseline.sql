@@ -17473,6 +17473,13 @@ CREATE INDEX outbox_events_tenant_ordering_blocker_idx ON public.outbox_events U
 
 
 --
+-- Name: outbox_events_tenant_cell_move_pending_metrics_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_cell_move_pending_metrics_idx ON public.outbox_events USING btree (created) WHERE ((aggregate_type = 'tenant_cell_move'::text) AND (published_at IS NULL) AND (discarded_at IS NULL));
+
+
+--
 -- Name: outbox_events_tenant_ready_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -54815,3 +54822,1288 @@ REVOKE ALL ON FUNCTION public.require_data_cell_event() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.place_new_tenant_in_data_cell() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_tenant_cell_placement() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_tenant_cell_placement_event() FROM PUBLIC;
+
+-- Governed tenant movement between data cells. Copy execution remains in the
+-- deployment plane, while this control-plane aggregate reserves target capacity,
+-- fences tenant writes, validates immutable copy evidence, and makes placement
+-- cutover or rollback one atomic compare-and-swap.
+
+ALTER TABLE public.tenant_cell_placement_events
+  DROP CONSTRAINT tenant_cell_placement_events_action_check,
+  DROP CONSTRAINT tenant_cell_placement_events_initial_check,
+  ADD CONSTRAINT tenant_cell_placement_events_action_check CHECK(
+    action IN ('placed','moved','rolled_back')),
+  ADD CONSTRAINT tenant_cell_placement_events_shape_check CHECK(
+    (action='placed' AND placement_revision=1 AND previous_data_cell_id IS NULL)
+    OR (action IN ('moved','rolled_back') AND placement_revision>1
+      AND previous_data_cell_id IS NOT NULL
+      AND previous_data_cell_id<>resulting_data_cell_id));
+
+CREATE TABLE public.tenant_cell_moves (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  source_data_cell_id bigint NOT NULL REFERENCES public.data_cells(id),
+  target_data_cell_id bigint NOT NULL REFERENCES public.data_cells(id),
+  source_placement_revision bigint NOT NULL,
+  cutover_placement_revision bigint,
+  rollback_placement_revision bigint,
+  residency_requirement text NOT NULL,
+  status text NOT NULL,
+  revision bigint NOT NULL,
+  last_action text NOT NULL,
+  reason text NOT NULL,
+  requested_at timestamptz NOT NULL,
+  requested_by_user_id bigint NOT NULL REFERENCES public.users(id),
+  changed_at timestamptz,
+  changed_by_user_id bigint REFERENCES public.users(id),
+  change_reason text,
+  copy_reference text,
+  copy_started_at timestamptz,
+  copy_started_by_user_id bigint REFERENCES public.users(id),
+  latest_source_wal_lsn pg_lsn,
+  latest_target_replay_lsn pg_lsn,
+  copied_row_count bigint,
+  copied_bytes bigint,
+  checkpointed_at timestamptz,
+  checkpointed_by_user_id bigint REFERENCES public.users(id),
+  frozen_at timestamptz,
+  frozen_by_user_id bigint REFERENCES public.users(id),
+  validated_at timestamptz,
+  validated_by_user_id bigint REFERENCES public.users(id),
+  cutover_at timestamptz,
+  cutover_by_user_id bigint REFERENCES public.users(id),
+  post_cutover_verified_at timestamptz,
+  post_cutover_verified_by_user_id bigint REFERENCES public.users(id),
+  completed_at timestamptz,
+  completed_by_user_id bigint REFERENCES public.users(id),
+  rolled_back_at timestamptz,
+  rolled_back_by_user_id bigint REFERENCES public.users(id),
+  cancelled_at timestamptz,
+  cancelled_by_user_id bigint REFERENCES public.users(id),
+  UNIQUE(tenant_id,id),
+  CONSTRAINT tenant_cell_moves_cells_differ CHECK(
+    source_data_cell_id<>target_data_cell_id),
+  CONSTRAINT tenant_cell_moves_revision_check CHECK(
+    revision>0 AND source_placement_revision>0
+      AND (cutover_placement_revision IS NULL OR cutover_placement_revision>1)
+      AND (rollback_placement_revision IS NULL OR rollback_placement_revision>2)),
+  CONSTRAINT tenant_cell_moves_status_check CHECK(status IN (
+    'planned','copying','frozen','validated','cut_over','completed',
+    'rolled_back','cancelled')),
+  CONSTRAINT tenant_cell_moves_action_check CHECK(last_action IN (
+    'planned','copy_started','checkpoint_recorded','writes_frozen','validated',
+    'cut_over','post_cutover_verified','completed','rolled_back','cancelled')),
+  CONSTRAINT tenant_cell_moves_residency_check CHECK(
+    residency_requirement~'^[A-Z0-9][A-Z0-9-]{0,14}[A-Z0-9]$'
+      OR residency_requirement~'^[A-Z0-9]$'),
+  CONSTRAINT tenant_cell_moves_reason_check CHECK(
+    reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+      AND reason!~'[[:cntrl:]]'
+      AND (change_reason IS NULL OR (change_reason=btrim(change_reason)
+        AND change_reason<>'' AND char_length(change_reason)<=500
+        AND change_reason!~'[[:cntrl:]]'))),
+  CONSTRAINT tenant_cell_moves_copy_reference_check CHECK(
+    copy_reference IS NULL OR (copy_reference=btrim(copy_reference)
+      AND copy_reference<>'' AND char_length(copy_reference)<=200
+      AND copy_reference!~'[[:cntrl:]]')),
+  CONSTRAINT tenant_cell_moves_checkpoint_check CHECK(
+    (latest_source_wal_lsn IS NULL AND latest_target_replay_lsn IS NULL
+      AND copied_row_count IS NULL AND copied_bytes IS NULL
+      AND checkpointed_at IS NULL AND checkpointed_by_user_id IS NULL)
+    OR (latest_source_wal_lsn IS NOT NULL AND latest_target_replay_lsn IS NOT NULL
+      AND latest_target_replay_lsn<=latest_source_wal_lsn
+      AND copied_row_count>=0 AND copied_bytes>=0
+      AND checkpointed_at IS NOT NULL AND checkpointed_by_user_id IS NOT NULL)),
+  CONSTRAINT tenant_cell_moves_initial_evidence_check CHECK(
+    (revision=1 AND status='planned' AND last_action='planned'
+      AND changed_at IS NULL AND changed_by_user_id IS NULL AND change_reason IS NULL)
+    OR (revision>1 AND changed_at IS NOT NULL AND changed_by_user_id IS NOT NULL)),
+  CONSTRAINT tenant_cell_moves_phase_shape_check CHECK(
+    (status='planned' AND copy_reference IS NULL AND copy_started_at IS NULL
+      AND frozen_at IS NULL AND validated_at IS NULL AND cutover_at IS NULL
+      AND post_cutover_verified_at IS NULL
+      AND completed_at IS NULL AND rolled_back_at IS NULL AND cancelled_at IS NULL)
+    OR (status='copying' AND copy_reference IS NOT NULL AND copy_started_at IS NOT NULL
+      AND copy_started_by_user_id IS NOT NULL AND frozen_at IS NULL
+      AND validated_at IS NULL AND cutover_at IS NULL AND completed_at IS NULL
+      AND post_cutover_verified_at IS NULL
+      AND rolled_back_at IS NULL AND cancelled_at IS NULL)
+    OR (status='frozen' AND copy_reference IS NOT NULL AND copy_started_at IS NOT NULL
+      AND checkpointed_at IS NOT NULL AND frozen_at IS NOT NULL
+      AND frozen_by_user_id IS NOT NULL AND validated_at IS NULL
+      AND cutover_at IS NULL AND completed_at IS NULL AND rolled_back_at IS NULL
+      AND cancelled_at IS NULL)
+    OR (status='validated' AND frozen_at IS NOT NULL AND validated_at IS NOT NULL
+      AND validated_by_user_id IS NOT NULL AND cutover_at IS NULL
+      AND post_cutover_verified_at IS NULL
+      AND completed_at IS NULL AND rolled_back_at IS NULL AND cancelled_at IS NULL)
+    OR (status='cut_over' AND validated_at IS NOT NULL AND cutover_at IS NOT NULL
+      AND cutover_by_user_id IS NOT NULL AND cutover_placement_revision IS NOT NULL
+      AND completed_at IS NULL AND rolled_back_at IS NULL AND cancelled_at IS NULL)
+    OR (status='completed' AND cutover_at IS NOT NULL AND completed_at IS NOT NULL
+      AND post_cutover_verified_at IS NOT NULL
+      AND post_cutover_verified_by_user_id IS NOT NULL
+      AND completed_by_user_id IS NOT NULL AND rolled_back_at IS NULL
+      AND cancelled_at IS NULL)
+    OR (status='rolled_back' AND cutover_at IS NOT NULL
+      AND cutover_placement_revision IS NOT NULL AND rolled_back_at IS NOT NULL
+      AND rolled_back_by_user_id IS NOT NULL
+      AND rollback_placement_revision=cutover_placement_revision+1
+      AND completed_at IS NULL AND cancelled_at IS NULL)
+    OR (status='cancelled' AND cutover_at IS NULL AND completed_at IS NULL
+      AND rolled_back_at IS NULL AND cancelled_at IS NOT NULL
+      AND cancelled_by_user_id IS NOT NULL)),
+  CONSTRAINT tenant_cell_moves_cutover_verification_shape_check CHECK(
+    (post_cutover_verified_at IS NULL
+      AND post_cutover_verified_by_user_id IS NULL)
+    OR (post_cutover_verified_at IS NOT NULL
+      AND post_cutover_verified_by_user_id IS NOT NULL
+      AND cutover_at IS NOT NULL
+      AND post_cutover_verified_at>=cutover_at)),
+  CONSTRAINT tenant_cell_moves_monotonic_times_check CHECK(
+    (copy_started_at IS NULL OR copy_started_at>=requested_at)
+      AND (checkpointed_at IS NULL OR checkpointed_at>=copy_started_at)
+      AND (frozen_at IS NULL OR frozen_at>=copy_started_at)
+      AND (validated_at IS NULL OR validated_at>=frozen_at)
+      AND (cutover_at IS NULL OR cutover_at>=validated_at)
+      AND (post_cutover_verified_at IS NULL
+        OR post_cutover_verified_at>=cutover_at)
+      AND (completed_at IS NULL OR completed_at>=cutover_at)
+      AND (rolled_back_at IS NULL OR rolled_back_at>=cutover_at)
+      AND (cancelled_at IS NULL OR cancelled_at>=requested_at))
+);
+
+CREATE UNIQUE INDEX tenant_cell_moves_one_active_tenant_idx
+ON public.tenant_cell_moves(tenant_id)
+WHERE status IN ('planned','copying','frozen','validated','cut_over');
+CREATE INDEX tenant_cell_moves_queue_idx
+ON public.tenant_cell_moves(status,requested_at DESC,id DESC);
+CREATE INDEX tenant_cell_moves_source_idx
+ON public.tenant_cell_moves(source_data_cell_id,status,requested_at DESC,id DESC);
+CREATE INDEX tenant_cell_moves_target_idx
+ON public.tenant_cell_moves(target_data_cell_id,status,requested_at DESC,id DESC);
+
+CREATE TABLE public.tenant_cell_move_validations (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  tenant_cell_move_id bigint NOT NULL,
+  move_revision bigint NOT NULL,
+  source_row_count bigint NOT NULL,
+  target_row_count bigint NOT NULL,
+  source_data_checksum text NOT NULL,
+  target_data_checksum text NOT NULL,
+  source_schema_fingerprint text NOT NULL,
+  target_schema_fingerprint text NOT NULL,
+  source_object_manifest_checksum text NOT NULL,
+  target_object_manifest_checksum text NOT NULL,
+  source_wal_lsn pg_lsn NOT NULL,
+  target_replay_lsn pg_lsn NOT NULL,
+  inventory_reconciled boolean NOT NULL,
+  idempotency_verified boolean NOT NULL,
+  outbox_verified boolean NOT NULL,
+  tool_version text NOT NULL,
+  validated_at timestamptz NOT NULL,
+  validated_by_user_id bigint NOT NULL REFERENCES public.users(id),
+  UNIQUE(tenant_cell_move_id),
+  FOREIGN KEY(tenant_id,tenant_cell_move_id)
+    REFERENCES public.tenant_cell_moves(tenant_id,id),
+  CONSTRAINT tenant_cell_move_validations_revision_check CHECK(move_revision>1),
+  CONSTRAINT tenant_cell_move_validations_counts_check CHECK(
+    source_row_count>=0 AND source_row_count=target_row_count),
+  CONSTRAINT tenant_cell_move_validations_checksums_check CHECK(
+    source_data_checksum~'^[0-9a-f]{64}$'
+      AND source_data_checksum=target_data_checksum
+      AND source_schema_fingerprint~'^[0-9a-f]{64}$'
+      AND source_schema_fingerprint=target_schema_fingerprint
+      AND source_object_manifest_checksum~'^[0-9a-f]{64}$'
+      AND source_object_manifest_checksum=target_object_manifest_checksum),
+  CONSTRAINT tenant_cell_move_validations_replay_check CHECK(
+    target_replay_lsn>=source_wal_lsn),
+  CONSTRAINT tenant_cell_move_validations_proofs_check CHECK(
+    inventory_reconciled AND idempotency_verified AND outbox_verified),
+  CONSTRAINT tenant_cell_move_validations_tool_check CHECK(
+    tool_version=btrim(tool_version) AND tool_version<>''
+      AND char_length(tool_version)<=100 AND tool_version!~'[[:cntrl:]]')
+);
+
+CREATE TABLE public.tenant_cell_move_cutover_verifications (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  tenant_cell_move_id bigint NOT NULL,
+  move_revision bigint NOT NULL,
+  tool_version text NOT NULL,
+  routing_reference text NOT NULL,
+  observed_data_cell_id bigint NOT NULL REFERENCES public.data_cells(id),
+  observed_placement_revision bigint NOT NULL,
+  routing_verified boolean NOT NULL,
+  target_read_verified boolean NOT NULL,
+  write_fence_verified boolean NOT NULL,
+  inventory_reconciled boolean NOT NULL,
+  idempotency_verified boolean NOT NULL,
+  outbox_verified boolean NOT NULL,
+  verified_at timestamptz NOT NULL,
+  verified_by_user_id bigint NOT NULL REFERENCES public.users(id),
+  UNIQUE(tenant_cell_move_id),
+  FOREIGN KEY(tenant_id,tenant_cell_move_id)
+    REFERENCES public.tenant_cell_moves(tenant_id,id),
+  CONSTRAINT tenant_cell_move_cutover_verifications_revision_check CHECK(
+    move_revision>1 AND observed_placement_revision>1),
+  CONSTRAINT tenant_cell_move_cutover_verifications_tool_check CHECK(
+    tool_version=btrim(tool_version) AND tool_version<>''
+      AND char_length(tool_version)<=100 AND tool_version!~'[[:cntrl:]]'),
+  CONSTRAINT tenant_cell_move_cutover_verifications_routing_check CHECK(
+    routing_reference=btrim(routing_reference) AND routing_reference<>''
+      AND char_length(routing_reference)<=200
+      AND routing_reference!~'[[:cntrl:]]'),
+  CONSTRAINT tenant_cell_move_cutover_verifications_proofs_check CHECK(
+    routing_verified AND target_read_verified AND write_fence_verified
+      AND inventory_reconciled AND idempotency_verified AND outbox_verified)
+);
+
+CREATE TABLE public.tenant_cell_move_rollback_verifications (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  tenant_cell_move_id bigint NOT NULL,
+  move_revision bigint NOT NULL,
+  tool_version text NOT NULL,
+  routing_reference text NOT NULL,
+  observed_data_cell_id bigint NOT NULL REFERENCES public.data_cells(id),
+  expected_rollback_placement_revision bigint NOT NULL,
+  routing_verified boolean NOT NULL,
+  source_read_verified boolean NOT NULL,
+  write_fence_verified boolean NOT NULL,
+  inventory_reconciled boolean NOT NULL,
+  idempotency_verified boolean NOT NULL,
+  outbox_verified boolean NOT NULL,
+  verified_at timestamptz NOT NULL,
+  verified_by_user_id bigint NOT NULL REFERENCES public.users(id),
+  UNIQUE(tenant_cell_move_id),
+  FOREIGN KEY(tenant_id,tenant_cell_move_id)
+    REFERENCES public.tenant_cell_moves(tenant_id,id),
+  CONSTRAINT tenant_cell_move_rollback_verifications_revision_check CHECK(
+    move_revision>1 AND expected_rollback_placement_revision>2),
+  CONSTRAINT tenant_cell_move_rollback_verifications_tool_check CHECK(
+    tool_version=btrim(tool_version) AND tool_version<>''
+      AND char_length(tool_version)<=100 AND tool_version!~'[[:cntrl:]]'),
+  CONSTRAINT tenant_cell_move_rollback_verifications_routing_check CHECK(
+    routing_reference=btrim(routing_reference) AND routing_reference<>''
+      AND char_length(routing_reference)<=200
+      AND routing_reference!~'[[:cntrl:]]'),
+  CONSTRAINT tenant_cell_move_rollback_verifications_proofs_check CHECK(
+    routing_verified AND source_read_verified AND write_fence_verified
+      AND inventory_reconciled AND idempotency_verified AND outbox_verified)
+);
+
+CREATE TABLE public.tenant_cell_move_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  tenant_cell_move_id bigint NOT NULL,
+  action text NOT NULL,
+  move_revision bigint NOT NULL,
+  previous_status text,
+  resulting_status text NOT NULL,
+  actor_user_id bigint NOT NULL REFERENCES public.users(id),
+  occurred_at timestamptz NOT NULL,
+  reason text,
+  request_id text NOT NULL,
+  evidence jsonb NOT NULL,
+  UNIQUE(tenant_cell_move_id,move_revision),
+  FOREIGN KEY(tenant_id,tenant_cell_move_id)
+    REFERENCES public.tenant_cell_moves(tenant_id,id),
+  CONSTRAINT tenant_cell_move_events_action_check CHECK(action IN (
+    'planned','copy_started','checkpoint_recorded','writes_frozen','validated',
+    'cut_over','post_cutover_verified','completed','rolled_back','cancelled')),
+  CONSTRAINT tenant_cell_move_events_revision_check CHECK(move_revision>0),
+  CONSTRAINT tenant_cell_move_events_status_check CHECK(
+    (previous_status IS NULL OR previous_status IN (
+      'planned','copying','frozen','validated','cut_over'))
+    AND resulting_status IN (
+      'planned','copying','frozen','validated','cut_over','completed',
+      'rolled_back','cancelled')),
+  CONSTRAINT tenant_cell_move_events_reason_check CHECK(reason IS NULL OR (
+    reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+      AND reason!~'[[:cntrl:]]')),
+  CONSTRAINT tenant_cell_move_events_request_check CHECK(
+    request_id=btrim(request_id) AND request_id<>'' AND char_length(request_id)<=128),
+  CONSTRAINT tenant_cell_move_events_evidence_check CHECK(jsonb_typeof(evidence)='object')
+);
+CREATE INDEX tenant_cell_move_events_history_idx
+ON public.tenant_cell_move_events(tenant_cell_move_id,occurred_at DESC,id DESC);
+
+CREATE TABLE public.tenant_write_fences (
+  tenant_id bigint PRIMARY KEY REFERENCES public.tenants(id),
+  tenant_cell_move_id bigint NOT NULL,
+  fence_epoch bigint NOT NULL,
+  frozen_at timestamptz NOT NULL,
+  frozen_by_user_id bigint NOT NULL REFERENCES public.users(id),
+  FOREIGN KEY(tenant_id,tenant_cell_move_id)
+    REFERENCES public.tenant_cell_moves(tenant_id,id),
+  CONSTRAINT tenant_write_fences_epoch_check CHECK(fence_epoch>0)
+);
+
+CREATE FUNCTION public.tenant_cell_fence_lock_key(checked_tenant_id bigint)
+RETURNS bigint LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT hashtextextended('tenant-cell-write-fence:'||checked_tenant_id::text,0)
+$$;
+
+CREATE FUNCTION public.enforce_tenant_cell_write_fence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_tenant_id bigint;
+BEGIN
+  checked_tenant_id:=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint;
+  IF checked_tenant_id IS NULL THEN
+    RAISE EXCEPTION 'tenant context is required for tenant mutation' USING ERRCODE='42501';
+  END IF;
+  PERFORM pg_advisory_xact_lock_shared(
+    public.tenant_cell_fence_lock_key(checked_tenant_id));
+  IF EXISTS(SELECT 1 FROM public.tenant_write_fences fence
+    WHERE fence.tenant_id=checked_tenant_id) THEN
+    RAISE EXCEPTION 'tenant writes are frozen for governed data-cell movement'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.validate_tenant_cell_move() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; placement public.tenant_cell_placements%ROWTYPE;
+DECLARE target public.data_cells%ROWTYPE; placed_count bigint; reserved_count bigint;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'tenant cell moves cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'tenant cell move requires a platform administrator'
+      USING ERRCODE='42501';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    PERFORM 1 FROM public.data_cells cell
+      WHERE cell.id IN (NEW.source_data_cell_id,NEW.target_data_cell_id)
+      ORDER BY cell.id FOR UPDATE;
+    SELECT * INTO placement FROM public.tenant_cell_placements current_placement
+    WHERE current_placement.tenant_id=NEW.tenant_id FOR UPDATE;
+    SELECT * INTO target FROM public.data_cells cell
+      WHERE cell.id=NEW.target_data_cell_id;
+    SELECT COUNT(*) INTO placed_count FROM public.tenant_cell_placements current_placement
+      WHERE current_placement.data_cell_id=NEW.target_data_cell_id;
+    SELECT COUNT(*) INTO reserved_count FROM public.tenant_cell_moves move
+      WHERE (move.target_data_cell_id=NEW.target_data_cell_id
+          AND move.status IN ('planned','copying','frozen','validated'))
+        OR (move.source_data_cell_id=NEW.target_data_cell_id
+          AND move.status='cut_over');
+    IF placement.tenant_id IS NULL OR placement.data_cell_id<>NEW.source_data_cell_id
+      OR placement.revision<>NEW.source_placement_revision
+      OR placement.residency_requirement<>NEW.residency_requirement
+      OR NEW.status<>'planned' OR NEW.revision<>1 OR NEW.last_action<>'planned'
+      OR NEW.requested_by_user_id<>actor_id OR NEW.changed_at IS NOT NULL
+      OR target.id IS NULL OR target.status<>'active'
+      OR NOT (NEW.residency_requirement='GLOBAL'
+        OR NEW.residency_requirement=target.residency_code)
+      OR placed_count+reserved_count>=target.max_tenants
+      OR (target.mode='dedicated' AND placed_count+reserved_count<>0) THEN
+      RAISE EXCEPTION 'invalid tenant cell move plan' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.source_data_cell_id,NEW.target_data_cell_id,
+      NEW.source_placement_revision,NEW.residency_requirement,NEW.reason,
+      NEW.requested_at,NEW.requested_by_user_id)
+    IS DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.source_data_cell_id,OLD.target_data_cell_id,
+      OLD.source_placement_revision,OLD.residency_requirement,OLD.reason,
+      OLD.requested_at,OLD.requested_by_user_id)
+    OR NEW.revision<>OLD.revision+1 OR NEW.changed_at IS NULL
+    OR NEW.changed_at<COALESCE(OLD.changed_at,OLD.requested_at)
+    OR NEW.changed_by_user_id<>actor_id
+    OR (NEW.last_action<>'copy_started' AND
+      ROW(NEW.copy_reference,NEW.copy_started_at,NEW.copy_started_by_user_id)
+        IS DISTINCT FROM
+      ROW(OLD.copy_reference,OLD.copy_started_at,OLD.copy_started_by_user_id))
+    OR (NEW.last_action<>'checkpoint_recorded' AND
+      ROW(NEW.latest_source_wal_lsn,NEW.latest_target_replay_lsn,
+          NEW.copied_row_count,NEW.copied_bytes,NEW.checkpointed_at,
+          NEW.checkpointed_by_user_id)
+        IS DISTINCT FROM
+      ROW(OLD.latest_source_wal_lsn,OLD.latest_target_replay_lsn,
+          OLD.copied_row_count,OLD.copied_bytes,OLD.checkpointed_at,
+          OLD.checkpointed_by_user_id))
+    OR (NEW.last_action<>'writes_frozen' AND
+      ROW(NEW.frozen_at,NEW.frozen_by_user_id)
+        IS DISTINCT FROM ROW(OLD.frozen_at,OLD.frozen_by_user_id))
+    OR (NEW.last_action<>'validated' AND
+      ROW(NEW.validated_at,NEW.validated_by_user_id)
+        IS DISTINCT FROM ROW(OLD.validated_at,OLD.validated_by_user_id))
+    OR (NEW.last_action<>'cut_over' AND
+      ROW(NEW.cutover_at,NEW.cutover_by_user_id,NEW.cutover_placement_revision)
+        IS DISTINCT FROM
+      ROW(OLD.cutover_at,OLD.cutover_by_user_id,OLD.cutover_placement_revision))
+    OR (NEW.last_action<>'post_cutover_verified' AND
+      ROW(NEW.post_cutover_verified_at,NEW.post_cutover_verified_by_user_id)
+        IS DISTINCT FROM
+      ROW(OLD.post_cutover_verified_at,OLD.post_cutover_verified_by_user_id))
+    OR (NEW.last_action<>'completed' AND
+      ROW(NEW.completed_at,NEW.completed_by_user_id)
+        IS DISTINCT FROM ROW(OLD.completed_at,OLD.completed_by_user_id))
+    OR (NEW.last_action<>'rolled_back' AND
+      ROW(NEW.rolled_back_at,NEW.rolled_back_by_user_id,
+          NEW.rollback_placement_revision)
+        IS DISTINCT FROM
+      ROW(OLD.rolled_back_at,OLD.rolled_back_by_user_id,
+          OLD.rollback_placement_revision))
+    OR (NEW.last_action<>'cancelled' AND
+      ROW(NEW.cancelled_at,NEW.cancelled_by_user_id)
+        IS DISTINCT FROM ROW(OLD.cancelled_at,OLD.cancelled_by_user_id))
+    OR (NEW.last_action NOT IN ('completed','rolled_back','cancelled')
+      AND NEW.change_reason IS DISTINCT FROM OLD.change_reason) THEN
+    RAISE EXCEPTION 'immutable tenant cell move evidence changed' USING ERRCODE='23514';
+  END IF;
+  IF NEW.last_action IN ('copy_started','writes_frozen','validated','cut_over') THEN
+    PERFORM 1 FROM public.data_cells cell
+      WHERE cell.id IN (NEW.source_data_cell_id,NEW.target_data_cell_id)
+      ORDER BY cell.id FOR UPDATE;
+    SELECT * INTO target FROM public.data_cells cell
+      WHERE cell.id=NEW.target_data_cell_id;
+    SELECT COUNT(*) INTO placed_count FROM public.tenant_cell_placements current_placement
+      WHERE current_placement.data_cell_id=NEW.target_data_cell_id;
+    SELECT COUNT(*) INTO reserved_count FROM public.tenant_cell_moves move
+      WHERE move.id<>NEW.id AND (
+        (move.target_data_cell_id=NEW.target_data_cell_id
+          AND move.status IN ('planned','copying','frozen','validated'))
+        OR (move.source_data_cell_id=NEW.target_data_cell_id
+          AND move.status='cut_over'));
+    IF target.id IS NULL OR target.status<>'active'
+      OR NOT (NEW.residency_requirement='GLOBAL'
+        OR NEW.residency_requirement=target.residency_code)
+      OR placed_count+reserved_count>=target.max_tenants
+      OR (target.mode='dedicated' AND placed_count+reserved_count<>0) THEN
+      RAISE EXCEPTION 'tenant cell move target is no longer viable'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  IF NOT (
+    (OLD.status='planned' AND NEW.status='copying' AND NEW.last_action='copy_started'
+      AND NEW.copy_started_at=NEW.changed_at AND NEW.copy_started_by_user_id=actor_id)
+    OR (OLD.status IN ('copying','frozen') AND NEW.status=OLD.status
+      AND NEW.last_action='checkpoint_recorded' AND NEW.checkpointed_at=NEW.changed_at
+      AND NEW.checkpointed_by_user_id=actor_id
+      AND NEW.copied_row_count>=COALESCE(OLD.copied_row_count,0)
+      AND NEW.copied_bytes>=COALESCE(OLD.copied_bytes,0)
+      AND (OLD.latest_source_wal_lsn IS NULL
+        OR NEW.latest_source_wal_lsn>=OLD.latest_source_wal_lsn)
+      AND (OLD.latest_target_replay_lsn IS NULL
+        OR NEW.latest_target_replay_lsn>=OLD.latest_target_replay_lsn))
+    OR (OLD.status='copying' AND NEW.status='frozen'
+      AND NEW.last_action='writes_frozen' AND OLD.checkpointed_at IS NOT NULL
+      AND NEW.frozen_at=NEW.changed_at AND NEW.frozen_by_user_id=actor_id)
+    OR (OLD.status='frozen' AND NEW.status='validated'
+      AND OLD.last_action='checkpoint_recorded'
+      AND NEW.last_action='validated' AND OLD.checkpointed_at>=OLD.frozen_at
+      AND NEW.validated_at=NEW.changed_at AND NEW.validated_by_user_id=actor_id)
+    OR (OLD.status='validated' AND NEW.status='cut_over'
+      AND NEW.last_action='cut_over' AND NEW.cutover_at=NEW.changed_at
+      AND NEW.cutover_by_user_id=actor_id
+      AND NEW.cutover_placement_revision=OLD.source_placement_revision+1)
+    OR (OLD.status='cut_over' AND NEW.status='cut_over'
+      AND NEW.last_action='post_cutover_verified'
+      AND OLD.post_cutover_verified_at IS NULL
+      AND NEW.post_cutover_verified_at=NEW.changed_at
+      AND NEW.post_cutover_verified_by_user_id=actor_id)
+    OR (OLD.status='cut_over' AND NEW.status='completed'
+      AND NEW.last_action='completed' AND NEW.completed_at=NEW.changed_at
+      AND NEW.completed_by_user_id=actor_id AND NEW.change_reason IS NOT NULL
+      AND OLD.post_cutover_verified_at IS NOT NULL)
+    OR (OLD.status='cut_over' AND NEW.status='rolled_back'
+      AND NEW.last_action='rolled_back' AND NEW.rolled_back_at=NEW.changed_at
+      AND NEW.rolled_back_by_user_id=actor_id AND NEW.change_reason IS NOT NULL)
+    OR (OLD.status IN ('planned','copying','frozen','validated')
+      AND NEW.status='cancelled' AND NEW.last_action='cancelled'
+      AND NEW.cancelled_at=NEW.changed_at AND NEW.cancelled_by_user_id=actor_id
+      AND NEW.change_reason IS NOT NULL)
+  ) THEN
+    RAISE EXCEPTION 'invalid tenant cell move transition' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_tenant_cell_move_validation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'tenant cell move validations are immutable' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.validated_by_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_cell_moves move
+      WHERE move.id=NEW.tenant_cell_move_id AND move.tenant_id=NEW.tenant_id
+        AND move.status='validated' AND move.last_action='validated'
+        AND move.revision=NEW.move_revision AND move.validated_at=NEW.validated_at
+        AND move.latest_source_wal_lsn<=NEW.source_wal_lsn
+        AND move.latest_target_replay_lsn<=NEW.target_replay_lsn) THEN
+    RAISE EXCEPTION 'invalid tenant cell move validation evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_tenant_cell_move_cutover_verification()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'tenant cell move cutover verifications are immutable'
+      USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.verified_by_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_cell_moves move
+      JOIN public.tenant_cell_placements placement ON placement.tenant_id=move.tenant_id
+      JOIN public.tenant_write_fences fence ON fence.tenant_id=move.tenant_id
+        AND fence.tenant_cell_move_id=move.id
+      WHERE move.id=NEW.tenant_cell_move_id AND move.tenant_id=NEW.tenant_id
+        AND move.status='cut_over' AND move.last_action='post_cutover_verified'
+        AND move.revision=NEW.move_revision
+        AND move.post_cutover_verified_at=NEW.verified_at
+        AND move.post_cutover_verified_by_user_id=NEW.verified_by_user_id
+        AND move.target_data_cell_id=NEW.observed_data_cell_id
+        AND move.cutover_placement_revision=NEW.observed_placement_revision
+        AND placement.data_cell_id=NEW.observed_data_cell_id
+        AND placement.revision=NEW.observed_placement_revision) THEN
+    RAISE EXCEPTION 'invalid tenant cell move cutover verification evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_tenant_cell_move_rollback_verification()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'tenant cell move rollback verifications are immutable'
+      USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.verified_by_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_cell_moves move
+      JOIN public.tenant_cell_placements placement ON placement.tenant_id=move.tenant_id
+      JOIN public.tenant_write_fences fence ON fence.tenant_id=move.tenant_id
+        AND fence.tenant_cell_move_id=move.id
+      WHERE move.id=NEW.tenant_cell_move_id AND move.tenant_id=NEW.tenant_id
+        AND move.status='rolled_back' AND move.last_action='rolled_back'
+        AND move.revision=NEW.move_revision
+        AND move.rolled_back_at=NEW.verified_at
+        AND move.rolled_back_by_user_id=NEW.verified_by_user_id
+        AND move.source_data_cell_id=NEW.observed_data_cell_id
+        AND move.rollback_placement_revision=NEW.expected_rollback_placement_revision
+        AND move.rollback_placement_revision=move.cutover_placement_revision+1
+        AND placement.data_cell_id=move.target_data_cell_id
+        AND placement.revision=move.cutover_placement_revision) THEN
+    RAISE EXCEPTION 'invalid tenant cell move rollback verification evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_tenant_write_fence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP='UPDATE' THEN
+    RAISE EXCEPTION 'tenant write fences cannot be updated' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'tenant write fence requires a platform administrator'
+      USING ERRCODE='42501';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    -- The trigger is the final backstop for privileged SQL paths. Taking the
+    -- exclusive side here makes fence installation serialize with every guarded
+    -- tenant statement even when the caller bypasses the application repository.
+    PERFORM pg_advisory_xact_lock(
+      public.tenant_cell_fence_lock_key(NEW.tenant_id));
+  ELSE
+    PERFORM pg_advisory_xact_lock(
+      public.tenant_cell_fence_lock_key(OLD.tenant_id));
+  END IF;
+  IF TG_OP='INSERT' AND NOT EXISTS(
+    SELECT 1 FROM public.tenant_cell_moves move
+    WHERE move.id=NEW.tenant_cell_move_id AND move.tenant_id=NEW.tenant_id
+      AND move.status='frozen' AND move.last_action='writes_frozen'
+      AND move.revision=NEW.fence_epoch AND move.frozen_at=NEW.frozen_at
+      AND move.frozen_by_user_id=NEW.frozen_by_user_id
+      AND NEW.frozen_by_user_id=actor_id) THEN
+    RAISE EXCEPTION 'invalid tenant write fence creation' USING ERRCODE='23514';
+  ELSIF TG_OP='DELETE' AND NOT EXISTS(
+    SELECT 1 FROM public.tenant_cell_moves move
+    WHERE move.id=OLD.tenant_cell_move_id AND move.tenant_id=OLD.tenant_id
+      AND move.status IN ('completed','rolled_back','cancelled')
+      AND move.changed_by_user_id=actor_id) THEN
+    RAISE EXCEPTION 'tenant write fence cannot be released yet' USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_tenant_cell_move_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; move public.tenant_cell_moves%ROWTYPE;
+DECLARE expected_previous_status text; expected_reason text;
+DECLARE expected_placement_revision bigint; common_evidence jsonb;
+DECLARE validation_evidence jsonb; verification_evidence jsonb;
+DECLARE rollback_verification_evidence jsonb;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'tenant cell move events are immutable' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  SELECT * INTO move FROM public.tenant_cell_moves candidate
+    WHERE candidate.id=NEW.tenant_cell_move_id
+      AND candidate.tenant_id=NEW.tenant_id;
+  IF NEW.move_revision=1 THEN
+    expected_previous_status:=NULL;
+  ELSE
+    SELECT prior.resulting_status INTO expected_previous_status
+    FROM public.tenant_cell_move_events prior
+    WHERE prior.tenant_cell_move_id=NEW.tenant_cell_move_id
+      AND prior.move_revision=NEW.move_revision-1;
+  END IF;
+  expected_reason:=CASE
+    WHEN NEW.action='planned' THEN move.reason
+    WHEN NEW.action IN ('completed','rolled_back','cancelled') THEN move.change_reason
+    ELSE NULL
+  END;
+  expected_placement_revision:=CASE
+    WHEN NEW.action IN ('cut_over','post_cutover_verified','completed')
+      THEN move.cutover_placement_revision
+    WHEN NEW.action='rolled_back' THEN move.rollback_placement_revision
+    ELSE NULL
+  END;
+  common_evidence:=jsonb_build_object(
+    'tenant_cell_move_id',move.id,'tenant_id',move.tenant_id,
+    'action',NEW.action,'move_revision',NEW.move_revision,
+    'previous_status',expected_previous_status,
+    'resulting_status',move.status,
+    'source_data_cell_id',move.source_data_cell_id,
+    'target_data_cell_id',move.target_data_cell_id,
+    'source_placement_revision',move.source_placement_revision,
+    'resulting_placement_revision',expected_placement_revision,
+    'actor_user_id',actor_id);
+  IF actor_id IS NULL OR NEW.actor_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id)
+    OR move.id IS NULL OR move.revision<>NEW.move_revision
+    OR move.status<>NEW.resulting_status OR move.last_action<>NEW.action
+    OR NEW.previous_status IS DISTINCT FROM expected_previous_status
+    OR (NEW.move_revision>1 AND expected_previous_status IS NULL)
+    OR NEW.occurred_at IS DISTINCT FROM
+      (CASE WHEN NEW.move_revision=1 THEN move.requested_at ELSE move.changed_at END)
+    OR NEW.reason IS DISTINCT FROM expected_reason
+    OR NOT (NEW.evidence @> common_evidence)
+    OR NULLIF(NEW.evidence->>'occurred_at','') IS NULL
+    OR abs(extract(epoch FROM
+      (NULLIF(NEW.evidence->>'occurred_at','')::timestamptz-NEW.occurred_at)))
+      >0.000002
+    OR (expected_reason IS NOT NULL
+      AND NEW.evidence->>'reason' IS DISTINCT FROM expected_reason) THEN
+    RAISE EXCEPTION 'invalid tenant cell move event evidence' USING ERRCODE='23514';
+  END IF;
+  IF NEW.action='planned'
+      AND NEW.evidence->>'residency_requirement'
+        IS DISTINCT FROM move.residency_requirement
+    OR NEW.action='copy_started'
+      AND NEW.evidence->>'copy_reference' IS DISTINCT FROM move.copy_reference
+    OR NEW.action='checkpoint_recorded'
+      AND NEW.evidence->'checkpoint' IS DISTINCT FROM jsonb_build_object(
+        'source_lsn',move.latest_source_wal_lsn::text,
+        'target_replay_lsn',move.latest_target_replay_lsn::text,
+        'copied_row_count',move.copied_row_count,
+        'copied_bytes',move.copied_bytes)
+    OR NEW.action='writes_frozen'
+      AND (NEW.evidence->>'fence_epoch')::bigint IS DISTINCT FROM move.revision THEN
+    RAISE EXCEPTION 'tenant cell move event action evidence is inconsistent'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.action='validated' THEN
+    SELECT jsonb_build_object(
+      'tool_version',validation.tool_version,
+      'source_lsn',validation.source_wal_lsn::text,
+      'target_replay_lsn',validation.target_replay_lsn::text,
+      'source_row_count',validation.source_row_count,
+      'target_row_count',validation.target_row_count,
+      'source_data_checksum',validation.source_data_checksum,
+      'target_data_checksum',validation.target_data_checksum,
+      'source_schema_checksum',validation.source_schema_fingerprint,
+      'target_schema_checksum',validation.target_schema_fingerprint,
+      'source_object_manifest_checksum',validation.source_object_manifest_checksum,
+      'target_object_manifest_checksum',validation.target_object_manifest_checksum,
+      'inventory_reconciled',validation.inventory_reconciled,
+      'idempotency_verified',validation.idempotency_verified,
+      'outbox_verified',validation.outbox_verified)
+    INTO validation_evidence
+    FROM public.tenant_cell_move_validations validation
+    WHERE validation.tenant_cell_move_id=NEW.tenant_cell_move_id
+      AND validation.move_revision=NEW.move_revision;
+    IF NEW.evidence->'validation' IS DISTINCT FROM validation_evidence THEN
+      RAISE EXCEPTION 'tenant cell move validation event evidence is inconsistent'
+        USING ERRCODE='23514';
+    END IF;
+  ELSIF NEW.action='post_cutover_verified' THEN
+    SELECT jsonb_build_object(
+      'tool_version',verification.tool_version,
+      'routing_reference',verification.routing_reference,
+      'observed_data_cell_id',verification.observed_data_cell_id,
+      'observed_placement_revision',verification.observed_placement_revision,
+      'routing_verified',verification.routing_verified,
+      'target_read_verified',verification.target_read_verified,
+      'write_fence_verified',verification.write_fence_verified,
+      'inventory_reconciled',verification.inventory_reconciled,
+      'idempotency_verified',verification.idempotency_verified,
+      'outbox_verified',verification.outbox_verified)
+    INTO verification_evidence
+    FROM public.tenant_cell_move_cutover_verifications verification
+    WHERE verification.tenant_cell_move_id=NEW.tenant_cell_move_id
+      AND verification.move_revision=NEW.move_revision;
+    IF NEW.evidence->'verification' IS DISTINCT FROM verification_evidence THEN
+      RAISE EXCEPTION 'tenant cell move verification event evidence is inconsistent'
+        USING ERRCODE='23514';
+    END IF;
+  ELSIF NEW.action='rolled_back' THEN
+    SELECT jsonb_build_object(
+      'tool_version',verification.tool_version,
+      'routing_reference',verification.routing_reference,
+      'observed_data_cell_id',verification.observed_data_cell_id,
+      'expected_rollback_placement_revision',
+        verification.expected_rollback_placement_revision,
+      'routing_verified',verification.routing_verified,
+      'source_read_verified',verification.source_read_verified,
+      'write_fence_verified',verification.write_fence_verified,
+      'inventory_reconciled',verification.inventory_reconciled,
+      'idempotency_verified',verification.idempotency_verified,
+      'outbox_verified',verification.outbox_verified)
+    INTO rollback_verification_evidence
+    FROM public.tenant_cell_move_rollback_verifications verification
+    WHERE verification.tenant_cell_move_id=NEW.tenant_cell_move_id
+      AND verification.move_revision=NEW.move_revision;
+    IF NEW.evidence->'rollback_verification'
+        IS DISTINCT FROM rollback_verification_evidence THEN
+      RAISE EXCEPTION 'tenant cell move rollback event evidence is inconsistent'
+        USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_tenant_cell_move_evidence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE event public.tenant_cell_move_events%ROWTYPE;
+DECLARE command_operation text; outbox_event_type text;
+DECLARE expected_event_key text; expected_ordering_key text;
+BEGIN
+  SELECT candidate.* INTO event FROM public.tenant_cell_move_events candidate
+  WHERE candidate.tenant_cell_move_id=NEW.id
+    AND candidate.move_revision=NEW.revision
+    AND candidate.action=NEW.last_action
+    AND candidate.resulting_status=NEW.status;
+  command_operation:=CASE NEW.last_action
+    WHEN 'planned' THEN 'platform.tenant_cell_move.plan.v1'
+    WHEN 'copy_started' THEN 'platform.tenant_cell_move.start_copy.v1'
+    WHEN 'checkpoint_recorded' THEN 'platform.tenant_cell_move.checkpoint.v1'
+    WHEN 'writes_frozen' THEN 'platform.tenant_cell_move.freeze.v1'
+    WHEN 'validated' THEN 'platform.tenant_cell_move.validate.v1'
+    WHEN 'cut_over' THEN 'platform.tenant_cell_move.cutover.v1'
+    WHEN 'post_cutover_verified' THEN 'platform.tenant_cell_move.verify_cutover.v1'
+    WHEN 'completed' THEN 'platform.tenant_cell_move.complete.v1'
+    WHEN 'rolled_back' THEN 'platform.tenant_cell_move.rollback.v1'
+    WHEN 'cancelled' THEN 'platform.tenant_cell_move.cancel.v1'
+  END;
+  outbox_event_type:='tenant_cell_move.'||NEW.last_action||'.v1';
+  expected_ordering_key:='tenant-cell-move:'||NEW.id::text;
+  expected_event_key:=expected_ordering_key||':revision:'||NEW.revision::text;
+  IF event.id IS NULL
+    OR (NEW.last_action='validated' AND NOT EXISTS(
+      SELECT 1 FROM public.tenant_cell_move_validations validation
+      WHERE validation.tenant_cell_move_id=NEW.id
+        AND validation.move_revision=NEW.revision))
+    OR (NEW.last_action='post_cutover_verified' AND NOT EXISTS(
+      SELECT 1 FROM public.tenant_cell_move_cutover_verifications verification
+      WHERE verification.tenant_cell_move_id=NEW.id
+        AND verification.move_revision=NEW.revision))
+    OR (NEW.last_action='rolled_back' AND NOT EXISTS(
+      SELECT 1 FROM public.tenant_cell_move_rollback_verifications verification
+      WHERE verification.tenant_cell_move_id=NEW.id
+        AND verification.move_revision=NEW.revision))
+    -- Platform moves are issued from the administrator's selected control tenant;
+    -- command idempotency is therefore scoped away from the tenant being moved.
+    OR NOT EXISTS(SELECT 1 FROM public.command_idempotency_records command
+      WHERE command.tenant_id<>NEW.tenant_id
+        AND command.operation=command_operation
+        AND command.actor_user_id=event.actor_user_id
+        AND command.request_id=event.request_id
+        AND command.result_schema_version=1
+        AND command.result_json->>'tenant_cell_move_id'=NEW.id::text
+        AND command.result_json->>'revision'=NEW.revision::text
+        AND command.result_json->>'status'=NEW.status)
+    OR NOT EXISTS(SELECT 1 FROM public.outbox_event_keys event_key
+      WHERE event_key.tenant_id=NEW.tenant_id
+        AND event_key.event_key=expected_event_key)
+    OR NOT EXISTS(SELECT 1 FROM public.outbox_events outbox
+      WHERE outbox.tenant_id=NEW.tenant_id
+        AND outbox.event_key=expected_event_key
+        AND outbox.aggregate_type='tenant_cell_move'
+        AND outbox.aggregate_id=NEW.id::text
+        AND outbox.ordering_key=expected_ordering_key
+        AND outbox.aggregate_sequence=NEW.revision
+        AND outbox.event_type=outbox_event_type
+        AND outbox.schema_version=1
+        AND outbox.actor_user_id=event.actor_user_id
+        AND outbox.occurred_at=event.occurred_at
+        AND outbox.payload=event.evidence) THEN
+    RAISE EXCEPTION 'tenant cell move revision requires truthful command, audit, and outbox evidence'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.require_tenant_cell_move_state() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NOT EXISTS(
+      SELECT 1 FROM public.tenant_cell_placements placement
+      WHERE placement.tenant_id=NEW.tenant_id
+        AND (
+          (NEW.status IN ('planned','copying','frozen','validated','cancelled')
+            AND placement.data_cell_id=NEW.source_data_cell_id
+            AND placement.revision=NEW.source_placement_revision)
+          OR (NEW.status IN ('cut_over','completed')
+            AND placement.data_cell_id=NEW.target_data_cell_id
+            AND placement.revision=NEW.cutover_placement_revision)
+          OR (NEW.status='rolled_back'
+            AND placement.data_cell_id=NEW.source_data_cell_id
+            AND placement.revision=NEW.rollback_placement_revision)
+        ))
+    OR (NEW.status IN ('frozen','validated','cut_over') AND NOT EXISTS(
+      SELECT 1 FROM public.tenant_write_fences fence
+      WHERE fence.tenant_id=NEW.tenant_id AND fence.tenant_cell_move_id=NEW.id
+        AND fence.frozen_at=NEW.frozen_at
+        AND fence.frozen_by_user_id=NEW.frozen_by_user_id))
+    OR (NEW.status NOT IN ('frozen','validated','cut_over') AND EXISTS(
+      SELECT 1 FROM public.tenant_write_fences fence
+      WHERE fence.tenant_id=NEW.tenant_id))
+    OR (NEW.status='completed' AND NOT EXISTS(
+      SELECT 1 FROM public.tenant_cell_move_cutover_verifications verification
+      WHERE verification.tenant_cell_move_id=NEW.id
+        AND verification.verified_at=NEW.post_cutover_verified_at))
+    OR (NEW.status='rolled_back' AND NOT EXISTS(
+      SELECT 1 FROM public.tenant_cell_move_rollback_verifications verification
+      WHERE verification.tenant_cell_move_id=NEW.id
+        AND verification.move_revision=NEW.revision
+        AND verification.verified_at=NEW.rolled_back_at
+        AND verification.expected_rollback_placement_revision=
+          NEW.rollback_placement_revision)) THEN
+    RAISE EXCEPTION 'tenant cell move placement, fence, or verification is inconsistent'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.guard_tenant_cell_placement() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; move_id bigint; move public.tenant_cell_moves%ROWTYPE;
+BEGIN
+  IF TG_OP='INSERT' THEN RETURN NEW; END IF;
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'tenant home placements cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  move_id:=NULLIF(current_setting('wareboxes.tenant_cell_placement_move_id',true),'')::bigint;
+  SELECT * INTO move FROM public.tenant_cell_moves candidate WHERE candidate.id=move_id;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id)
+    OR move.id IS NULL OR move.tenant_id<>OLD.tenant_id
+    OR NEW.tenant_id<>OLD.tenant_id OR NEW.revision<>OLD.revision+1
+    OR NEW.residency_requirement<>OLD.residency_requirement
+    OR NOT (
+      (move.status='cut_over' AND move.last_action='cut_over'
+        AND OLD.data_cell_id=move.source_data_cell_id
+        AND OLD.revision=move.source_placement_revision
+        AND NEW.data_cell_id=move.target_data_cell_id
+        AND NEW.revision=move.cutover_placement_revision)
+      OR (move.status='rolled_back' AND move.last_action='rolled_back'
+        AND OLD.data_cell_id=move.target_data_cell_id
+        AND OLD.revision=move.cutover_placement_revision
+        AND NEW.data_cell_id=move.source_data_cell_id
+        AND NEW.revision=move.rollback_placement_revision)
+    ) THEN
+    RAISE EXCEPTION 'tenant home placement update is not a governed move'
+      USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.apply_tenant_cell_move_placement(
+  checked_move_id bigint,checked_actor_id bigint,checked_request_id text
+) RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+DECLARE move public.tenant_cell_moves%ROWTYPE;
+DECLARE placement public.tenant_cell_placements%ROWTYPE;
+DECLARE next_cell_id bigint; action text; next_revision bigint; occurred_at timestamptz;
+BEGIN
+  IF checked_actor_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint
+    OR NOT public.platform_actor_is_administrator(checked_actor_id) THEN
+    RAISE EXCEPTION 'tenant cell placement change is not authorized' USING ERRCODE='42501';
+  END IF;
+  SELECT * INTO move FROM public.tenant_cell_moves candidate
+    WHERE candidate.id=checked_move_id FOR UPDATE;
+  SELECT * INTO placement FROM public.tenant_cell_placements current_placement
+    WHERE current_placement.tenant_id=move.tenant_id FOR UPDATE;
+  IF move.status='cut_over' AND move.last_action='cut_over' THEN
+    action:='moved'; next_cell_id:=move.target_data_cell_id;
+    next_revision:=move.cutover_placement_revision;
+  ELSIF move.status='rolled_back' AND move.last_action='rolled_back' THEN
+    action:='rolled_back'; next_cell_id:=move.source_data_cell_id;
+    next_revision:=move.rollback_placement_revision;
+  ELSE
+    RAISE EXCEPTION 'tenant cell move is not ready for placement change'
+      USING ERRCODE='55000';
+  END IF;
+  occurred_at:=COALESCE(move.changed_at,CURRENT_TIMESTAMP);
+  PERFORM set_config('wareboxes.tenant_cell_placement_move_id',move.id::text,TRUE);
+  UPDATE public.tenant_cell_placements SET data_cell_id=next_cell_id,
+    revision=next_revision,placed_at=occurred_at,placed_by_user_id=checked_actor_id,
+    placement_reason=COALESCE(move.change_reason,move.reason)
+  WHERE tenant_id=move.tenant_id;
+  INSERT INTO public.tenant_cell_placement_events(
+    tenant_id,placement_revision,action,previous_data_cell_id,resulting_data_cell_id,
+    residency_requirement,actor_user_id,occurred_at,reason,request_id,evidence
+  ) VALUES(move.tenant_id,next_revision,action,placement.data_cell_id,next_cell_id,
+    move.residency_requirement,checked_actor_id,occurred_at,
+    COALESCE(move.change_reason,move.reason),
+    checked_request_id,jsonb_build_object(
+      'tenant_cell_move_id',move.id,'tenant_id',move.tenant_id,
+      'previous_data_cell_id',placement.data_cell_id,
+      'resulting_data_cell_id',next_cell_id,'placement_revision',next_revision,
+      'action',action,'residency_requirement',move.residency_requirement,
+      'actor_user_id',checked_actor_id,'occurred_at',occurred_at));
+  RETURN next_revision;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.guard_tenant_cell_placement_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; move_id bigint;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'tenant placement events are immutable' USING ERRCODE='55000';
+  END IF;
+  IF NEW.action='placed' THEN RETURN NEW; END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  move_id:=NULLIF(current_setting('wareboxes.tenant_cell_placement_move_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.actor_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenant_cell_moves move
+      WHERE move.id=move_id AND move.tenant_id=NEW.tenant_id
+        AND ((NEW.action='moved' AND move.status='cut_over'
+          AND move.cutover_placement_revision=NEW.placement_revision)
+        OR (NEW.action='rolled_back' AND move.status='rolled_back'
+          AND move.rollback_placement_revision=NEW.placement_revision))) THEN
+    RAISE EXCEPTION 'invalid tenant placement event evidence' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- Active target reservations count against placement admission and cell lifecycle.
+CREATE OR REPLACE FUNCTION public.validate_data_cell_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; placed_count bigint; reserved_count bigint;
+DECLARE rollback_reserved_count bigint;
+DECLARE outbound_count bigint; status_transition boolean;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'data cells cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'data-cell mutation requires a platform administrator'
+      USING ERRCODE='42501';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF NEW.status<>'provisioning' OR NEW.revision<>1
+      OR NEW.created_by_user_id IS DISTINCT FROM actor_id
+      OR NEW.changed_at IS NOT NULL OR NEW.changed_by_user_id IS NOT NULL
+      OR NEW.change_reason IS NOT NULL THEN
+      RAISE EXCEPTION 'invalid data-cell registration evidence' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  SELECT COUNT(*) INTO placed_count FROM public.tenant_cell_placements placement
+    WHERE placement.data_cell_id=OLD.id;
+  SELECT COUNT(*) INTO reserved_count FROM public.tenant_cell_moves move
+    WHERE move.target_data_cell_id=OLD.id
+      AND move.status IN ('planned','copying','frozen','validated');
+  SELECT COUNT(*) INTO rollback_reserved_count FROM public.tenant_cell_moves move
+    WHERE move.source_data_cell_id=OLD.id AND move.status='cut_over';
+  SELECT COUNT(*) INTO outbound_count FROM public.tenant_cell_moves move
+    WHERE move.source_data_cell_id=OLD.id
+      AND move.status IN ('planned','copying','frozen','validated','cut_over');
+  status_transition:=NEW.status IS DISTINCT FROM OLD.status;
+  IF ROW(NEW.id,NEW.cell_key,NEW.region,NEW.residency_code,NEW.mode,
+      NEW.created_at,NEW.created_by_user_id)
+      IS DISTINCT FROM
+     ROW(OLD.id,OLD.cell_key,OLD.region,OLD.residency_code,OLD.mode,
+      OLD.created_at,OLD.created_by_user_id)
+    OR NEW.revision<>OLD.revision+1
+    OR NEW.changed_at IS NULL OR NEW.changed_by_user_id IS DISTINCT FROM actor_id
+    OR NEW.change_reason IS NULL
+    OR NEW.max_tenants<placed_count+reserved_count+rollback_reserved_count
+    OR (NEW.mode='dedicated'
+      AND placed_count+reserved_count+rollback_reserved_count>1)
+    OR (status_transition AND (
+      NEW.name IS DISTINCT FROM OLD.name OR NEW.max_tenants<>OLD.max_tenants
+      OR NOT ((OLD.status='provisioning' AND NEW.status='active')
+        OR (OLD.status='active' AND NEW.status='draining')
+        OR (OLD.status='draining' AND NEW.status='active')
+        OR (OLD.status='draining' AND NEW.status='retired'
+          AND placed_count=0 AND reserved_count=0 AND outbound_count=0))))
+    OR (NOT status_transition AND
+      ROW(NEW.name,NEW.max_tenants) IS NOT DISTINCT FROM ROW(OLD.name,OLD.max_tenants)) THEN
+    RAISE EXCEPTION 'invalid data-cell transition' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- Tenant insertion also accounts for move reservations racing with provisioning.
+CREATE OR REPLACE FUNCTION public.place_new_tenant_in_data_cell() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE selected_cell_id bigint; requirement text; cell public.data_cells%ROWTYPE;
+DECLARE placed_count bigint; reserved_count bigint; placement_reason text; request_id text;
+BEGIN
+  selected_cell_id:=NULLIF(
+    current_setting('wareboxes.initial_data_cell_id',true),'')::bigint;
+  requirement:=COALESCE(NULLIF(
+    current_setting('wareboxes.initial_residency_requirement',true),''),'GLOBAL');
+  request_id:=NULLIF(current_setting('wareboxes.request_id',true),'');
+  IF selected_cell_id IS NULL THEN
+    SELECT id INTO selected_cell_id FROM public.data_cells WHERE cell_key='local-default';
+  END IF;
+  SELECT * INTO cell FROM public.data_cells current_cell
+    WHERE current_cell.id=selected_cell_id FOR UPDATE;
+  SELECT COUNT(*) INTO placed_count FROM public.tenant_cell_placements placement
+    WHERE placement.data_cell_id=selected_cell_id;
+  SELECT COUNT(*) INTO reserved_count FROM public.tenant_cell_moves move
+    WHERE (move.target_data_cell_id=selected_cell_id
+        AND move.status IN ('planned','copying','frozen','validated'))
+      OR (move.source_data_cell_id=selected_cell_id AND move.status='cut_over');
+  IF cell.id IS NULL OR cell.status<>'active'
+    OR placed_count+reserved_count>=cell.max_tenants
+    OR (cell.mode='dedicated' AND placed_count+reserved_count<>0)
+    OR NOT (requirement='GLOBAL' OR requirement=cell.residency_code) THEN
+    RAISE EXCEPTION 'requested data cell cannot accept this tenant placement'
+      USING ERRCODE='23514';
+  END IF;
+  placement_reason:=CASE WHEN NEW.created_by_user_id IS NULL
+    THEN 'automatic local default placement' ELSE 'initial tenant provisioning' END;
+  INSERT INTO public.tenant_cell_placements(
+    tenant_id,data_cell_id,revision,residency_requirement,placed_at,
+    placed_by_user_id,placement_reason
+  ) VALUES(NEW.id,cell.id,1,requirement,NEW.created,
+    NEW.created_by_user_id,placement_reason);
+  INSERT INTO public.tenant_cell_placement_events(
+    tenant_id,placement_revision,action,previous_data_cell_id,resulting_data_cell_id,
+    residency_requirement,actor_user_id,occurred_at,reason,request_id,evidence
+  ) VALUES(NEW.id,1,'placed',NULL,cell.id,requirement,NEW.created_by_user_id,
+    NEW.created,placement_reason,request_id,
+    jsonb_build_object('tenant_id',NEW.id,'data_cell_id',cell.id,
+      'cell_key',cell.cell_key,'cell_region',cell.region,
+      'cell_residency',cell.residency_code,'cell_mode',cell.mode,
+      'residency_requirement',requirement));
+  RETURN NULL;
+END $$;
+
+-- The private metrics collector needs one cross-tenant outbox aggregate. Keep the
+-- SECURITY DEFINER surface parameter-free and tenant-ID-free, and fail rather than
+-- silently applying tenant RLS if the migration owner cannot bypass it.
+CREATE FUNCTION public.tenant_cell_move_outbox_metrics()
+RETURNS TABLE(
+  unpublished_outbox_events bigint,
+  oldest_unpublished_outbox_age_seconds double precision
+)
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public'
+SET row_security TO off AS $$
+DECLARE actor_id bigint;
+BEGIN
+  actor_id:=NULLIF(
+    current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id) THEN
+    RAISE EXCEPTION 'tenant cell move metrics require a platform administrator'
+      USING ERRCODE='42501';
+  END IF;
+  RETURN QUERY SELECT COUNT(*),COALESCE(GREATEST(
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-MIN(outbox.created)))::double precision,
+    0::double precision),0::double precision)
+  FROM public.outbox_events outbox
+  WHERE outbox.aggregate_type='tenant_cell_move'
+    AND outbox.published_at IS NULL AND outbox.discarded_at IS NULL;
+END $$;
+
+CREATE TRIGGER tenant_cell_moves_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_cell_moves FOR EACH ROW EXECUTE FUNCTION public.validate_tenant_cell_move();
+CREATE CONSTRAINT TRIGGER tenant_cell_moves_require_evidence AFTER INSERT OR UPDATE
+ON public.tenant_cell_moves DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_tenant_cell_move_evidence();
+CREATE CONSTRAINT TRIGGER tenant_cell_moves_require_state AFTER INSERT OR UPDATE
+ON public.tenant_cell_moves DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_tenant_cell_move_state();
+CREATE TRIGGER tenant_cell_move_validations_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_cell_move_validations FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_cell_move_validation();
+CREATE TRIGGER tenant_cell_move_cutover_verifications_validate
+BEFORE INSERT OR UPDATE OR DELETE ON public.tenant_cell_move_cutover_verifications
+FOR EACH ROW EXECUTE FUNCTION public.validate_tenant_cell_move_cutover_verification();
+CREATE TRIGGER tenant_cell_move_rollback_verifications_validate
+BEFORE INSERT OR UPDATE OR DELETE ON public.tenant_cell_move_rollback_verifications
+FOR EACH ROW EXECUTE FUNCTION public.validate_tenant_cell_move_rollback_verification();
+CREATE TRIGGER tenant_cell_move_events_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_cell_move_events FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_cell_move_event();
+CREATE TRIGGER tenant_write_fences_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_write_fences FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_write_fence();
+
+-- Every tenant-scoped operational statement takes the shared side of the move
+-- fence. Control-plane audit/auth and reconciliation evidence remain writable so
+-- operators can authenticate, suspend, and prove a frozen tenant safe. Freeze,
+-- cutover, and rollback take the exclusive side in the command layer.
+DO $guard_tenant_writes$
+DECLARE guarded_table record;
+BEGIN
+  FOR guarded_table IN
+    SELECT guarded_namespace.nspname AS table_schema,
+      guarded_class.relname AS table_name
+    FROM pg_class guarded_class
+    JOIN pg_namespace guarded_namespace
+      ON guarded_namespace.oid=guarded_class.relnamespace
+    JOIN pg_attribute tenant_column
+      ON tenant_column.attrelid=guarded_class.oid
+      AND tenant_column.attname='tenant_id'
+      AND tenant_column.attnum>0 AND NOT tenant_column.attisdropped
+    WHERE guarded_namespace.nspname='public'
+      AND guarded_class.relkind IN ('r','p')
+      AND NOT guarded_class.relispartition
+      AND guarded_class.relname NOT IN (
+        'command_idempotency_records','outbox_event_keys','outbox_events',
+        'outbox_aggregate_sequences',
+        'outbox_delivery_attempts','outbox_delivery_attempt_results',
+        'outbox_dead_letter_replays','outbox_dead_letter_discards',
+        'service_accounts','service_account_credentials','service_account_events',
+        'inventory_reconciliation_runs','inventory_reconciliation_state',
+        'tenant_lifecycle_events','support_access_grants','support_access_facilities',
+        'support_access_inventory_owners','support_access_permissions',
+        'support_access_events','tenant_cell_placements','tenant_cell_placement_events',
+        'tenant_cell_moves','tenant_cell_move_validations',
+        'tenant_cell_move_cutover_verifications',
+        'tenant_cell_move_rollback_verifications','tenant_cell_move_events',
+        'tenant_write_fences')
+    ORDER BY guarded_class.relname
+  LOOP
+    EXECUTE format(
+      'CREATE TRIGGER %I BEFORE INSERT OR UPDATE OR DELETE ON %I.%I '
+      'FOR EACH STATEMENT EXECUTE FUNCTION public.enforce_tenant_cell_write_fence()',
+      'tenant_cell_write_fence_guard',guarded_table.table_schema,guarded_table.table_name);
+  END LOOP;
+END $guard_tenant_writes$;
+
+ALTER TABLE public.tenant_cell_moves ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_cell_moves FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_cell_moves_platform_isolation ON public.tenant_cell_moves
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.tenant_cell_move_validations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_cell_move_validations FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_cell_move_validations_platform_isolation
+ON public.tenant_cell_move_validations
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.tenant_cell_move_cutover_verifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_cell_move_cutover_verifications FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_cell_move_cutover_verifications_platform_isolation
+ON public.tenant_cell_move_cutover_verifications
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.tenant_cell_move_rollback_verifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_cell_move_rollback_verifications FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_cell_move_rollback_verifications_platform_isolation
+ON public.tenant_cell_move_rollback_verifications
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.tenant_cell_move_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_cell_move_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_cell_move_events_platform_isolation
+ON public.tenant_cell_move_events
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+ALTER TABLE public.tenant_write_fences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_write_fences FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_write_fences_control_isolation ON public.tenant_write_fences
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint
+  OR public.platform_actor_is_administrator(
+    NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint
+  OR public.platform_actor_is_administrator(
+    NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+
+GRANT SELECT,INSERT ON public.tenant_cell_moves TO wareboxes_app;
+GRANT UPDATE(status,revision,last_action,changed_at,changed_by_user_id,change_reason,
+  copy_reference,copy_started_at,copy_started_by_user_id,latest_source_wal_lsn,
+  latest_target_replay_lsn,copied_row_count,copied_bytes,checkpointed_at,
+  checkpointed_by_user_id,frozen_at,frozen_by_user_id,validated_at,
+  validated_by_user_id,cutover_at,cutover_by_user_id,cutover_placement_revision,
+  post_cutover_verified_at,post_cutover_verified_by_user_id,
+  completed_at,completed_by_user_id,rolled_back_at,rolled_back_by_user_id,
+  rollback_placement_revision,cancelled_at,cancelled_by_user_id)
+ON public.tenant_cell_moves TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.tenant_cell_moves_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.tenant_cell_move_validations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.tenant_cell_move_validations_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT ON public.tenant_cell_move_cutover_verifications TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.tenant_cell_move_cutover_verifications_id_seq
+TO wareboxes_app;
+GRANT SELECT,INSERT ON public.tenant_cell_move_rollback_verifications TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.tenant_cell_move_rollback_verifications_id_seq
+TO wareboxes_app;
+GRANT SELECT,INSERT ON public.tenant_cell_move_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.tenant_cell_move_events_id_seq TO wareboxes_app;
+GRANT SELECT,INSERT,DELETE ON public.tenant_write_fences TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.tenant_cell_fence_lock_key(bigint) TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.apply_tenant_cell_move_placement(bigint,bigint,text)
+TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.tenant_cell_move_outbox_metrics() TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.tenant_cell_fence_lock_key(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_tenant_cell_write_fence() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_cell_move() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_cell_move_validation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_cell_move_cutover_verification() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_cell_move_rollback_verification() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_write_fence() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_cell_move_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_tenant_cell_move_evidence() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_tenant_cell_move_state() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.apply_tenant_cell_move_placement(bigint,bigint,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.tenant_cell_move_outbox_metrics() FROM PUBLIC;

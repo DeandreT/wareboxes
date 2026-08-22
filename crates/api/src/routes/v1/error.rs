@@ -53,6 +53,22 @@ impl V1Error {
 
 impl From<AppError> for V1Error {
     fn from(error: AppError) -> Self {
+        match error {
+            AppError::RevisionConflict(message) => {
+                Self::simple(StatusCode::CONFLICT, ErrorReason::RevisionConflict, message)
+            }
+            AppError::InvalidStateTransition(message) => Self::simple(
+                StatusCode::CONFLICT,
+                ErrorReason::InvalidStateTransition,
+                message,
+            ),
+            error => Self::from_generic_app_error(error),
+        }
+    }
+}
+
+impl V1Error {
+    fn from_generic_app_error(error: AppError) -> Self {
         if matches!(&error, AppError::Db(_)) {
             tracing::debug!(error = %error, "v1 database error normalized");
         }
@@ -241,5 +257,34 @@ fn reason_for_status(status: StatusCode) -> (ErrorReason, &'static str) {
         StatusCode::TOO_MANY_REQUESTS => (ErrorReason::RateLimited, "rate limit exceeded"),
         status if status.is_server_error() => (ErrorReason::InternalError, "internal error"),
         _ => (ErrorReason::InvalidRequest, "invalid request"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specialized_app_errors_preserve_stable_v1_reasons() {
+        let revision = V1Error::from(AppError::revision_conflict("stale revision"));
+        assert_eq!(revision.status, StatusCode::CONFLICT);
+        assert_eq!(revision.reason, ErrorReason::RevisionConflict);
+        assert_eq!(revision.message, "stale revision");
+
+        let transition = V1Error::from(AppError::invalid_state_transition(
+            "move is already complete",
+        ));
+        assert_eq!(transition.status, StatusCode::CONFLICT);
+        assert_eq!(transition.reason, ErrorReason::InvalidStateTransition);
+        assert_eq!(transition.message, "move is already complete");
+    }
+
+    #[test]
+    fn invalid_cursor_uses_the_stable_v1_reason() {
+        let error = V1Error::invalid_cursor_for("tenant cell move");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.reason, ErrorReason::InvalidCursor);
+        assert_eq!(error.message, "invalid tenant cell move cursor");
     }
 }

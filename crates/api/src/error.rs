@@ -11,6 +11,10 @@ use crate::request_context::{current_request_id_or_new, REQUEST_ID_HEADER};
 pub enum AppError {
     #[error(transparent)]
     Application(#[from] ApplicationError),
+    #[error("revision conflict: {0}")]
+    RevisionConflict(String),
+    #[error("invalid state transition: {0}")]
+    InvalidStateTransition(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -71,6 +75,14 @@ impl AppError {
         Self::Application(ApplicationError::Conflict(message.into()))
     }
 
+    pub fn revision_conflict(message: impl Into<String>) -> Self {
+        Self::RevisionConflict(message.into())
+    }
+
+    pub fn invalid_state_transition(message: impl Into<String>) -> Self {
+        Self::InvalidStateTransition(message.into())
+    }
+
     pub fn idempotency_key_reused() -> Self {
         Self::Application(ApplicationError::IdempotencyKeyReused)
     }
@@ -89,6 +101,9 @@ impl AppError {
                 ApplicationError::Internal("internal error".into())
             }
             AppError::Application(error) => error.clone(),
+            AppError::RevisionConflict(message) | AppError::InvalidStateTransition(message) => {
+                ApplicationError::Conflict(message.clone())
+            }
             AppError::Db(sqlx::Error::RowNotFound) => {
                 ApplicationError::NotFound("resource".to_string())
             }

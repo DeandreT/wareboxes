@@ -230,8 +230,8 @@ are documented in
 [`docs/operations/load-envelope.md`](docs/operations/load-envelope.md). Run it with
 `scripts/test-load-envelope.sh` after producing the release web build.
 
-Regional cell registration, tenant placement, residency, capacity, draining, and
-retirement procedures are documented in the
+Regional cell registration, tenant placement and governed movement, residency,
+capacity, draining, rollback, and retirement procedures are documented in the
 [`data-cell operations runbook`](docs/operations/data-cells.md). Infrastructure
 endpoints and secrets remain outside the application registry.
 

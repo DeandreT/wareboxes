@@ -100,6 +100,10 @@ jobs:
           docker run --rm --entrypoint /bin/promtool --volume "$PWD:/mnt:ro" \
             prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
             check rules /mnt/deploy/monitoring/wareboxes-alerts.yml
+          docker run --rm --entrypoint /bin/promtool --volume "$PWD:/mnt:ro" \
+            --workdir /mnt/deploy/monitoring \
+            prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
+            test rules wareboxes-alerts.test.yml
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

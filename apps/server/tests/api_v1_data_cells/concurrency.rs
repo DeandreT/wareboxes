@@ -3,7 +3,9 @@ use tower::ServiceExt;
 use wareboxes_api::{auth, routes, state::AppState};
 use wareboxes_api_contract::v1::{CreateTenantRequest, DataCellMode};
 
-use super::support::{grant_platform_administrator, register_and_activate, request};
+use super::support::{
+    grant_platform_administrator, register_and_activate, request, ActiveDataCell,
+};
 use crate::common::*;
 
 #[tokio::test]
@@ -22,11 +24,13 @@ async fn dedicated_capacity_and_residency_are_serialized() {
         &app,
         &token,
         home,
-        "eu-dedicated-a",
-        "eu-central-1",
-        "EU",
-        DataCellMode::Dedicated,
-        1,
+        ActiveDataCell {
+            key: "eu-dedicated-a",
+            region: "eu-central-1",
+            residency: "EU",
+            mode: DataCellMode::Dedicated,
+            capacity: 1,
+        },
     )
     .await;
 

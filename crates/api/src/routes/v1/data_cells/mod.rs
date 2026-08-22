@@ -196,6 +196,14 @@ pub async fn change_status(
 pub(crate) fn map_response(value: DataCellReadModel) -> V1Result<DataCellResponse> {
     let placement_count = u32::try_from(value.placement_count)
         .map_err(|_| AppError::internal("data-cell placement count is invalid"))?;
+    let reserved_inbound_move_count = u32::try_from(value.reserved_inbound_move_count)
+        .map_err(|_| AppError::internal("data-cell inbound move reservation count is invalid"))?;
+    let reserved_rollback_move_count = u32::try_from(value.reserved_rollback_move_count)
+        .map_err(|_| AppError::internal("data-cell rollback reservation count is invalid"))?;
+    let committed_slot_count = placement_count
+        .checked_add(reserved_inbound_move_count)
+        .and_then(|count| count.checked_add(reserved_rollback_move_count))
+        .ok_or_else(|| AppError::internal("data-cell committed slot count overflow"))?;
     Ok(DataCellResponse {
         data_cell_id: value.data_cell_id.get(),
         key: value.key,
@@ -208,7 +216,9 @@ pub(crate) fn map_response(value: DataCellReadModel) -> V1Result<DataCellRespons
             .map_err(invalid_result)?,
         max_tenants: value.max_tenants,
         placement_count: value.placement_count,
-        available_tenant_slots: value.max_tenants.saturating_sub(placement_count),
+        reserved_inbound_move_count: value.reserved_inbound_move_count,
+        reserved_rollback_move_count: value.reserved_rollback_move_count,
+        available_tenant_slots: value.max_tenants.saturating_sub(committed_slot_count),
         created_at: value.created_at.to_rfc3339(),
         created_by: value.created_by.map(|value| value.get()),
         changed_at: value.changed_at.map(|value| value.to_rfc3339()),

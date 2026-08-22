@@ -1,0 +1,193 @@
+rule_files:
+  - wareboxes-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: tenant cell move replica gauges honor aggregation and hold times
+    interval: 1m
+    input_series:
+      - series: 'wareboxes_tenant_cell_move_metrics_collection_success{job="wareboxes-api",instance="api-1"}'
+        values: '1+0x20'
+      - series: 'wareboxes_tenant_cell_move_metrics_collection_success{job="wareboxes-api",instance="api-2"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_write_fence_state_mismatches{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_write_fence_state_mismatches{job="wareboxes-api",instance="api-2"}'
+        values: '1+0x20'
+      - series: 'wareboxes_tenant_cell_move_oldest_active_age_seconds{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_cell_move_oldest_active_age_seconds{job="wareboxes-api",instance="api-2"}'
+        values: '21601+0x20'
+      - series: 'wareboxes_tenant_cell_move_max_copy_replay_lag_bytes{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_cell_move_max_copy_replay_lag_bytes{job="wareboxes-api",instance="api-2"}'
+        values: '1073741825+0x20'
+      - series: 'wareboxes_tenant_cell_move_oldest_unpublished_outbox_age_seconds{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_cell_move_oldest_unpublished_outbox_age_seconds{job="wareboxes-api",instance="api-2"}'
+        values: '301+0x20'
+      - series: 'wareboxes_data_cells_exhausted_active{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_data_cells_exhausted_active{job="wareboxes-api",instance="api-2"}'
+        values: '1+0x20'
+      - series: 'wareboxes_tenant_cell_moves_awaiting_validation{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_cell_moves_awaiting_validation{job="wareboxes-api",instance="api-2"}'
+        values: '1+0x20'
+      - series: 'wareboxes_tenant_write_fence_max_age_seconds{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_write_fence_max_age_seconds{job="wareboxes-api",instance="api-2"}'
+        values: '901+0x20'
+      - series: 'wareboxes_tenant_cell_moves_awaiting_post_cutover_verification{job="wareboxes-api",instance="api-1"}'
+        values: '0+0x20'
+      - series: 'wareboxes_tenant_cell_moves_awaiting_post_cutover_verification{job="wareboxes-api",instance="api-2"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WareboxesTenantWriteFenceStateMismatch
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: A governed tenant-cell move and its write-fence state disagree
+              runbook: docs/operations/telemetry-alerts.md#tenant-write-fence-state-mismatch
+      - eval_time: 4m
+        alertname: WareboxesTenantCellMoveOutboxLag
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WareboxesActiveDataCellCapacityExhausted
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WareboxesTenantCellMoveMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: Governed tenant-cell move metrics cannot be collected
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-metrics-unavailable
+      - eval_time: 5m
+        alertname: WareboxesTenantCellMoveOutboxLag
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: A tenant-cell-move outbox event has remained unpublished for over five minutes
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-outbox-lag
+      - eval_time: 5m
+        alertname: WareboxesActiveDataCellCapacityExhausted
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: warning
+            exp_annotations:
+              summary: An active shared data cell has no unreserved tenant placement capacity
+              runbook: docs/operations/telemetry-alerts.md#active-data-cell-capacity-exhausted
+      - eval_time: 5m
+        alertname: WareboxesTenantWriteFenceProlonged
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: A tenant write fence has remained active for over fifteen minutes
+              runbook: docs/operations/telemetry-alerts.md#tenant-write-fence-prolonged
+      - eval_time: 10m
+        alertname: WareboxesTenantCellMoveStuck
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: warning
+            exp_annotations:
+              summary: A governed tenant-cell move has not recorded a revision for over six hours
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-stuck
+      - eval_time: 10m
+        alertname: WareboxesTenantCellMoveValidationPending
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: A write-frozen tenant-cell move is still awaiting final validation
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-validation-pending
+      - eval_time: 10m
+        alertname: WareboxesTenantCellMoveVerificationPending
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: A cut-over tenant-cell move is still awaiting verification
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-verification-pending
+      - eval_time: 15m
+        alertname: WareboxesTenantCellMoveCopyReplayLag
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: warning
+            exp_annotations:
+              summary: A governed tenant-cell move has sustained over one GiB of copy replay lag
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-copy-replay-lag
+
+  - name: tenant cell move counters aggregate by source of truth
+    interval: 1m
+    input_series:
+      - series: 'wareboxes_tenant_cell_move_outcomes_total{job="wareboxes-api",instance="api-1",outcome="rolled_back"}'
+        values: '0+1x10'
+      - series: 'wareboxes_tenant_cell_move_outcomes_total{job="wareboxes-api",instance="api-2",outcome="rolled_back"}'
+        values: '0+1x10'
+      - series: 'wareboxes_tenant_cell_move_command_rejections_total{job="wareboxes-api",instance="api-1",command="validate"}'
+        values: '0+1x10'
+      - series: 'wareboxes_tenant_cell_move_command_rejections_total{job="wareboxes-api",instance="api-2",command="validate"}'
+        values: '0+2x10'
+      - series: 'wareboxes_tenant_cell_move_command_rejections_total{job="wareboxes-api",instance="api-1",command="cutover"}'
+        values: '0+1x10'
+      - series: 'wareboxes_tenant_cell_move_command_rejections_total{job="wareboxes-api",instance="api-2",command="cutover"}'
+        values: '0+0x10'
+    promql_expr_test:
+      - expr: max by (job) (increase(wareboxes_tenant_cell_move_outcomes_total{outcome="rolled_back"}[5m]))
+        eval_time: 5m
+        exp_samples:
+          - labels: '{job="wareboxes-api"}'
+            value: 5
+      - expr: sum by (job) (increase(wareboxes_tenant_cell_move_command_rejections_total{command="validate"}[5m]))
+        eval_time: 5m
+        exp_samples:
+          - labels: '{job="wareboxes-api"}'
+            value: 15
+      - expr: sum by (job) (increase(wareboxes_tenant_cell_move_command_rejections_total{command="cutover"}[5m]))
+        eval_time: 5m
+        exp_samples:
+          - labels: '{job="wareboxes-api"}'
+            value: 5
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WareboxesTenantCellMoveRollbackRecorded
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: A governed tenant-cell move rolled back to its source cell
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-rollback-recorded
+      - eval_time: 5m
+        alertname: WareboxesTenantCellMoveValidationRejected
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: An authorized tenant-cell-move validation command was rejected
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-validation-rejected
+      - eval_time: 5m
+        alertname: WareboxesTenantCellMoveCutoverRejected
+        exp_alerts:
+          - exp_labels:
+              job: wareboxes-api
+              severity: critical
+            exp_annotations:
+              summary: An authorized tenant-cell-move cutover command was rejected
+              runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-cutover-rejected

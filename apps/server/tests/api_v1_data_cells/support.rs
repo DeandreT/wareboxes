@@ -5,7 +5,7 @@ use axum::http::{header, Method, Request, StatusCode};
 use serde::Serialize;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
-use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
+use wareboxes_api::request_context::{IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER};
 use wareboxes_api_contract::v1::{
     ChangeDataCellStatusRequest, DataCellMode, DataCellResponse, DataCellStatus,
     RegisterDataCellRequest, Revision,
@@ -29,6 +29,7 @@ pub fn request<T: Serialize>(
     if let Some(key) = key {
         builder = builder
             .header(IDEMPOTENCY_KEY_HEADER, key)
+            .header(REQUEST_ID_HEADER, key)
             .header(header::CONTENT_TYPE, "application/json");
     }
     builder
@@ -69,16 +70,27 @@ pub async fn grant_platform_administrator(db: &db::Db, user_id: i64) {
     admin_db.close().await;
 }
 
+pub struct ActiveDataCell<'a> {
+    pub key: &'a str,
+    pub region: &'a str,
+    pub residency: &'a str,
+    pub mode: DataCellMode,
+    pub capacity: u32,
+}
+
 pub async fn register_and_activate(
     app: &axum::Router,
     token: &str,
     home: TenantId,
-    key: &str,
-    region: &str,
-    residency: &str,
-    mode: DataCellMode,
-    capacity: u32,
+    cell: ActiveDataCell<'_>,
 ) -> DataCellResponse {
+    let ActiveDataCell {
+        key,
+        region,
+        residency,
+        mode,
+        capacity,
+    } = cell;
     let registered: DataCellResponse = response(
         app.clone()
             .oneshot(request(

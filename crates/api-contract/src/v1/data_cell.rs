@@ -72,6 +72,8 @@ pub struct DataCellResponse {
     pub revision: Revision,
     pub max_tenants: u32,
     pub placement_count: i64,
+    pub reserved_inbound_move_count: i64,
+    pub reserved_rollback_move_count: i64,
     pub available_tenant_slots: u32,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]

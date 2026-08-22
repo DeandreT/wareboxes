@@ -127,6 +127,10 @@ fn register_form(signals: Signals, drafts: Drafts) -> AnyView {
 }
 
 fn reconfigure_form(signals: Signals, drafts: Drafts, cell: DataCellResponse) -> AnyView {
+    let committed_slots = cell
+        .placement_count
+        .saturating_add(cell.reserved_inbound_move_count)
+        .saturating_add(cell.reserved_rollback_move_count);
     let selected = cell.clone();
     let submit = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
@@ -162,8 +166,8 @@ fn reconfigure_form(signals: Signals, drafts: Drafts, cell: DataCellResponse) ->
     };
     view! {
         <form on:submit=submit>
-            <dl class="fleet-cell-confirm"><div><dt>"Cell"</dt><dd>{cell.key}</dd></div><div><dt>"Current placements"</dt><dd>{cell.placement_count}</dd></div><div><dt>"Revision"</dt><dd>{cell.revision.get()}</dd></div></dl>
-            <div class="fleet-cell-form-grid"><label><span>"Display name"</span><input required maxlength="200" prop:value=move || drafts.name.get() on:input=move |event| drafts.name.set(event_target_value(&event))/></label><label><span>"Tenant capacity"</span><input type="number" min=cell.placement_count.max(1) max="1000000" required disabled=cell.mode==DataCellMode::Dedicated prop:value=move || drafts.capacity.get() on:input=move |event| drafts.capacity.set(event_target_value(&event))/></label></div>
+            <dl class="fleet-cell-confirm"><div><dt>"Cell"</dt><dd>{cell.key}</dd></div><div><dt>"Committed slots"</dt><dd>{committed_slots}</dd></div><div><dt>"Revision"</dt><dd>{cell.revision.get()}</dd></div></dl>
+            <div class="fleet-cell-form-grid"><label><span>"Display name"</span><input required maxlength="200" prop:value=move || drafts.name.get() on:input=move |event| drafts.name.set(event_target_value(&event))/></label><label><span>"Tenant capacity"</span><input type="number" min=committed_slots.max(1) max="1000000" required disabled=cell.mode==DataCellMode::Dedicated prop:value=move || drafts.capacity.get() on:input=move |event| drafts.capacity.set(event_target_value(&event))/></label></div>
             <label><span>"Attributed reason"</span><textarea required maxlength="500" rows="4" prop:value=move || drafts.reason.get() on:input=move |event| drafts.reason.set(event_target_value(&event))></textarea></label>
             {feedback(signals)}
             <footer><button class="button secondary-action" type="button" disabled=move || signals.command_pending.get() on:click=move |_| signals.dialog.set(None)>"Cancel"</button><button class="button primary-action" type="submit" disabled=move || signals.command_pending.get()>"Save revision"</button></footer>

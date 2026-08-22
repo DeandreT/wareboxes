@@ -120,7 +120,14 @@ pub async fn reconfigure(
     let row = sqlx::query(
         r#"SELECT name,mode,status,revision,max_tenants,
         (SELECT COUNT(*) FROM tenant_cell_placements placement
-          WHERE placement.data_cell_id=cell.id) AS placement_count
+          WHERE placement.data_cell_id=cell.id) AS placement_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.target_data_cell_id=cell.id
+            AND move.status IN ('planned','copying','frozen','validated'))
+          AS reserved_inbound_move_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.source_data_cell_id=cell.id AND move.status='cut_over')
+          AS reserved_rollback_move_count
         FROM data_cells cell WHERE id=$1 FOR UPDATE"#,
     )
     .bind(command.data_cell_id.get())
@@ -136,9 +143,15 @@ pub async fn reconfigure(
     mode.validate_capacity(command.max_tenants)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let placement_count: i64 = row.try_get("placement_count")?;
-    if i64::from(command.max_tenants.get()) < placement_count {
+    let reserved_inbound_move_count: i64 = row.try_get("reserved_inbound_move_count")?;
+    let reserved_rollback_move_count: i64 = row.try_get("reserved_rollback_move_count")?;
+    let committed_slot_count = placement_count
+        .checked_add(reserved_inbound_move_count)
+        .and_then(|value| value.checked_add(reserved_rollback_move_count))
+        .ok_or_else(|| AppError::internal("data-cell committed slot count overflow"))?;
+    if i64::from(command.max_tenants.get()) < committed_slot_count {
         return Err(AppError::conflict(
-            "data-cell capacity cannot be lower than its current placements",
+            "data-cell capacity cannot be lower than placements and move reservations",
         ));
     }
     let current_name: String = row.try_get("name")?;
@@ -179,6 +192,8 @@ pub async fn reconfigure(
         "previous_max_tenants": current_capacity,
         "max_tenants": command.max_tenants.get(),
         "placement_count": placement_count,
+        "reserved_inbound_move_count": reserved_inbound_move_count,
+        "reserved_rollback_move_count": reserved_rollback_move_count,
         "reason": command.reason.as_str(),
         "actor_user_id": context.actor_id.get(),
         "occurred_at": occurred_at,
@@ -221,7 +236,14 @@ pub async fn change_status(
     let row = sqlx::query(
         r#"SELECT status,revision,
         (SELECT COUNT(*) FROM tenant_cell_placements placement
-          WHERE placement.data_cell_id=cell.id) AS placement_count
+          WHERE placement.data_cell_id=cell.id) AS placement_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.target_data_cell_id=cell.id
+            AND move.status IN ('planned','copying','frozen','validated'))
+          AS reserved_inbound_move_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.source_data_cell_id=cell.id AND move.status='cut_over')
+          AS reserved_rollback_move_count
         FROM data_cells cell WHERE id=$1 FOR UPDATE"#,
     )
     .bind(command.data_cell_id.get())
@@ -237,9 +259,15 @@ pub async fn change_status(
         .require_transition(command.status)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let placement_count: i64 = row.try_get("placement_count")?;
-    if command.status == DataCellStatus::Retired && placement_count != 0 {
+    let reserved_inbound_move_count: i64 = row.try_get("reserved_inbound_move_count")?;
+    let reserved_rollback_move_count: i64 = row.try_get("reserved_rollback_move_count")?;
+    if command.status == DataCellStatus::Retired
+        && (placement_count != 0
+            || reserved_inbound_move_count != 0
+            || reserved_rollback_move_count != 0)
+    {
         return Err(AppError::conflict(
-            "data cell cannot be retired while tenants remain placed",
+            "data cell cannot be retired while placements or move reservations remain",
         ));
     }
     let next_revision = command
@@ -273,6 +301,8 @@ pub async fn change_status(
         "resulting_status": command.status.as_str(),
         "revision": next_revision.get(),
         "placement_count": placement_count,
+        "reserved_inbound_move_count": reserved_inbound_move_count,
+        "reserved_rollback_move_count": reserved_rollback_move_count,
         "reason": command.reason.as_str(),
         "actor_user_id": context.actor_id.get(),
         "occurred_at": occurred_at,

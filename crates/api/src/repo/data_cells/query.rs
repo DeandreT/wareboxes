@@ -35,6 +35,8 @@ fn map_row(row: &sqlx::postgres::PgRow) -> AppResult<DataCellReadModel> {
         max_tenants: u32::try_from(max_tenants)
             .map_err(|_| AppError::internal("stored data-cell capacity is invalid"))?,
         placement_count: row.try_get("placement_count")?,
+        reserved_inbound_move_count: row.try_get("reserved_inbound_move_count")?,
+        reserved_rollback_move_count: row.try_get("reserved_rollback_move_count")?,
         created_at: row.try_get("created_at")?,
         created_by: row
             .try_get::<Option<i64>, _>("created_by_user_id")?
@@ -61,7 +63,14 @@ pub(super) async fn read_tx(
         cell.created_at,cell.created_by_user_id,cell.changed_at,
         cell.changed_by_user_id,cell.change_reason,
         (SELECT COUNT(*) FROM tenant_cell_placements placement
-          WHERE placement.data_cell_id=cell.id) AS placement_count
+          WHERE placement.data_cell_id=cell.id) AS placement_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.target_data_cell_id=cell.id
+            AND move.status IN ('planned','copying','frozen','validated'))
+          AS reserved_inbound_move_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.source_data_cell_id=cell.id AND move.status='cut_over')
+          AS reserved_rollback_move_count
         FROM data_cells cell WHERE cell.id=$1"#,
     )
     .bind(data_cell_id.get())
@@ -98,7 +107,14 @@ pub async fn page(
         cell.created_at,cell.created_by_user_id,cell.changed_at,
         cell.changed_by_user_id,cell.change_reason,
         (SELECT COUNT(*) FROM tenant_cell_placements placement
-          WHERE placement.data_cell_id=cell.id) AS placement_count
+          WHERE placement.data_cell_id=cell.id) AS placement_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.target_data_cell_id=cell.id
+            AND move.status IN ('planned','copying','frozen','validated'))
+          AS reserved_inbound_move_count,
+        (SELECT COUNT(*) FROM tenant_cell_moves move
+          WHERE move.source_data_cell_id=cell.id AND move.status='cut_over')
+          AS reserved_rollback_move_count
         FROM data_cells cell
         WHERE ($1::TEXT IS NULL OR cell.status=$1)
           AND ($2::TEXT IS NULL OR cell.region=$2)

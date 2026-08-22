@@ -18,6 +18,20 @@ The current acceptance budgets are:
 | Seeded outbox backlog | At least 1,000 | 64 in flight | — | — | Complete within 120 seconds | 0 dead letters or duplicate deliveries |
 | Signed load-event delivery | At least 200 | 64 in flight | 5,000 ms | — | Complete within 120 seconds | 0 dead letters or duplicate deliveries |
 
+The tenant cell movement control plane has two additional correctness-oriented
+concurrency budgets:
+
+| Operation | Burst | Concurrency | Wall budget | Required result |
+| --- | ---: | ---: | ---: | --- |
+| Shared-target move planning | 16 commands | 16 | 5 seconds | All plans succeed with zero errors and exactly 16 durable inbound reservations |
+| Write-fenced tenant mutations | 16 attempts | 16 | 5 seconds | Every mutation fails closed with the write-fence SQLSTATE and no write is admitted |
+
+Fixture creation, cell activation, tenant placement, and move progression are
+outside these measured windows. CI's real-PostgreSQL suite in
+`apps/server/tests/api_v1_tenant_cell_moves.rs` enforces both budgets. These gates
+are conservative control-plane acceptance limits, not a claim that tenant moves
+are a high-throughput data-plane workload.
+
 The command phase retains integration payloads, resolves versioned owner/item
 mappings, creates fulfillment orders, records idempotency results, and produces
 audit/outbox effects. The replay phase sends the identical commands concurrently

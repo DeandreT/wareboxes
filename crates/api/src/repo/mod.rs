@@ -64,6 +64,7 @@ pub mod slotting;
 pub mod storage_zone;
 pub mod support_access;
 pub mod tasks;
+pub mod tenant_cell_moves;
 pub mod tenant_lifecycle;
 pub mod tenants;
 pub mod transfer_order;

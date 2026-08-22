@@ -26,9 +26,10 @@ pub(super) const fn mode_label(mode: DataCellMode) -> &'static str {
 }
 
 pub(super) fn capacity(cell: &DataCellResponse) -> String {
+    let reservations = cell.reserved_inbound_move_count + cell.reserved_rollback_move_count;
     format!(
-        "{} / {} tenants · {} open",
-        cell.placement_count, cell.max_tenants, cell.available_tenant_slots
+        "{} / {} tenants · {} reserved · {} open",
+        cell.placement_count, cell.max_tenants, reservations, cell.available_tenant_slots
     )
 }
 

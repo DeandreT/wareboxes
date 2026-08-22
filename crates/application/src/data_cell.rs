@@ -48,6 +48,8 @@ pub struct DataCellReadModel {
     pub revision: DataCellRevision,
     pub max_tenants: u32,
     pub placement_count: i64,
+    pub reserved_inbound_move_count: i64,
+    pub reserved_rollback_move_count: i64,
     pub created_at: Timestamp,
     pub created_by: Option<UserId>,
     pub changed_at: Option<Timestamp>,

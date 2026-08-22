@@ -43,3 +43,119 @@ groups:
         annotations:
           summary: Wareboxes API database pool has no idle connections
           runbook: docs/operations/telemetry-alerts.md#database-pool-saturation
+
+      - alert: WareboxesTenantCellMoveMetricsUnavailable
+        expr: |
+          min by (job) (wareboxes_tenant_cell_move_metrics_collection_success) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Governed tenant-cell move metrics cannot be collected
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-metrics-unavailable
+
+      - alert: WareboxesTenantWriteFenceStateMismatch
+        expr: |
+          max by (job) (wareboxes_tenant_write_fence_state_mismatches) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A governed tenant-cell move and its write-fence state disagree
+          runbook: docs/operations/telemetry-alerts.md#tenant-write-fence-state-mismatch
+
+      - alert: WareboxesTenantCellMoveStuck
+        expr: |
+          max by (job) (wareboxes_tenant_cell_move_oldest_active_age_seconds) > 21600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: A governed tenant-cell move has not recorded a revision for over six hours
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-stuck
+
+      - alert: WareboxesTenantCellMoveCopyReplayLag
+        expr: |
+          max by (job) (wareboxes_tenant_cell_move_max_copy_replay_lag_bytes) > 1073741824
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A governed tenant-cell move has sustained over one GiB of copy replay lag
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-copy-replay-lag
+
+      - alert: WareboxesTenantCellMoveOutboxLag
+        expr: |
+          max by (job) (wareboxes_tenant_cell_move_oldest_unpublished_outbox_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A tenant-cell-move outbox event has remained unpublished for over five minutes
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-outbox-lag
+
+      - alert: WareboxesActiveDataCellCapacityExhausted
+        expr: |
+          max by (job) (wareboxes_data_cells_exhausted_active) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: An active shared data cell has no unreserved tenant placement capacity
+          runbook: docs/operations/telemetry-alerts.md#active-data-cell-capacity-exhausted
+
+      - alert: WareboxesTenantCellMoveValidationPending
+        expr: |
+          max by (job) (wareboxes_tenant_cell_moves_awaiting_validation) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: A write-frozen tenant-cell move is still awaiting final validation
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-validation-pending
+
+      - alert: WareboxesTenantWriteFenceProlonged
+        expr: |
+          max by (job) (wareboxes_tenant_write_fence_max_age_seconds) > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A tenant write fence has remained active for over fifteen minutes
+          runbook: docs/operations/telemetry-alerts.md#tenant-write-fence-prolonged
+
+      - alert: WareboxesTenantCellMoveVerificationPending
+        expr: |
+          max by (job) (wareboxes_tenant_cell_moves_awaiting_post_cutover_verification) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: A cut-over tenant-cell move is still awaiting verification
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-verification-pending
+
+      - alert: WareboxesTenantCellMoveValidationRejected
+        expr: |
+          sum by (job) (increase(wareboxes_tenant_cell_move_command_rejections_total{command="validate"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: An authorized tenant-cell-move validation command was rejected
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-validation-rejected
+
+      - alert: WareboxesTenantCellMoveCutoverRejected
+        expr: |
+          sum by (job) (increase(wareboxes_tenant_cell_move_command_rejections_total{command="cutover"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: An authorized tenant-cell-move cutover command was rejected
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-cutover-rejected
+
+      - alert: WareboxesTenantCellMoveRollbackRecorded
+        expr: |
+          max by (job) (increase(wareboxes_tenant_cell_move_outcomes_total{outcome="rolled_back"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A governed tenant-cell move rolled back to its source cell
+          runbook: docs/operations/telemetry-alerts.md#tenant-cell-move-rollback-recorded

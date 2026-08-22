@@ -59,6 +59,7 @@ pub(crate) mod shipping_queue;
 mod slotting;
 mod storage_zones;
 pub(crate) mod support_access;
+pub(crate) mod tenant_cell_moves;
 pub(crate) mod tenant_lifecycle;
 mod transfer_orders;
 mod value_added_work;
@@ -136,6 +137,58 @@ pub fn router() -> Router<AppState> {
         .route(
             "/platform/data-cells/{data_cell_id}/status-changes",
             post(data_cells::change_status),
+        )
+        .route(
+            "/platform/tenant-cell-moves",
+            get(tenant_cell_moves::list),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}",
+            get(tenant_cell_moves::get),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/events",
+            get(tenant_cell_moves::events),
+        )
+        .route(
+            "/platform/tenants/{tenant_id}/cell-moves",
+            post(tenant_cell_moves::plan),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/copy-starts",
+            post(tenant_cell_moves::start_copy),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/checkpoints",
+            post(tenant_cell_moves::checkpoint),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/write-freezes",
+            post(tenant_cell_moves::freeze),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/validations",
+            post(tenant_cell_moves::validate),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/cutovers",
+            post(tenant_cell_moves::cutover),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/cutover-verifications",
+            post(tenant_cell_moves::verify_cutover),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/completions",
+            post(tenant_cell_moves::complete),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/rollbacks",
+            post(tenant_cell_moves::rollback),
+        )
+        .route(
+            "/platform/tenant-cell-moves/{tenant_cell_move_id}/cancellations",
+            post(tenant_cell_moves::cancel),
         )
         .route("/platform/tenants/{tenant_id}", get(tenant_lifecycle::get))
         .route(

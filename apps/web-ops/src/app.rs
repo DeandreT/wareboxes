@@ -46,6 +46,7 @@ use crate::shipping::ShippingWorkspace;
 use crate::slotting::SlottingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::support_access::SupportAccessWorkspace;
+use crate::tenant_cell_moves::TenantCellMovesWorkspace;
 use crate::tenant_lifecycle::TenantLifecycleWorkspace;
 use crate::toast::ToastProvider;
 use crate::transfer_orders::TransferOrdersWorkspace;
@@ -237,6 +238,7 @@ pub(crate) enum Section {
     Automation,
     ServiceAccounts,
     FleetCells,
+    CellMoves,
     TenantLifecycle,
     SupportAccess,
     Access,
@@ -330,6 +332,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/automation/workspace.css"/>
                 <link rel="stylesheet" href="/service-accounts/workspace.css"/>
                 <link rel="stylesheet" href="/fleet-cells/workspace.css"/>
+                <link rel="stylesheet" href="/cell-moves/workspace.css"/>
                 <link rel="stylesheet" href="/tenant-lifecycle/workspace.css"/>
                 <link rel="stylesheet" href="/support-access/workspace.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
@@ -404,6 +407,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("automation") view=AutomationPage/>
                     <Route path=(StaticSegment("administration"), StaticSegment("service-accounts")) view=ServiceAccountsPage/>
                     <Route path=(StaticSegment("platform"), StaticSegment("data-cells")) view=FleetCellsPage/>
+                    <Route path=(StaticSegment("platform"), StaticSegment("cell-moves")) view=CellMovesPage/>
                     <Route path=(StaticSegment("platform"), StaticSegment("tenants")) view=TenantLifecyclePage/>
                     <Route path=(StaticSegment("platform"), StaticSegment("support-access")) view=SupportAccessPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
@@ -891,6 +895,7 @@ async fn load_workspace(
                 .await?,
             );
         }
+        Section::CellMoves if session.is_platform_administrator => {}
         Section::TenantLifecycle if session.is_platform_administrator => {
             data.tenant_lifecycle_page = Some(
                 api::tenant_lifecycle_page(
@@ -977,6 +982,7 @@ async fn load_workspace(
         | Section::Automation
         | Section::ServiceAccounts
         | Section::FleetCells
+        | Section::CellMoves
         | Section::TenantLifecycle
         | Section::SupportAccess
         | Section::Administration(_) => {}
@@ -1127,6 +1133,11 @@ fn ServiceAccountsPage() -> impl IntoView {
 #[component]
 fn FleetCellsPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::FleetCells/> }
+}
+
+#[component]
+fn CellMovesPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::CellMoves/> }
 }
 
 #[component]
@@ -1451,6 +1462,14 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             Section::FleetCells if session.is_platform_administrator => view! {
                 <FleetCellsWorkspace
                     initial_page=data.data_cell_page
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::CellMoves if session.is_platform_administrator => view! {
+                <TenantCellMovesWorkspace
+                    current_user_id=session.user.id
+                    current_tenant_id=session.active_tenant.tenant_id.get()
                     on_unauthorized=session_expired_callback()
                 />
             }

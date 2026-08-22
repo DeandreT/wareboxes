@@ -74,6 +74,14 @@ pub use data_cells::{
     change_data_cell_status, data_cell, data_cell_events, data_cells, reconfigure_data_cell,
     register_data_cell,
 };
+mod tenant_cell_moves;
+pub use tenant_cell_moves::{
+    cancel_tenant_cell_move, checkpoint_tenant_cell_move, complete_tenant_cell_move,
+    cutover_tenant_cell_move, freeze_tenant_cell_move, plan_tenant_cell_move,
+    rollback_tenant_cell_move, start_tenant_cell_move_copy, tenant_cell_move,
+    tenant_cell_move_events, tenant_cell_moves, validate_tenant_cell_move,
+    verify_tenant_cell_move_cutover,
+};
 mod customer_return;
 pub use customer_return::{
     cancel_customer_return, create_customer_return, customer_return_detail, customer_returns,
@@ -239,6 +247,24 @@ pub struct ApiError {
     pub ambiguous_outcome: bool,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestKind {
+    Read,
+    Command,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl RequestKind {
+    const fn ambiguous_without_response(self) -> bool {
+        matches!(self, Self::Command)
+    }
+
+    const fn ambiguous_http_status(self, status: u16) -> bool {
+        matches!(self, Self::Command) && matches!(status, 500..=599)
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub type BrowserUploadFile = web_sys::File;
 
@@ -355,7 +381,7 @@ mod browser {
         ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
         ReleaseOrderResponse, RemovePackedContentRequest, RemovePackedContentResponse,
         ReopenCartonRequest, ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-        ReplenishmentWorkCancellationResponse, RetireReplenishmentPolicyRequest,
+        ReplenishmentWorkCancellationResponse, RequestKind, RetireReplenishmentPolicyRequest,
         RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
         ReversePickConfirmationResponse, StreamOrderRequest, StreamOrderResponse,
         VoidCartonRequest, VoidCartonResponse, WebSessionContext,
@@ -376,7 +402,7 @@ mod browser {
                 unauthorized: false,
                 ambiguous_outcome: false,
             })?;
-        decode(request.send().await).await
+        decode(request.send().await, RequestKind::Command).await
     }
 
     pub async fn select_tenant(tenant_id: i64) -> Result<WebSessionContext, ApiError> {
@@ -387,7 +413,7 @@ mod browser {
                 unauthorized: false,
                 ambiguous_outcome: false,
             })?;
-        decode(request.send().await).await
+        decode(request.send().await, RequestKind::Command).await
     }
 
     pub async fn logout() {
@@ -659,7 +685,7 @@ mod browser {
                 unauthorized: false,
                 ambiguous_outcome: false,
             })?;
-        decode(request.send().await).await
+        decode(request.send().await, RequestKind::Command).await
     }
 
     pub async fn upload_load_file(
@@ -691,7 +717,7 @@ mod browser {
                 unauthorized: false,
                 ambiguous_outcome: false,
             })?;
-        decode(request.send().await).await
+        decode(request.send().await, RequestKind::Command).await
     }
 
     pub async fn internal_post_idempotent<TRequest, TResponse>(
@@ -993,7 +1019,7 @@ mod browser {
     }
 
     pub(super) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
-        decode(Request::get(&url(path)).send().await).await
+        decode(Request::get(&url(path)).send().await, RequestKind::Read).await
     }
 
     pub(super) async fn post<TRequest, TResponse>(
@@ -1013,23 +1039,24 @@ mod browser {
                 unauthorized: false,
                 ambiguous_outcome: false,
             })?;
-        decode(request.send().await).await
+        decode(request.send().await, RequestKind::Command).await
     }
 
     async fn decode<T: DeserializeOwned>(
         response: Result<Response, gloo_net::Error>,
+        request_kind: RequestKind,
     ) -> Result<T, ApiError> {
         let response = response.map_err(|error| ApiError {
             message: format!("Wareboxes could not reach the server: {error}"),
             unauthorized: false,
-            ambiguous_outcome: true,
+            ambiguous_outcome: request_kind.ambiguous_without_response(),
         })?;
         let status = response.status();
         if (200..300).contains(&status) {
             return response.json::<T>().await.map_err(|error| ApiError {
                 message: format!("The server returned an unreadable response: {error}"),
                 unauthorized: false,
-                ambiguous_outcome: true,
+                ambiguous_outcome: request_kind.ambiguous_without_response(),
             });
         }
 
@@ -1048,7 +1075,7 @@ mod browser {
         Err(ApiError {
             message,
             unauthorized,
-            ambiguous_outcome: false,
+            ambiguous_outcome: request_kind.ambiguous_http_status(status),
         })
     }
 
@@ -1820,6 +1847,25 @@ const fn replenishment_work_sort_direction_wire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_server_errors_are_ambiguous_but_definite_client_errors_are_not() {
+        for status in 500..=599 {
+            assert!(RequestKind::Command.ambiguous_http_status(status));
+        }
+        for status in 400..=499 {
+            assert!(!RequestKind::Command.ambiguous_http_status(status));
+        }
+        assert!(RequestKind::Command.ambiguous_without_response());
+    }
+
+    #[test]
+    fn read_failures_never_imply_an_ambiguous_command_outcome() {
+        assert!(!RequestKind::Read.ambiguous_without_response());
+        for status in [400, 404, 500, 502, 503, 504, 599] {
+            assert!(!RequestKind::Read.ambiguous_http_status(status));
+        }
+    }
 
     #[test]
     fn replenishment_policy_cursor_is_encoded_and_filters_are_stable() {

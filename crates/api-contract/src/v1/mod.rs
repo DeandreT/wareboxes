@@ -62,6 +62,7 @@ mod shipping_queue;
 mod slotting;
 mod storage_zone;
 mod support_access;
+mod tenant_cell_move;
 mod tenant_lifecycle;
 mod transfer_order;
 mod value_added_work;
@@ -505,6 +506,23 @@ pub use support_access::{
     SupportAccessEventResponse, SupportAccessOptionsRequest, SupportAccessOptionsResponse,
     SupportAccessPage, SupportAccessPageRequest, SupportAccessPolicyRequest,
     SupportAccessResourceOptionResponse, SupportAccessResponse, SupportAccessStatus,
+};
+pub use tenant_cell_move::{
+    CancelTenantCellMoveRequest, CheckpointTenantCellMoveRequest, CompleteTenantCellMoveRequest,
+    CutoverTenantCellMoveRequest, FreezeTenantCellMoveRequest, PlanTenantCellMoveRequest,
+    RollbackTenantCellMoveRequest, StartTenantCellMoveCopyRequest, TenantCellMoveAction,
+    TenantCellMoveActionEligibilityResponse, TenantCellMoveBlocker,
+    TenantCellMoveCheckpointEvidence, TenantCellMoveCheckpointResponse,
+    TenantCellMoveCutoverVerificationEvidence, TenantCellMoveCutoverVerificationResponse,
+    TenantCellMoveDataCellSummaryResponse, TenantCellMoveEventAction, TenantCellMoveEventPage,
+    TenantCellMoveEventPageRequest, TenantCellMoveEventResponse, TenantCellMovePage,
+    TenantCellMovePageRequest, TenantCellMoveResponse, TenantCellMoveRollbackVerificationEvidence,
+    TenantCellMoveRollbackVerificationResponse, TenantCellMoveStatus,
+    TenantCellMoveTenantSummaryResponse, TenantCellMoveValidationEvidence,
+    TenantCellMoveValidationResponse, ValidateTenantCellMoveRequest,
+    VerifyTenantCellMoveCutoverRequest, MAX_TENANT_CELL_MOVE_COPY_REFERENCE_LENGTH,
+    MAX_TENANT_CELL_MOVE_REASON_LENGTH, MAX_TENANT_CELL_MOVE_ROUTING_REFERENCE_LENGTH,
+    MAX_TENANT_CELL_MOVE_TOOL_VERSION_LENGTH,
 };
 pub use tenant_lifecycle::{
     ChangeTenantStatusRequest, CreateTenantRequest, TenantLifecycleEventPage,

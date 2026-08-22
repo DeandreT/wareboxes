@@ -1220,6 +1220,30 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'tenant_cell_placement_events',
                     'tenant_cell_placement_events_platform_isolation'
+                ),
+                (
+                    'tenant_cell_moves',
+                    'tenant_cell_moves_platform_isolation'
+                ),
+                (
+                    'tenant_cell_move_validations',
+                    'tenant_cell_move_validations_platform_isolation'
+                ),
+                (
+                    'tenant_cell_move_cutover_verifications',
+                    'tenant_cell_move_cutover_verifications_platform_isolation'
+                ),
+                (
+                    'tenant_cell_move_rollback_verifications',
+                    'tenant_cell_move_rollback_verifications_platform_isolation'
+                ),
+                (
+                    'tenant_cell_move_events',
+                    'tenant_cell_move_events_platform_isolation'
+                ),
+                (
+                    'tenant_write_fences',
+                    'tenant_write_fences_control_isolation'
                 )
         ),
         expected_global_platform_policy(table_name, policy_name) AS (
@@ -1481,6 +1505,38 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                           AND pg_get_expr(policy.polwithcheck,policy.polrelid)
                             LIKE '%platform_actor_is_administrator%'
                       )
+               ) AND NOT EXISTS (
+                   SELECT 1 FROM tenant_table guarded_table
+                   WHERE guarded_table.table_name NOT IN (
+                       'command_idempotency_records','outbox_event_keys','outbox_events',
+                       'outbox_aggregate_sequences','outbox_delivery_attempts',
+                       'outbox_delivery_attempt_results','outbox_dead_letter_replays',
+                       'outbox_dead_letter_discards','service_accounts',
+                       'service_account_credentials','service_account_events',
+                       'inventory_reconciliation_runs','inventory_reconciliation_state',
+                       'tenant_lifecycle_events',
+                       'support_access_grants','support_access_facilities',
+                       'support_access_inventory_owners','support_access_permissions',
+                       'support_access_events','tenant_cell_placements',
+                       'tenant_cell_placement_events','tenant_cell_moves',
+                       'tenant_cell_move_validations',
+                       'tenant_cell_move_cutover_verifications',
+                       'tenant_cell_move_rollback_verifications',
+                       'tenant_cell_move_events','tenant_write_fences'
+                   ) AND NOT EXISTS (
+                       SELECT 1 FROM pg_trigger write_guard
+                       JOIN pg_proc guard_function
+                         ON guard_function.oid=write_guard.tgfoid
+                       WHERE write_guard.tgrelid=guarded_table.oid
+                         AND NOT write_guard.tgisinternal
+                         AND write_guard.tgenabled<>'D'
+                         AND guard_function.proname='enforce_tenant_cell_write_fence'
+                         AND (write_guard.tgtype & 1)=0
+                         AND (write_guard.tgtype & 2)=2
+                         AND (write_guard.tgtype & 4)=4
+                         AND (write_guard.tgtype & 8)=8
+                         AND (write_guard.tgtype & 16)=16
+                   )
                )) AS tenant_policy_contract_valid,
                EXISTS (
                    SELECT 1

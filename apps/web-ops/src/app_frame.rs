@@ -305,6 +305,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                             active=section == Section::FleetCells
                         />
                         <NavItem
+                            href="/platform/cell-moves"
+                            label="Cell moves"
+                            icon=UiIcon::Orchestration
+                            active=section == Section::CellMoves
+                        />
+                        <NavItem
                             href="/platform/tenants"
                             label="Tenant lifecycle"
                             icon=UiIcon::Building
